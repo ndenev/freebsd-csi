@@ -1,0 +1,4 @@
+// Placeholder - full content will be added in Task 2
+syntax = "proto3";
+
+package ctld_agent;
