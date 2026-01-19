@@ -1,4 +1,97 @@
-// Placeholder - full content will be added in Task 2
 syntax = "proto3";
 
-package ctld_agent;
+package ctld_agent.v1;
+
+// Volume represents a ZFS dataset exported via iSCSI or NVMeoF
+message Volume {
+    string id = 1;
+    string name = 2;
+    int64 size_bytes = 3;
+    string zfs_dataset = 4;
+    string export_type = 5;  // "iscsi" or "nvmeof"
+    string target_name = 6;  // iSCSI IQN or NVMeoF NQN
+    int32 lun_id = 7;
+    map<string, string> parameters = 8;
+}
+
+message CreateVolumeRequest {
+    string name = 1;
+    int64 size_bytes = 2;
+    string export_type = 3;
+    map<string, string> parameters = 4;
+}
+
+message CreateVolumeResponse {
+    Volume volume = 1;
+}
+
+message DeleteVolumeRequest {
+    string volume_id = 1;
+}
+
+message DeleteVolumeResponse {}
+
+message ExpandVolumeRequest {
+    string volume_id = 1;
+    int64 new_size_bytes = 2;
+}
+
+message ExpandVolumeResponse {
+    int64 size_bytes = 1;
+}
+
+message ListVolumesRequest {
+    int32 max_entries = 1;
+    string starting_token = 2;
+}
+
+message ListVolumesResponse {
+    repeated Volume volumes = 1;
+    string next_token = 2;
+}
+
+message GetVolumeRequest {
+    string volume_id = 1;
+}
+
+message GetVolumeResponse {
+    Volume volume = 1;
+}
+
+// Snapshot operations
+message Snapshot {
+    string id = 1;
+    string source_volume_id = 2;
+    string name = 3;
+    int64 creation_time = 4;
+    int64 size_bytes = 5;
+}
+
+message CreateSnapshotRequest {
+    string source_volume_id = 1;
+    string name = 2;
+}
+
+message CreateSnapshotResponse {
+    Snapshot snapshot = 1;
+}
+
+message DeleteSnapshotRequest {
+    string snapshot_id = 1;
+}
+
+message DeleteSnapshotResponse {}
+
+// The storage agent service
+service StorageAgent {
+    // Volume operations
+    rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
+    rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
+    rpc ExpandVolume(ExpandVolumeRequest) returns (ExpandVolumeResponse);
+    rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
+    rpc GetVolume(GetVolumeRequest) returns (GetVolumeResponse);
+
+    // Snapshot operations
+    rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+    rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+}
