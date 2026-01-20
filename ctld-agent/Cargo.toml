@@ -16,4 +16,4 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-prost-build = "0.14"
