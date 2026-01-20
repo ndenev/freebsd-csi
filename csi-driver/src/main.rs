@@ -17,8 +17,12 @@ pub mod agent {
     tonic::include_proto!("ctld_agent.v1");
 }
 
+mod agent_client;
+mod controller;
 mod identity;
 
+pub use agent_client::AgentClient;
+pub use controller::ControllerService;
 pub use identity::{IdentityService, DRIVER_NAME, DRIVER_VERSION};
 
 /// CLI arguments for the CSI driver
