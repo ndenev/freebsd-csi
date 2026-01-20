@@ -96,12 +96,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Starting FreeBSD CSI Driver"
     );
 
-    // TODO: Implement CSI services
-    // - Identity Service (required)
-    // - Controller Service (if controller mode)
-    // - Node Service (if node mode)
+    // Parse CSI endpoint
+    let endpoint = args.endpoint.clone();
 
-    info!("CSI Driver placeholder - services not yet implemented");
+    // Create services and build gRPC server
+    use tonic::transport::Server;
+    use csi::controller_server::ControllerServer;
+    use csi::identity_server::IdentityServer;
+    use csi::node_server::NodeServer;
+
+    let identity = IdentityService::new();
+    let mut server = Server::builder();
+    let mut router = server.add_service(IdentityServer::new(identity));
+
+    if args.controller {
+        info!("Enabling Controller service");
+        let controller = ControllerService::new(args.agent_endpoint.clone());
+        router = router.add_service(ControllerServer::new(controller));
+    }
+
+    if args.node {
+        info!("Enabling Node service");
+        let node_svc = NodeService::new(node_id.clone());
+        router = router.add_service(NodeServer::new(node_svc));
+    }
+
+    // Start server based on endpoint type
+    if endpoint.starts_with("unix://") {
+        let path = endpoint.strip_prefix("unix://").unwrap();
+
+        // Create parent directory if needed
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Remove existing socket file
+        let _ = std::fs::remove_file(path);
+
+        // Use tokio UnixListener for Unix sockets
+        use tokio::net::UnixListener;
+        use tokio_stream::wrappers::UnixListenerStream;
+
+        let listener = UnixListener::bind(path)?;
+        let stream = UnixListenerStream::new(listener);
+
+        info!("CSI driver listening on {}", endpoint);
+        router.serve_with_incoming(stream).await?;
+    } else {
+        // TCP endpoint
+        let addr = endpoint.parse()?;
+        info!("CSI driver listening on {}", addr);
+        router.serve(addr).await?;
+    }
 
     Ok(())
 }

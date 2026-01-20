@@ -18,6 +18,7 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 uuid.workspace = true
 hostname.workspace = true
+tokio-stream = "0.1"
 
 [build-dependencies]
 tonic-prost-build = "0.14"
