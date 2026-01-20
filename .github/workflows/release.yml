@@ -55,6 +55,7 @@ jobs:
         uses: arduino/setup-protoc@v3
         with:
           version: "25.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build release binary
         run: cargo build -p csi-driver --release
@@ -133,6 +134,7 @@ jobs:
         uses: arduino/setup-protoc@v3
         with:
           version: "25.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download FreeBSD sysroot
         env:
