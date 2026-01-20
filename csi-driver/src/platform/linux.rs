@@ -132,53 +132,49 @@ pub fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
         if line.contains(target_iqn) {
             found_target = true;
         }
-        if found_target && line.contains("Attached scsi disk") {
+        if found_target
+            && line.contains("Attached scsi disk")
+            && let Some(device) = line.split_whitespace().nth(3)
+            && device.starts_with("sd")
+        {
             // Format: "Attached scsi disk sda ..."
-            if let Some(device) = line.split_whitespace().nth(3) {
-                if device.starts_with("sd") {
-                    return Ok(format!("/dev/{}", device));
-                }
-            }
+            return Ok(format!("/dev/{}", device));
         }
     }
 
     // Try /sys/class/iscsi_session approach
     let iscsi_sessions = Path::new("/sys/class/iscsi_session");
-    if iscsi_sessions.exists() {
-        if let Ok(entries) = fs::read_dir(iscsi_sessions) {
-            for entry in entries.flatten() {
-                let target_path = entry.path().join("targetname");
-                if let Ok(targetname) = fs::read_to_string(&target_path) {
-                    if targetname.trim() == target_iqn {
-                        // Found the session, now find the device
-                        let session_name = entry.file_name();
-                        let device_path = Path::new("/sys/class/iscsi_session")
-                            .join(&session_name)
-                            .join("device/target*/*/block/*");
+    if iscsi_sessions.exists()
+        && let Ok(entries) = fs::read_dir(iscsi_sessions)
+    {
+        for entry in entries.flatten() {
+            let target_path = entry.path().join("targetname");
+            if let Ok(targetname) = fs::read_to_string(&target_path)
+                && targetname.trim() == target_iqn
+            {
+                // Found the session, now find the device
+                let session_name = entry.file_name();
+                let _device_path = Path::new("/sys/class/iscsi_session")
+                    .join(&session_name)
+                    .join("device/target*/*/block/*");
 
-                        // Use glob-like search for device
-                        let session_path = entry.path().join("device");
-                        if let Ok(device_entries) = fs::read_dir(&session_path) {
-                            for dev_entry in device_entries.flatten() {
-                                let name = dev_entry.file_name();
-                                if name.to_string_lossy().starts_with("target") {
-                                    // Look for block devices under this target
-                                    if let Ok(target_contents) = fs::read_dir(dev_entry.path()) {
-                                        for scsi_entry in target_contents.flatten() {
-                                            let block_path = scsi_entry.path().join("block");
-                                            if block_path.exists() {
-                                                if let Ok(block_entries) = fs::read_dir(&block_path)
-                                                {
-                                                    for block_entry in block_entries.flatten() {
-                                                        let dev_name = block_entry.file_name();
-                                                        return Ok(format!(
-                                                            "/dev/{}",
-                                                            dev_name.to_string_lossy()
-                                                        ));
-                                                    }
-                                                }
-                                            }
-                                        }
+                // Use glob-like search for device
+                let session_path = entry.path().join("device");
+                if let Ok(device_entries) = fs::read_dir(&session_path) {
+                    for dev_entry in device_entries.flatten() {
+                        let name = dev_entry.file_name();
+                        if name.to_string_lossy().starts_with("target")
+                            && let Ok(target_contents) = fs::read_dir(dev_entry.path())
+                        {
+                            // Look for block devices under this target
+                            for scsi_entry in target_contents.flatten() {
+                                let block_path = scsi_entry.path().join("block");
+                                if block_path.exists()
+                                    && let Ok(block_entries) = fs::read_dir(&block_path)
+                                {
+                                    for block_entry in block_entries.flatten() {
+                                        let dev_name = block_entry.file_name();
+                                        return Ok(format!("/dev/{}", dev_name.to_string_lossy()));
                                     }
                                 }
                             }
@@ -287,19 +283,19 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
 
     // Simple parsing - look for device paths
     // In production, we'd use serde_json to properly parse
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-        if let Some(devices) = json.get("Devices").and_then(|d| d.as_array()) {
-            for device in devices {
-                if let Some(dev_path) = device.get("DevicePath").and_then(|p| p.as_str()) {
-                    // Check if this device is associated with our NQN
-                    // The NQN might be in the SubsystemNQN or ModelNumber field
-                    let subsys_nqn = device
-                        .get("SubsystemNQN")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("");
-                    if subsys_nqn == target_nqn || subsys_nqn.contains(target_nqn) {
-                        return Ok(dev_path.to_string());
-                    }
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout)
+        && let Some(devices) = json.get("Devices").and_then(|d| d.as_array())
+    {
+        for device in devices {
+            if let Some(dev_path) = device.get("DevicePath").and_then(|p| p.as_str()) {
+                // Check if this device is associated with our NQN
+                // The NQN might be in the SubsystemNQN or ModelNumber field
+                let subsys_nqn = device
+                    .get("SubsystemNQN")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
+                if subsys_nqn == target_nqn || subsys_nqn.contains(target_nqn) {
+                    return Ok(dev_path.to_string());
                 }
             }
         }
@@ -307,21 +303,21 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
 
     // Fallback: Check /sys/class/nvme-fabrics/
     let nvme_subsys = Path::new("/sys/class/nvme-subsystem");
-    if nvme_subsys.exists() {
-        if let Ok(entries) = fs::read_dir(nvme_subsys) {
-            for entry in entries.flatten() {
-                let nqn_path = entry.path().join("subsysnqn");
-                if let Ok(nqn) = fs::read_to_string(&nqn_path) {
-                    if nqn.trim() == target_nqn {
-                        // Found the subsystem, now find the namespace device
-                        if let Ok(ns_entries) = fs::read_dir(entry.path()) {
-                            for ns_entry in ns_entries.flatten() {
-                                let name = ns_entry.file_name();
-                                let name_str = name.to_string_lossy();
-                                if name_str.starts_with("nvme") && name_str.contains("n") {
-                                    return Ok(format!("/dev/{}", name_str));
-                                }
-                            }
+    if nvme_subsys.exists()
+        && let Ok(entries) = fs::read_dir(nvme_subsys)
+    {
+        for entry in entries.flatten() {
+            let nqn_path = entry.path().join("subsysnqn");
+            if let Ok(nqn) = fs::read_to_string(&nqn_path)
+                && nqn.trim() == target_nqn
+            {
+                // Found the subsystem, now find the namespace device
+                if let Ok(ns_entries) = fs::read_dir(entry.path()) {
+                    for ns_entry in ns_entries.flatten() {
+                        let name = ns_entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if name_str.starts_with("nvme") && name_str.contains("n") {
+                            return Ok(format!("/dev/{}", name_str));
                         }
                     }
                 }
@@ -337,10 +333,10 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
-        if line.starts_with("/dev/nvme") {
-            if let Some(device) = line.split_whitespace().next() {
-                return Ok(device.to_string());
-            }
+        if line.starts_with("/dev/nvme")
+            && let Some(device) = line.split_whitespace().next()
+        {
+            return Ok(device.to_string());
         }
     }
 
