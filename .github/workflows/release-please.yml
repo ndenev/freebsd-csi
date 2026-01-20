@@ -36,11 +36,5 @@ jobs:
           echo "Tag: ${TAG_NAME}"
           echo "Version: ${VERSION}"
 
-  # Trigger the build/publish workflow when a release is created
-  trigger-release-build:
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created }}
-    uses: ./.github/workflows/release.yml
-    with:
-      tag: ${{ needs.release-please.outputs.tag_name }}
-    secrets: inherit
+  # Note: The release workflow is triggered automatically by the tag push
+  # that release-please creates when the PR is merged. No need to call it here.
