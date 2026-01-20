@@ -48,15 +48,17 @@ load_rc_config $name
 pidfile="/var/run/${name}.pid"
 command="/usr/local/sbin/ctld-agent"
 
-# ZFS parent dataset is required
-required_vars="ctld_agent_zfs_parent"
-
 start_precmd="${name}_prestart"
 start_cmd="${name}_start"
 stop_postcmd="${name}_poststop"
 
 ctld_agent_prestart()
 {
+    # ZFS parent dataset is required
+    if [ -z "${ctld_agent_zfs_parent}" ]; then
+        err 1 "ctld_agent_zfs_parent is not set in rc.conf"
+    fi
+
     # Verify ZFS parent dataset exists
     if ! zfs list -H -o name "${ctld_agent_zfs_parent}" > /dev/null 2>&1; then
         err 1 "ZFS dataset ${ctld_agent_zfs_parent} does not exist"
