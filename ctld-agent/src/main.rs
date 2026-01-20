@@ -84,12 +84,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize iSCSI manager with UCL config support
     let portal_group = PortalGroup::new(args.portal_group, args.portal_group_name.clone());
-    let iscsi_manager = IscsiManager::new_with_ucl(
+    let mut iscsi_manager = IscsiManager::new_with_ucl(
         args.base_iqn.clone(),
         portal_group,
         args.ctl_config.to_string_lossy().to_string(),
         args.auth_group.clone(),
     )?;
+
+    // Load existing targets from UCL config (startup recovery)
+    if let Err(e) = iscsi_manager.load_config() {
+        tracing::warn!("Failed to load existing targets from UCL config: {}", e);
+        // Continue anyway - service can still operate
+    }
+
     let iscsi = Arc::new(RwLock::new(iscsi_manager));
 
     // Initialize NVMeoF manager

@@ -3,6 +3,8 @@ use std::process::Command;
 use std::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 
+use libucl::Parser;
+
 use super::config::{IscsiTarget, Lun, PortalGroup};
 use super::error::{CtlError, Result};
 use super::ucl_config::{IscsiTargetUcl, LunUcl, UclConfigManager};
@@ -147,13 +149,135 @@ impl IscsiManager {
         })
     }
 
-    /// Load existing configuration from ctld
+    /// Load existing configuration from ctld UCL file
+    ///
+    /// Parses the UCL config file and populates the in-memory target cache
+    /// with any targets that match our base IQN prefix. This allows the agent
+    /// to recover state after restart without losing track of CSI-managed targets.
     #[instrument(skip(self))]
     pub fn load_config(&mut self) -> Result<()> {
-        // Parse existing ctl.conf to populate targets map
-        // For now, start with empty state - full implementation would parse the config
-        tracing::debug!("Loading CTL configuration");
+        let ucl_manager = match &self.ucl_manager {
+            Some(m) => m,
+            None => {
+                debug!("No UCL manager configured, skipping config load");
+                return Ok(());
+            }
+        };
+
+        let config_path = &ucl_manager.config_path;
+        let path = std::path::Path::new(config_path);
+
+        if !path.exists() {
+            debug!("Config file {} does not exist, starting fresh", config_path);
+            return Ok(());
+        }
+
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            CtlError::ConfigError(format!("Failed to read {}: {}", config_path, e))
+        })?;
+
+        // Parse UCL
+        let parser = Parser::new();
+        let doc = parser.parse(&content).map_err(|e| {
+            CtlError::ParseError(format!("Failed to parse {}: {:?}", config_path, e))
+        })?;
+
+        // Convert to JSON and parse with serde_json for easier iteration
+        // libucl's Object only supports iteration for arrays, not objects
+        let json_str = doc.dump();
+        let json: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
+            CtlError::ParseError(format!("Failed to parse JSON output: {}", e))
+        })?;
+
+        let mut loaded_count = 0;
+        let mut targets = self.targets.write().unwrap();
+
+        // Look for targets that match our base IQN prefix
+        // UCL structure (as JSON) with multiple targets:
+        //   { "target": [ { "iqn...": { ... } }, { "iqn...": { ... } } ] }
+        // with single target:
+        //   { "target": { "iqn...": { ... } } }
+        if let Some(target_section) = json.get("target") {
+            // Handle array of targets (multiple targets)
+            if let Some(target_arr) = target_section.as_array() {
+                for target_wrapper in target_arr {
+                    if let Some(target_obj) = target_wrapper.as_object() {
+                        for (iqn, target_config) in target_obj {
+                            if iqn.starts_with(&self.base_iqn) {
+                                if let Some(target) = self.parse_target_from_json(iqn, target_config) {
+                                    let name = iqn.rsplit(':').next().unwrap_or(iqn).to_string();
+                                    targets.insert(name, target);
+                                    loaded_count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Handle single target (object, not array)
+            else if let Some(target_obj) = target_section.as_object() {
+                for (iqn, target_config) in target_obj {
+                    if iqn.starts_with(&self.base_iqn) {
+                        if let Some(target) = self.parse_target_from_json(iqn, target_config) {
+                            let name = iqn.rsplit(':').next().unwrap_or(iqn).to_string();
+                            targets.insert(name, target);
+                            loaded_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("Loaded {} existing targets from UCL config", loaded_count);
         Ok(())
+    }
+
+    /// Parse a target from JSON value (converted from UCL)
+    fn parse_target_from_json(&self, iqn: &str, config: &serde_json::Value) -> Option<IscsiTarget> {
+        let name = iqn.rsplit(':').next()?.to_string();
+        let mut target = IscsiTarget::new(name, iqn.to_string());
+
+        // Parse portal-group tag if present
+        if let Some(pg) = config.get("portal-group").and_then(|v| v.as_str()) {
+            // Extract tag number from "pg0" format
+            if let Some(tag_str) = pg.strip_prefix("pg") {
+                if let Ok(tag) = tag_str.parse::<u32>() {
+                    target = target.with_portal_group(tag);
+                }
+            }
+        }
+
+        // Parse auth-group if present
+        if let Some(ag) = config.get("auth-group").and_then(|v| v.as_str()) {
+            target = target.with_auth_group(ag.to_string());
+        }
+
+        // Parse LUNs - can be either an object with numeric keys or direct lun objects
+        if let Some(lun_section) = config.get("lun") {
+            if let Some(lun_obj) = lun_section.as_object() {
+                for (lun_id_str, lun_config) in lun_obj {
+                    if let Ok(lun_id) = lun_id_str.parse::<u32>() {
+                        if let Some(lun) = self.parse_lun_from_json(lun_id, lun_config) {
+                            target = target.with_lun(lun);
+                        }
+                    }
+                }
+            }
+        }
+
+        Some(target)
+    }
+
+    /// Parse a LUN from JSON value
+    fn parse_lun_from_json(&self, lun_id: u32, config: &serde_json::Value) -> Option<Lun> {
+        let path = config.get("path").and_then(|v| v.as_str())?;
+        let mut lun = Lun::new(lun_id, path.to_string());
+
+        if let Some(bs) = config.get("blocksize").and_then(|v| v.as_i64()) {
+            lun = lun.with_blocksize(bs as u32);
+        }
+
+        Some(lun)
     }
 
     /// Export a ZFS volume as an iSCSI target
@@ -606,5 +730,110 @@ mod tests {
         .unwrap();
 
         assert!(manager.ucl_manager.is_none());
+    }
+
+    #[test]
+    fn test_load_config_missing_file() {
+        let pg = PortalGroup::new(0, "pg0".to_string());
+        let mut manager = IscsiManager::new_with_ucl(
+            "iqn.2024-01.org.freebsd.csi".to_string(),
+            pg,
+            "/nonexistent/path/test.ucl".to_string(),
+            "ag0".to_string(),
+        )
+        .unwrap();
+
+        // Should not error on missing file - just return Ok with empty targets
+        assert!(manager.load_config().is_ok());
+        assert!(manager.list_targets().is_empty());
+    }
+
+    #[test]
+    fn test_load_config_no_ucl_manager() {
+        let pg = PortalGroup::new(1, "pg1".to_string());
+        let mut manager = IscsiManager::new(
+            "iqn.2024-01.org.freebsd.csi".to_string(),
+            pg,
+        )
+        .unwrap();
+
+        // Should not error when no UCL manager is configured
+        assert!(manager.load_config().is_ok());
+        assert!(manager.list_targets().is_empty());
+    }
+
+    #[test]
+    fn test_load_config_parses_targets() {
+        use std::io::Write;
+
+        // Create a temp file with UCL content
+        let temp_dir = std::env::temp_dir();
+        let config_path = temp_dir.join("test_ctl_config.ucl");
+
+        let ucl_content = r#"
+target "iqn.2024-01.org.freebsd.csi:vol1" {
+    auth-group = "ag0"
+    portal-group = "pg0"
+    lun 0 {
+        path = "/dev/zvol/tank/csi/vol1"
+        blocksize = 512
+    }
+}
+
+target "iqn.2024-01.org.freebsd.csi:vol2" {
+    auth-group = "ag0"
+    portal-group = "pg1"
+    lun 0 {
+        path = "/dev/zvol/tank/csi/vol2"
+        blocksize = 4096
+    }
+}
+
+target "iqn.2024-01.com.other:external" {
+    auth-group = "ag1"
+    portal-group = "pg1"
+    lun 0 {
+        path = "/dev/zvol/tank/other/vol"
+        blocksize = 512
+    }
+}
+"#;
+
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        file.write_all(ucl_content.as_bytes()).unwrap();
+        drop(file);
+
+        let pg = PortalGroup::new(0, "pg0".to_string());
+        let mut manager = IscsiManager::new_with_ucl(
+            "iqn.2024-01.org.freebsd.csi".to_string(),
+            pg,
+            config_path.to_string_lossy().to_string(),
+            "ag0".to_string(),
+        )
+        .unwrap();
+
+        // Load config
+        assert!(manager.load_config().is_ok());
+
+        // Should have loaded 2 targets (only those matching our base IQN)
+        let targets = manager.list_targets();
+        assert_eq!(targets.len(), 2);
+
+        // Verify we can get specific targets
+        let vol1 = manager.get_target("vol1").unwrap();
+        assert_eq!(vol1.iqn, "iqn.2024-01.org.freebsd.csi:vol1");
+        assert_eq!(vol1.luns.len(), 1);
+        assert_eq!(vol1.luns[0].device_path, "/dev/zvol/tank/csi/vol1");
+        assert_eq!(vol1.luns[0].blocksize, 512);
+
+        let vol2 = manager.get_target("vol2").unwrap();
+        assert_eq!(vol2.iqn, "iqn.2024-01.org.freebsd.csi:vol2");
+        assert_eq!(vol2.luns[0].blocksize, 4096);
+
+        // External target should not be loaded
+        assert!(manager.get_target("external").is_err());
+
+        // Cleanup
+        std::fs::remove_file(&config_path).ok();
     }
 }
