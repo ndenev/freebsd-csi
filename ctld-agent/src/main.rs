@@ -39,6 +39,18 @@ struct Args {
     #[arg(long, default_value = "1")]
     portal_group: u32,
 
+    /// Path to ctld UCL config file
+    #[arg(long, env = "CTL_CONFIG_PATH", default_value = "/etc/ctl.ucl")]
+    ctl_config: PathBuf,
+
+    /// Auth group name for iSCSI targets
+    #[arg(long, env = "CTL_AUTH_GROUP", default_value = "ag0")]
+    auth_group: String,
+
+    /// Portal group name for iSCSI targets (used in UCL config)
+    #[arg(long, env = "CTL_PORTAL_GROUP_NAME", default_value = "pg0")]
+    portal_group_name: String,
+
     /// TLS certificate file (PEM format)
     #[arg(long, env = "TLS_CERT_PATH")]
     tls_cert: Option<PathBuf>,
@@ -62,6 +74,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Base IQN: {}", args.base_iqn);
     info!("Base NQN: {}", args.base_nqn);
     info!("Portal group: {}", args.portal_group);
+    info!("CTL config path: {}", args.ctl_config.display());
+    info!("Auth group: {}", args.auth_group);
+    info!("Portal group name: {}", args.portal_group_name);
 
     // Initialize ZFS manager
     let zfs_manager = ZfsManager::new(args.zfs_parent.clone())?;
