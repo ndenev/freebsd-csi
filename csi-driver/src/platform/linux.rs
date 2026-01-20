@@ -172,11 +172,10 @@ pub fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
                                 let block_path = scsi_entry.path().join("block");
                                 if block_path.exists()
                                     && let Ok(block_entries) = fs::read_dir(&block_path)
+                                    && let Some(block_entry) = block_entries.flatten().next()
                                 {
-                                    for block_entry in block_entries.flatten() {
-                                        let dev_name = block_entry.file_name();
-                                        return Ok(format!("/dev/{}", dev_name.to_string_lossy()));
-                                    }
+                                    let dev_name = block_entry.file_name();
+                                    return Ok(format!("/dev/{}", dev_name.to_string_lossy()));
                                 }
                             }
                         }
