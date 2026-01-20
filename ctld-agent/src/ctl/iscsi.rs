@@ -204,10 +204,13 @@ impl IscsiManager {
                     if let Some(target_obj) = target_wrapper.as_object() {
                         for (iqn, target_config) in target_obj {
                             if iqn.starts_with(&self.base_iqn) {
-                                if let Some(target) = self.parse_target_from_json(iqn, target_config) {
-                                    let name = iqn.rsplit(':').next().unwrap_or(iqn).to_string();
-                                    targets.insert(name, target);
-                                    loaded_count += 1;
+                                match self.parse_target_from_json(iqn, target_config) {
+                                    Some(target) => {
+                                        let name = iqn.rsplit(':').next().unwrap_or(iqn).to_string();
+                                        targets.insert(name, target);
+                                        loaded_count += 1;
+                                    }
+                                    None => warn!("Failed to parse target {} from config, skipping", iqn),
                                 }
                             }
                         }
@@ -218,10 +221,13 @@ impl IscsiManager {
             else if let Some(target_obj) = target_section.as_object() {
                 for (iqn, target_config) in target_obj {
                     if iqn.starts_with(&self.base_iqn) {
-                        if let Some(target) = self.parse_target_from_json(iqn, target_config) {
-                            let name = iqn.rsplit(':').next().unwrap_or(iqn).to_string();
-                            targets.insert(name, target);
-                            loaded_count += 1;
+                        match self.parse_target_from_json(iqn, target_config) {
+                            Some(target) => {
+                                let name = iqn.rsplit(':').next().unwrap_or(iqn).to_string();
+                                targets.insert(name, target);
+                                loaded_count += 1;
+                            }
+                            None => warn!("Failed to parse target {} from config, skipping", iqn),
                         }
                     }
                 }
@@ -274,7 +280,11 @@ impl IscsiManager {
         let mut lun = Lun::new(lun_id, path.to_string());
 
         if let Some(bs) = config.get("blocksize").and_then(|v| v.as_i64()) {
-            lun = lun.with_blocksize(bs as u32);
+            if let Ok(bs_u32) = u32::try_from(bs) {
+                lun = lun.with_blocksize(bs_u32);
+            } else {
+                warn!("Invalid blocksize value {} for LUN {}, using default", bs, lun_id);
+            }
         }
 
         Some(lun)
