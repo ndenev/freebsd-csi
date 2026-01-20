@@ -522,12 +522,12 @@ fn test_grpc_status_codes() {
 #[test]
 fn test_volume_expansion_validation() {
     let volume_id = "vol1";
-    let _current_size: i64 = 10 * 1024 * 1024 * 1024;
+    let current_size: i64 = 10 * 1024 * 1024 * 1024;
     let new_size: i64 = 20 * 1024 * 1024 * 1024;
 
     assert!(!volume_id.is_empty(), "Volume ID required for expansion");
     assert!(new_size > 0, "New size must be positive");
-    // Note: CSI doesn't enforce new_size > current_size, that's controller's job
+    assert!(new_size > current_size, "New size must be larger than current size");
 }
 
 /// Test node expansion requirements

@@ -146,7 +146,10 @@ fn test_unspecified_export_type_rejected() {
 /// Test that valid export types are accepted
 #[test]
 fn test_valid_export_types() {
-    let valid_types = vec![1, 2]; // ISCSI, NVMEOF
+    // Export type values from proto definition:
+    // 1 = EXPORT_TYPE_ISCSI
+    // 2 = EXPORT_TYPE_NVMEOF
+    let valid_types = vec![1, 2];
 
     for t in valid_types {
         assert!(t == 1 || t == 2, "Export type {} should be valid", t);
@@ -241,16 +244,14 @@ fn test_invalid_pagination_token() {
     for token in invalid_tokens {
         let result = token.parse::<usize>();
         // Empty string or invalid values should fail or return default
-        if token.is_empty() {
-            // Empty token should use default (0)
-            assert!(true);
-        } else {
+        if !token.is_empty() {
             assert!(
                 result.is_err() || result.unwrap_or(0) == 0,
                 "Token '{}' should be handled gracefully",
                 token
             );
         }
+        // Empty token is valid (uses default 0), non-empty invalid tokens are handled above
     }
 }
 
@@ -463,7 +464,8 @@ fn test_volume_lifecycle_params() {
     // Create volume params
     let name = "test-vol";
     let size_bytes: i64 = 10 * 1024 * 1024 * 1024; // 10GB
-    let export_type = 1; // ISCSI
+    // Export type: 1 = ISCSI, 2 = NVMEOF (0 = UNSPECIFIED is invalid)
+    let export_type = 1;
 
     // Validate create params
     assert!(!name.is_empty());
