@@ -2,8 +2,8 @@
 # Multi-stage build for minimal runtime image
 
 # Stage 1: Build
-# NOTE: Requires Rust 1.85+ for edition 2024 support
-FROM rust:1.86-slim-bookworm AS builder
+# NOTE: Requires Rust 1.85+ for edition 2024 and let chains support
+FROM rust:1.92-slim-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
