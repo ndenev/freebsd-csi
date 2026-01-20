@@ -66,6 +66,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create the storage service
     let storage_service = StorageService::new(zfs, iscsi, nvmeof);
 
+    // Restore volume metadata from ZFS user properties
+    match storage_service.restore_from_zfs().await {
+        Ok(count) => {
+            if count > 0 {
+                info!("Successfully restored {} volume(s) from ZFS metadata", count);
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to restore volume metadata from ZFS: {}", e);
+            // Continue anyway - service can still operate
+        }
+    }
+
     // Parse the listen address
     let addr = args.listen.parse()?;
 

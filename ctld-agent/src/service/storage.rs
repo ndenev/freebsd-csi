@@ -12,7 +12,7 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument, warn};
 
 use crate::ctl::{IscsiManager, NvmeofManager};
-use crate::zfs::ZfsManager;
+use crate::zfs::{VolumeMetadata as ZfsVolumeMetadata, ZfsManager};
 
 /// Generated protobuf types and service trait
 pub mod proto {
@@ -86,6 +86,56 @@ impl StorageService {
             volumes: Arc::new(RwLock::new(HashMap::new())),
             snapshots: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Restore volume metadata from ZFS user properties on startup
+    pub async fn restore_from_zfs(&self) -> Result<usize, String> {
+        info!("Restoring volume metadata from ZFS user properties");
+
+        let volumes_with_metadata = {
+            let zfs = self.zfs.read().await;
+            zfs.list_volumes_with_metadata()
+                .map_err(|e| format!("failed to list volumes with metadata: {}", e))?
+        };
+
+        let mut restored_count = 0;
+        let mut volumes = self.volumes.write().await;
+
+        for (vol_name, zfs_meta) in volumes_with_metadata {
+            let export_type = match zfs_meta.export_type.as_str() {
+                "ISCSI" => ExportType::Iscsi,
+                "NVMEOF" => ExportType::Nvmeof,
+                _ => {
+                    warn!(
+                        "Unknown export type '{}' for volume '{}', skipping",
+                        zfs_meta.export_type, vol_name
+                    );
+                    continue;
+                }
+            };
+
+            let metadata = VolumeMetadata {
+                id: vol_name.clone(),
+                name: vol_name.clone(),
+                export_type,
+                target_name: zfs_meta.target_name.clone(),
+                lun_id: zfs_meta.lun_id.unwrap_or(0) as i32,
+                parameters: zfs_meta.parameters.clone(),
+            };
+
+            volumes.insert(vol_name.clone(), metadata);
+            restored_count += 1;
+            info!(
+                "Restored volume '{}' (export_type={}, target={})",
+                vol_name, zfs_meta.export_type, zfs_meta.target_name
+            );
+        }
+
+        info!(
+            "Restored {} volume(s) from ZFS user properties",
+            restored_count
+        );
+        Ok(restored_count)
     }
 
     /// Convert ZFS dataset info to proto Volume
@@ -190,6 +240,34 @@ impl StorageAgent for StorageService {
             volumes.insert(req.name.clone(), metadata.clone());
         }
 
+        // Persist metadata to ZFS user property
+        let export_type_str = match export_type {
+            ExportType::Iscsi => "ISCSI",
+            ExportType::Nvmeof => "NVMEOF",
+            ExportType::Unspecified => "UNSPECIFIED",
+        };
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let zfs_metadata = ZfsVolumeMetadata {
+            export_type: export_type_str.to_string(),
+            target_name: target_name.clone(),
+            lun_id: Some(lun_id as u32),
+            namespace_id: None,
+            parameters: req.parameters.clone(),
+            created_at,
+        };
+
+        {
+            let zfs = self.zfs.read().await;
+            if let Err(e) = zfs.set_volume_metadata(&req.name, &zfs_metadata) {
+                warn!("Failed to persist volume metadata to ZFS: {}", e);
+                // Continue anyway - the volume is created, metadata is in memory
+            }
+        }
+
         let volume = self.dataset_to_volume(&dataset, &metadata);
         info!("Created volume: {}", req.name);
 
@@ -238,6 +316,15 @@ impl StorageAgent for StorageService {
             }
             ExportType::Unspecified => {
                 debug!("Volume has no export type, skipping unexport");
+            }
+        }
+
+        // Clear ZFS metadata before deleting (for consistency)
+        {
+            let zfs = self.zfs.read().await;
+            if let Err(e) = zfs.clear_volume_metadata(&metadata.name) {
+                warn!("Failed to clear volume metadata from ZFS: {}", e);
+                // Continue anyway - we're deleting the volume
             }
         }
 
@@ -505,25 +592,19 @@ impl StorageAgent for StorageService {
         let volume_name = parts[0];
         let snap_name = parts[1];
 
-        // Delete ZFS snapshot using zfs destroy command
-        // Note: ZfsManager doesn't have delete_snapshot, use command directly
-        let output = std::process::Command::new("zfs")
-            .args(["destroy", &req.snapshot_id])
-            .output()
-            .map_err(|e| Status::internal(format!("failed to execute zfs destroy: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("does not exist") || stderr.contains("not found") {
-                return Err(Status::not_found(format!(
-                    "snapshot '{}' not found",
-                    req.snapshot_id
-                )));
-            }
-            return Err(Status::internal(format!(
-                "failed to delete snapshot: {}",
-                stderr
-            )));
+        // Delete ZFS snapshot using ZfsManager (validates input to prevent command injection)
+        {
+            let zfs = self.zfs.read().await;
+            zfs.delete_snapshot(volume_name, snap_name).map_err(|e| {
+                use crate::zfs::ZfsError;
+                match e {
+                    ZfsError::DatasetNotFound(_) => {
+                        Status::not_found(format!("snapshot '{}' not found", req.snapshot_id))
+                    }
+                    ZfsError::InvalidName(msg) => Status::invalid_argument(msg),
+                    _ => Status::internal(format!("failed to delete snapshot: {}", e)),
+                }
+            })?;
         }
 
         // Remove metadata

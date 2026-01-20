@@ -2,12 +2,16 @@ use std::process::Command;
 use tracing::instrument;
 
 use super::error::{Result, ZfsError};
+use super::properties::{VolumeMetadata, METADATA_PROPERTY};
 
 /// Validate that a name is safe for use in ZFS commands.
 /// Only allows alphanumeric characters, underscores, hyphens, and periods.
 fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(ZfsError::InvalidName("name cannot be empty".into()));
+    }
+    if name.contains("..") {
+        return Err(ZfsError::InvalidName("path traversal not allowed".into()));
     }
     if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.') {
         return Err(ZfsError::InvalidName(format!(
@@ -179,6 +183,30 @@ impl ZfsManager {
         Ok(snapshot_name)
     }
 
+    /// Delete a snapshot
+    #[instrument(skip(self))]
+    pub fn delete_snapshot(&self, volume_name: &str, snap_name: &str) -> Result<()> {
+        // Validate both parts
+        validate_name(volume_name)?;
+        validate_name(snap_name)?;
+
+        let full_name = format!("{}@{}", self.full_path(volume_name), snap_name);
+
+        let output = Command::new("zfs")
+            .args(["destroy", &full_name])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("does not exist") || stderr.contains("not found") {
+                return Err(ZfsError::DatasetNotFound(full_name));
+            }
+            return Err(ZfsError::CommandFailed(stderr.to_string()));
+        }
+
+        Ok(())
+    }
+
     /// Get information about a specific dataset
     pub fn get_dataset(&self, name: &str) -> Result<Dataset> {
         // Validate name for command injection prevention
@@ -231,6 +259,137 @@ impl ZfsManager {
     pub fn get_device_path(&self, name: &str) -> String {
         let full_name = self.full_path(name);
         format!("/dev/zvol/{}", full_name)
+    }
+
+    /// Save volume metadata to ZFS user property
+    #[instrument(skip(self, metadata))]
+    pub fn set_volume_metadata(&self, name: &str, metadata: &VolumeMetadata) -> Result<()> {
+        validate_name(name)?;
+        let json = serde_json::to_string(metadata)
+            .map_err(|e| ZfsError::ParseError(format!("failed to serialize metadata: {}", e)))?;
+
+        let full_name = self.full_path(name);
+        let property = format!("{}={}", METADATA_PROPERTY, json);
+
+        let output = Command::new("zfs")
+            .args(["set", &property, &full_name])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ZfsError::CommandFailed(format!(
+                "failed to set metadata: {}",
+                stderr
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Get volume metadata from ZFS user property
+    #[instrument(skip(self))]
+    pub fn get_volume_metadata(&self, name: &str) -> Result<Option<VolumeMetadata>> {
+        validate_name(name)?;
+        let full_name = self.full_path(name);
+
+        let output = Command::new("zfs")
+            .args(["get", "-H", "-o", "value", METADATA_PROPERTY, &full_name])
+            .output()?;
+
+        if !output.status.success() {
+            return Ok(None);
+        }
+
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if value.is_empty() || value == "-" {
+            return Ok(None);
+        }
+
+        let metadata: VolumeMetadata = serde_json::from_str(&value)
+            .map_err(|e| ZfsError::ParseError(format!("failed to parse metadata: {}", e)))?;
+
+        Ok(Some(metadata))
+    }
+
+    /// Clear volume metadata (on deletion)
+    #[instrument(skip(self))]
+    pub fn clear_volume_metadata(&self, name: &str) -> Result<()> {
+        validate_name(name)?;
+        let full_name = self.full_path(name);
+
+        // Use 'inherit' to remove user property
+        let output = Command::new("zfs")
+            .args(["inherit", METADATA_PROPERTY, &full_name])
+            .output()?;
+
+        // Ignore errors - property might not exist
+        let _ = output;
+        Ok(())
+    }
+
+    /// List all volumes with CSI metadata (for startup recovery)
+    #[instrument(skip(self))]
+    pub fn list_volumes_with_metadata(&self) -> Result<Vec<(String, VolumeMetadata)>> {
+        let output = Command::new("zfs")
+            .args([
+                "list",
+                "-H",
+                "-r",
+                "-t",
+                "volume",
+                "-o",
+                &format!("name,{}", METADATA_PROPERTY),
+                &self.parent_dataset,
+            ])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ZfsError::CommandFailed(stderr.to_string()));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut results = Vec::new();
+
+        for line in stdout.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 2 {
+                continue;
+            }
+
+            let name = parts[0];
+            let metadata_json = parts[1];
+
+            // Skip parent dataset itself
+            if name == self.parent_dataset {
+                continue;
+            }
+
+            // Skip volumes without metadata
+            if metadata_json.is_empty() || metadata_json == "-" {
+                continue;
+            }
+
+            // Parse metadata
+            // Extract volume name (remove parent prefix)
+            let vol_name = name
+                .strip_prefix(&format!("{}/", self.parent_dataset))
+                .unwrap_or(name)
+                .to_string();
+
+            match serde_json::from_str::<VolumeMetadata>(metadata_json) {
+                Ok(metadata) => results.push((vol_name, metadata)),
+                Err(e) => {
+                    tracing::warn!(volume = %name, error = %e, "corrupt CSI metadata, skipping");
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     /// Check if a dataset exists
@@ -345,6 +504,10 @@ mod tests {
         assert!(validate_name("vol name").is_err());
         assert!(validate_name("vol;rm -rf /").is_err());
         assert!(validate_name("$(whoami)").is_err());
+        // Path traversal
+        assert!(validate_name("..").is_err());
+        assert!(validate_name("vol..name").is_err());
+        assert!(validate_name("../../../etc/passwd").is_err());
     }
 
     #[test]
