@@ -51,6 +51,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: AGENT_ENDPOINT
+              value: {{ .Values.agent.endpoint | quote }}
           resources:
             {{- toYaml .Values.node.resources | nindent 12 }}
           securityContext:

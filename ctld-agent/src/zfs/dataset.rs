@@ -1,5 +1,5 @@
 use std::process::Command;
-use tracing::instrument;
+use tracing::{debug, info, instrument, warn};
 
 use super::error::{Result, ZfsError};
 use super::properties::{METADATA_PROPERTY, VolumeMetadata};
@@ -52,6 +52,8 @@ pub struct ZfsManager {
 impl ZfsManager {
     /// Create a new ZfsManager, verifying the parent dataset exists
     pub fn new(parent_dataset: String) -> Result<Self> {
+        info!(dataset = %parent_dataset, "Initializing ZFS manager");
+
         // Validate dataset name
         if parent_dataset.is_empty() {
             return Err(ZfsError::InvalidName(
@@ -72,6 +74,7 @@ impl ZfsManager {
             return Err(ZfsError::CommandFailed(stderr.to_string()));
         }
 
+        info!(dataset = %parent_dataset, "ZFS manager initialized successfully");
         Ok(Self { parent_dataset })
     }
 
@@ -87,6 +90,7 @@ impl ZfsManager {
         validate_name(name)?;
 
         let full_name = self.full_path(name);
+        info!(volume = %full_name, size_bytes, "Creating ZFS volume");
 
         // Create the volume with volmode=dev
         // Let zfs create fail if already exists (avoids TOCTOU race)
@@ -104,11 +108,14 @@ impl ZfsManager {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("already exists") {
+                warn!(volume = %full_name, "Volume already exists");
                 return Err(ZfsError::DatasetExists(full_name));
             }
+            warn!(volume = %full_name, error = %stderr, "Failed to create volume");
             return Err(ZfsError::CommandFailed(stderr.to_string()));
         }
 
+        info!(volume = %full_name, size_bytes, "ZFS volume created successfully");
         // Return the created dataset info
         self.get_dataset(name)
     }
@@ -120,9 +127,11 @@ impl ZfsManager {
         validate_name(name)?;
 
         let full_name = self.full_path(name);
+        info!(volume = %full_name, "Deleting ZFS volume");
 
         // Check if volume exists
         if !self.dataset_exists(&full_name)? {
+            warn!(volume = %full_name, "Volume not found for deletion");
             return Err(ZfsError::DatasetNotFound(full_name));
         }
 
@@ -130,9 +139,11 @@ impl ZfsManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(volume = %full_name, error = %stderr, "Failed to delete volume");
             return Err(ZfsError::CommandFailed(stderr.to_string()));
         }
 
+        info!(volume = %full_name, "ZFS volume deleted successfully");
         Ok(())
     }
 
@@ -143,9 +154,11 @@ impl ZfsManager {
         validate_name(name)?;
 
         let full_name = self.full_path(name);
+        info!(volume = %full_name, new_size_bytes, "Resizing ZFS volume");
 
         // Check if volume exists
         if !self.dataset_exists(&full_name)? {
+            warn!(volume = %full_name, "Volume not found for resize");
             return Err(ZfsError::DatasetNotFound(full_name));
         }
 
@@ -155,9 +168,11 @@ impl ZfsManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(volume = %full_name, error = %stderr, "Failed to resize volume");
             return Err(ZfsError::CommandFailed(stderr.to_string()));
         }
 
+        info!(volume = %full_name, new_size_bytes, "ZFS volume resized successfully");
         Ok(())
     }
 
@@ -170,9 +185,11 @@ impl ZfsManager {
 
         let full_volume = self.full_path(volume_name);
         let snapshot_name = format!("{}@{}", full_volume, snap_name);
+        info!(volume = %full_volume, snapshot = %snap_name, "Creating ZFS snapshot");
 
         // Check if volume exists
         if !self.dataset_exists(&full_volume)? {
+            warn!(volume = %full_volume, "Volume not found for snapshot");
             return Err(ZfsError::DatasetNotFound(full_volume));
         }
 
@@ -183,11 +200,14 @@ impl ZfsManager {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("already exists") {
+                warn!(snapshot = %snapshot_name, "Snapshot already exists");
                 return Err(ZfsError::DatasetExists(snapshot_name));
             }
+            warn!(snapshot = %snapshot_name, error = %stderr, "Failed to create snapshot");
             return Err(ZfsError::CommandFailed(stderr.to_string()));
         }
 
+        info!(snapshot = %snapshot_name, "ZFS snapshot created successfully");
         Ok(snapshot_name)
     }
 
@@ -199,17 +219,21 @@ impl ZfsManager {
         validate_name(snap_name)?;
 
         let full_name = format!("{}@{}", self.full_path(volume_name), snap_name);
+        info!(snapshot = %full_name, "Deleting ZFS snapshot");
 
         let output = Command::new("zfs").args(["destroy", &full_name]).output()?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("does not exist") || stderr.contains("not found") {
+                warn!(snapshot = %full_name, "Snapshot not found for deletion");
                 return Err(ZfsError::DatasetNotFound(full_name));
             }
+            warn!(snapshot = %full_name, error = %stderr, "Failed to delete snapshot");
             return Err(ZfsError::CommandFailed(stderr.to_string()));
         }
 
+        info!(snapshot = %full_name, "ZFS snapshot deleted successfully");
         Ok(())
     }
 
@@ -224,6 +248,8 @@ impl ZfsManager {
 
     /// List all volumes under the parent dataset
     pub fn list_volumes(&self) -> Result<Vec<Dataset>> {
+        debug!(parent = %self.parent_dataset, "Listing volumes");
+
         let output = Command::new("zfs")
             .args([
                 "list",
@@ -240,6 +266,7 @@ impl ZfsManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(error = %stderr, "Failed to list volumes");
             return Err(ZfsError::CommandFailed(stderr.to_string()));
         }
 
@@ -259,6 +286,7 @@ impl ZfsManager {
             }
         }
 
+        debug!(count = datasets.len(), "Found volumes");
         Ok(datasets)
     }
 
@@ -276,6 +304,8 @@ impl ZfsManager {
             .map_err(|e| ZfsError::ParseError(format!("failed to serialize metadata: {}", e)))?;
 
         let full_name = self.full_path(name);
+        debug!(volume = %full_name, "Setting volume metadata");
+
         let property = format!("{}={}", METADATA_PROPERTY, json);
 
         let output = Command::new("zfs")
@@ -284,12 +314,14 @@ impl ZfsManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(volume = %full_name, error = %stderr, "Failed to set volume metadata");
             return Err(ZfsError::CommandFailed(format!(
                 "failed to set metadata: {}",
                 stderr
             )));
         }
 
+        debug!(volume = %full_name, "Volume metadata saved");
         Ok(())
     }
 
@@ -338,6 +370,8 @@ impl ZfsManager {
     /// List all volumes with CSI metadata (for startup recovery)
     #[instrument(skip(self))]
     pub fn list_volumes_with_metadata(&self) -> Result<Vec<(String, VolumeMetadata)>> {
+        info!(parent = %self.parent_dataset, "Scanning for volumes with CSI metadata");
+
         let output = Command::new("zfs")
             .args([
                 "list",
@@ -353,6 +387,7 @@ impl ZfsManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(error = %stderr, "Failed to list volumes with metadata");
             return Err(ZfsError::CommandFailed(stderr.to_string()));
         }
 
@@ -379,6 +414,7 @@ impl ZfsManager {
 
             // Skip volumes without metadata
             if metadata_json.is_empty() || metadata_json == "-" {
+                debug!(volume = %name, "Volume has no CSI metadata, skipping");
                 continue;
             }
 
@@ -390,13 +426,17 @@ impl ZfsManager {
                 .to_string();
 
             match serde_json::from_str::<VolumeMetadata>(metadata_json) {
-                Ok(metadata) => results.push((vol_name, metadata)),
+                Ok(metadata) => {
+                    debug!(volume = %vol_name, "Found volume with valid CSI metadata");
+                    results.push((vol_name, metadata));
+                }
                 Err(e) => {
-                    tracing::warn!(volume = %name, error = %e, "corrupt CSI metadata, skipping");
+                    warn!(volume = %name, error = %e, "Corrupt CSI metadata, skipping");
                 }
             }
         }
 
+        info!(count = results.len(), "Volume scan complete");
         Ok(results)
     }
 
