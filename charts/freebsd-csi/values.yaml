@@ -1,0 +1,131 @@
+# FreeBSD CSI Driver Helm Chart Values
+
+nameOverride: ""
+fullnameOverride: ""
+
+# CSI driver image
+image:
+  repository: ghcr.io/ndenev/freebsd-csi-driver
+  # Defaults to appVersion if empty
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# CSI driver configuration
+driver:
+  # CSI driver name (do not change unless you know what you're doing)
+  name: csi.freebsd.org
+  # Log level: trace, debug, info, warn, error
+  logLevel: info
+
+# ctld-agent connection settings
+agent:
+  # gRPC endpoint of the ctld-agent running on FreeBSD storage server
+  # Examples:
+  #   - "http://192.168.1.100:50051" (plaintext)
+  #   - "https://ctld-agent.storage.svc.cluster.local:50051" (TLS)
+  endpoint: "http://ctld-agent.storage.svc.cluster.local:50051"
+
+# TLS configuration for mTLS with ctld-agent
+tls:
+  enabled: false
+  # Use an existing secret containing ca.crt, tls.crt, tls.key
+  existingSecret: ""
+  # Or provide certificates directly (will create a secret)
+  # Values should be base64 encoded
+  caCert: ""
+  clientCert: ""
+  clientKey: ""
+  # TLS domain name for server certificate verification
+  domain: "ctld-agent"
+
+# Controller deployment settings
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Priority class name for controller pods
+  priorityClassName: ""
+
+# Node DaemonSet settings
+node:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  nodeSelector: {}
+  # Default: tolerate all taints so driver runs on all nodes
+  tolerations:
+    - operator: Exists
+  affinity: {}
+  # Priority class name for node pods
+  priorityClassName: ""
+
+# CSI sidecar container images
+sidecars:
+  provisioner:
+    image: registry.k8s.io/sig-storage/csi-provisioner:v4.0.0
+  attacher:
+    image: registry.k8s.io/sig-storage/csi-attacher:v4.5.0
+  resizer:
+    image: registry.k8s.io/sig-storage/csi-resizer:v1.10.0
+  snapshotter:
+    image: registry.k8s.io/sig-storage/csi-snapshotter:v7.0.1
+  registrar:
+    image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.10.0
+  # Resources for all sidecar containers
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+# ServiceAccount configuration
+serviceAccount:
+  # Create a ServiceAccount for the controller
+  create: true
+  # Name override (defaults to fullname)
+  name: ""
+  # Annotations to add to the ServiceAccount
+  annotations: {}
+
+# RBAC configuration
+rbac:
+  # Create ClusterRole and ClusterRoleBinding
+  create: true
+
+# Optional: Create a StorageClass
+storageClass:
+  create: false
+  name: freebsd-zfs
+  # Set as default StorageClass
+  default: false
+  reclaimPolicy: Delete
+  volumeBindingMode: Immediate
+  allowVolumeExpansion: true
+  # StorageClass parameters
+  parameters:
+    # Export type: "iscsi" or "nvmeof"
+    exportType: iscsi
+    # Filesystem type: ext4, xfs
+    fsType: ext4
+    # For iSCSI: Portal address (REQUIRED)
+    portal: "192.168.1.100:3260"
+    # For NVMeoF: uncomment and set these instead of portal
+    # exportType: nvmeof
+    # transportAddr: "192.168.1.100"
+    # transportPort: "4420"

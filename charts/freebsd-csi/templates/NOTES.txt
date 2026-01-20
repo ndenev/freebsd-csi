@@ -1,0 +1,57 @@
+FreeBSD CSI Driver has been installed!
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+Components deployed:
+  - CSIDriver: {{ .Values.driver.name }}
+  - Controller Deployment: {{ include "freebsd-csi.fullname" . }}-controller
+  - Node DaemonSet: {{ include "freebsd-csi.fullname" . }}-node
+
+Agent endpoint: {{ .Values.agent.endpoint }}
+{{- if .Values.tls.enabled }}
+TLS: Enabled (using secret: {{ include "freebsd-csi.tlsSecretName" . }})
+{{- else }}
+TLS: Disabled (plaintext connection to agent)
+{{- end }}
+
+To verify the installation:
+
+  kubectl get csidrivers
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+
+{{- if .Values.storageClass.create }}
+
+StorageClass "{{ .Values.storageClass.name }}" has been created.
+{{- else }}
+
+To create a StorageClass, apply a manifest like:
+
+  apiVersion: storage.k8s.io/v1
+  kind: StorageClass
+  metadata:
+    name: freebsd-zfs
+  provisioner: {{ .Values.driver.name }}
+  parameters:
+    exportType: iscsi
+    fsType: ext4
+    portal: "<your-storage-server>:3260"
+  allowVolumeExpansion: true
+  reclaimPolicy: Delete
+{{- end }}
+
+To create a test PVC:
+
+  apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata:
+    name: test-pvc
+  spec:
+    accessModes:
+      - ReadWriteOnce
+    storageClassName: {{ if .Values.storageClass.create }}{{ .Values.storageClass.name }}{{ else }}freebsd-zfs{{ end }}
+    resources:
+      requests:
+        storage: 1Gi
+
+For more information, visit: https://github.com/ndenev/freebsd-csi

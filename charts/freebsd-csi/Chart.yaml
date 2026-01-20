@@ -1,0 +1,20 @@
+apiVersion: v2
+name: freebsd-csi
+description: CSI driver for FreeBSD ZFS storage with iSCSI and NVMeoF support
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+keywords:
+  - storage
+  - csi
+  - freebsd
+  - zfs
+  - iscsi
+  - nvmeof
+home: https://github.com/ndenev/freebsd-csi
+sources:
+  - https://github.com/ndenev/freebsd-csi
+maintainers:
+  - name: ndenev
+    url: https://github.com/ndenev

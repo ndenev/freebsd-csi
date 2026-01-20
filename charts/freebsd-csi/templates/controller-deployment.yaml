@@ -1,0 +1,131 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "freebsd-csi.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "freebsd-csi.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      {{- include "freebsd-csi.controllerSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "freebsd-csi.controllerSelectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "freebsd-csi.serviceAccountName" . }}
+      {{- with .Values.controller.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      containers:
+        - name: csi-provisioner
+          image: {{ .Values.sidecars.provisioner.image }}
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--v=5"
+            - "--feature-gates=Topology=true"
+          resources:
+            {{- toYaml .Values.sidecars.resources | nindent 12 }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+
+        - name: csi-attacher
+          image: {{ .Values.sidecars.attacher.image }}
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--v=5"
+          resources:
+            {{- toYaml .Values.sidecars.resources | nindent 12 }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+
+        - name: csi-resizer
+          image: {{ .Values.sidecars.resizer.image }}
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--v=5"
+          resources:
+            {{- toYaml .Values.sidecars.resources | nindent 12 }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+
+        - name: csi-snapshotter
+          image: {{ .Values.sidecars.snapshotter.image }}
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--v=5"
+          resources:
+            {{- toYaml .Values.sidecars.resources | nindent 12 }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+
+        - name: freebsd-csi-driver
+          image: {{ include "freebsd-csi.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--endpoint=unix:///csi/csi.sock"
+            - "--nodeid=$(NODE_ID)"
+            - "--controller"
+            - "--log-level={{ .Values.driver.logLevel }}"
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: AGENT_ENDPOINT
+              value: {{ .Values.agent.endpoint | quote }}
+            {{- if .Values.tls.enabled }}
+            - name: TLS_CERT_PATH
+              value: "/etc/csi-tls/tls.crt"
+            - name: TLS_KEY_PATH
+              value: "/etc/csi-tls/tls.key"
+            - name: TLS_CA_PATH
+              value: "/etc/csi-tls/ca.crt"
+            - name: TLS_DOMAIN
+              value: {{ .Values.tls.domain | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            {{- if .Values.tls.enabled }}
+            - name: tls-certs
+              mountPath: /etc/csi-tls
+              readOnly: true
+            {{- end }}
+          securityContext:
+            privileged: true
+
+      volumes:
+        - name: socket-dir
+          emptyDir: {}
+        {{- if .Values.tls.enabled }}
+        - name: tls-certs
+          secret:
+            secretName: {{ include "freebsd-csi.tlsSecretName" . }}
+        {{- end }}
+
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
