@@ -1,0 +1,138 @@
+# ctld-agent Configuration Reference
+# ===================================
+#
+# ctld-agent is configured via /etc/rc.conf variables, not this file.
+# This file documents the available options and provides examples.
+#
+# Required /etc/rc.conf settings:
+#
+#   ctld_agent_enable="YES"
+#   ctld_agent_zfs_parent="tank/csi"       # REQUIRED: Parent ZFS dataset
+#
+# Optional /etc/rc.conf settings:
+#
+#   # Network
+#   ctld_agent_listen="[::1]:50051"        # Localhost only (default)
+#   ctld_agent_listen="[::]:50051"         # All interfaces (for external access)
+#   ctld_agent_listen="0.0.0.0:50051"      # IPv4 only
+#
+#   # iSCSI Configuration
+#   ctld_agent_base_iqn="iqn.2024-01.org.freebsd.csi"
+#   ctld_agent_portal_group="1"
+#   ctld_agent_portal_group_name="pg0"
+#   ctld_agent_auth_group="ag0"
+#   ctld_agent_ctl_config="/etc/ctl.ucl"
+#
+#   # NVMeoF Configuration (FreeBSD 15+)
+#   ctld_agent_base_nqn="nqn.2024-01.org.freebsd.csi"
+#
+#   # TLS/mTLS (for secure gRPC)
+#   ctld_agent_tls_cert="/usr/local/etc/ctld-agent/server.crt"
+#   ctld_agent_tls_key="/usr/local/etc/ctld-agent/server.key"
+#   ctld_agent_tls_client_ca="/usr/local/etc/ctld-agent/ca.crt"
+#
+#   # Logging
+#   ctld_agent_logfile="/var/log/ctld-agent.log"
+#
+#   # Additional flags
+#   ctld_agent_flags=""
+#
+# ===================================
+# CTL Configuration (/etc/ctl.ucl)
+# ===================================
+#
+# ctld-agent manages iSCSI targets via the UCL configuration file.
+# You must have ctld running with the -u flag for UCL format.
+#
+# Example minimal /etc/ctl.ucl:
+#
+# auth-group ag0 {
+#     auth-type = none
+# }
+#
+# portal-group pg0 {
+#     discovery-auth-group = no-authentication
+#     listen = "0.0.0.0:3260"
+# }
+#
+# # CSI-managed targets are added below this line automatically
+# # Do not manually edit content between CSI markers
+#
+# ===================================
+# CHAP Authentication (Optional)
+# ===================================
+#
+# For CHAP authentication, modify the auth-group:
+#
+# auth-group ag0 {
+#     auth-type = chap
+#     chap = "username" "secret"
+# }
+#
+# Or for mutual CHAP:
+#
+# auth-group ag0 {
+#     auth-type = chap-mutual
+#     chap = "initiator-user" "initiator-secret"
+#     chap-mutual = "target-user" "target-secret"
+# }
+#
+# ===================================
+# Multiple Portal Groups (Advanced)
+# ===================================
+#
+# portal-group pg0 {
+#     discovery-auth-group = no-authentication
+#     listen = "192.168.1.10:3260"
+# }
+#
+# portal-group pg1 {
+#     discovery-auth-group = no-authentication
+#     listen = "10.0.0.10:3260"
+# }
+#
+# ===================================
+# Starting ctld with UCL Format
+# ===================================
+#
+# FreeBSD's default /etc/rc.d/ctld may not support the -u flag.
+# Add to /etc/rc.local:
+#
+#   /usr/sbin/ctld -u
+#
+# Or create a custom rc.d script.
+#
+# ===================================
+# Kubernetes Integration
+# ===================================
+#
+# The CSI driver connects to ctld-agent via gRPC. Configure the
+# driver with the agent endpoint:
+#
+#   --agent-endpoint=http://192.168.1.10:50051
+#
+# For mTLS:
+#   --agent-endpoint=https://192.168.1.10:50051
+#   --tls-cert=/path/to/client.crt
+#   --tls-key=/path/to/client.key
+#   --tls-ca=/path/to/ca.crt
+#
+# ===================================
+# Troubleshooting
+# ===================================
+#
+# Check service status:
+#   service ctld_agent status
+#
+# View logs:
+#   tail -f /var/log/ctld-agent.log
+#
+# Test gRPC connectivity:
+#   grpcurl -plaintext localhost:50051 list
+#
+# Check CTL status:
+#   ctladm portlist
+#   ctladm lunlist
+#
+# Check ZFS volumes:
+#   zfs list -r tank/csi

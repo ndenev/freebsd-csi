@@ -1,0 +1,97 @@
+name: ctld-agent
+version: "0.1.0"
+origin: sysutils/ctld-agent
+comment: "FreeBSD ZFS/CTL storage agent for Kubernetes CSI"
+www: "https://github.com/ndenev/freebsd-csi"
+maintainer: "ndenev@users.noreply.github.com"
+prefix: /usr/local
+licenselogic: single
+licenses: ["BSD2CLAUSE"]
+
+desc: <<EOD
+ctld-agent is a FreeBSD daemon that provides a gRPC API for managing
+ZFS zvols and CTL (Common Target Layer) exports. It serves as the
+storage backend for the FreeBSD CSI driver, enabling Kubernetes
+workloads to use FreeBSD-backed persistent volumes via iSCSI or
+NVMe over Fabrics (NVMeoF).
+
+Features:
+- ZFS zvol creation, deletion, expansion, and snapshots
+- iSCSI target export via ctld UCL configuration
+- NVMeoF subsystem export (FreeBSD 15+)
+- gRPC API with optional mTLS authentication
+- Volume metadata persistence in ZFS user properties
+- Integration with Kubernetes CSI
+
+Requirements:
+- FreeBSD 14.0 or later
+- ZFS pool configured for storage
+- ctld service enabled with UCL config format (-u flag)
+- Network connectivity to Kubernetes cluster
+EOD
+
+categories: ["sysutils", "storage"]
+arch: "freebsd:*:x86:64"
+
+files: {
+    /usr/local/sbin/ctld-agent: { perm: 0755 }
+    /usr/local/etc/rc.d/ctld_agent: { perm: 0755 }
+    /usr/local/etc/ctld-agent/config.ucl.sample: { perm: 0644 }
+}
+
+directories: {
+    /usr/local/etc/ctld-agent: { perm: 0755 }
+}
+
+scripts: {
+    post-install: <<EOS
+#!/bin/sh
+echo ""
+echo "=========================================="
+echo " ctld-agent installed successfully"
+echo "=========================================="
+echo ""
+echo "To enable ctld-agent, add to /etc/rc.conf:"
+echo ""
+echo '  ctld_agent_enable="YES"'
+echo '  ctld_agent_zfs_parent="tank/csi"'
+echo ""
+echo "Or use sysrc:"
+echo ""
+echo "  sysrc ctld_agent_enable=YES"
+echo "  sysrc ctld_agent_zfs_parent=tank/csi"
+echo ""
+echo "Then start the service:"
+echo ""
+echo "  service ctld_agent start"
+echo ""
+echo "See /usr/local/etc/ctld-agent/config.ucl.sample"
+echo "for configuration options."
+echo ""
+EOS
+    pre-deinstall: <<EOS
+#!/bin/sh
+if service ctld_agent status > /dev/null 2>&1; then
+    echo "Stopping ctld_agent..."
+    service ctld_agent stop
+fi
+EOS
+}
+
+messages: [
+    { message: <<EOM
+
+ctld-agent requires a ZFS dataset to be configured before starting.
+
+Create your storage dataset:
+    zfs create tank/csi
+
+Ensure ctld is configured with UCL format in /etc/rc.conf:
+    ctld_enable="YES"
+
+And started with -u flag (add to /etc/rc.local if needed):
+    /usr/sbin/ctld -u
+
+EOM
+    }
+]

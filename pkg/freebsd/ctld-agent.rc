@@ -1,0 +1,103 @@
+#!/bin/sh
+#
+# PROVIDE: ctld_agent
+# REQUIRE: NETWORKING zfs
+# BEFORE: ctld
+# KEYWORD: shutdown
+#
+# ctld_agent - FreeBSD ZFS/CTL storage agent for Kubernetes CSI
+#
+# Add the following lines to /etc/rc.conf to enable ctld_agent:
+#
+#   ctld_agent_enable="YES"
+#   ctld_agent_zfs_parent="tank/csi"      # Required: ZFS parent dataset
+#
+# Optional settings:
+#
+#   ctld_agent_listen="[::]:50051"        # Listen address (default: [::1]:50051)
+#   ctld_agent_base_iqn="iqn.2024-01.org.freebsd.csi"  # Base IQN
+#   ctld_agent_base_nqn="nqn.2024-01.org.freebsd.csi"  # Base NQN
+#   ctld_agent_portal_group="1"           # Portal group tag
+#   ctld_agent_ctl_config="/etc/ctl.ucl"  # CTL config file
+#   ctld_agent_auth_group="ag0"           # Auth group name
+#   ctld_agent_portal_group_name="pg0"    # Portal group name
+#   ctld_agent_tls_cert="/path/to/cert.pem"   # TLS certificate
+#   ctld_agent_tls_key="/path/to/key.pem"     # TLS key
+#   ctld_agent_tls_client_ca="/path/to/ca.pem" # Client CA for mTLS
+#   ctld_agent_flags=""                   # Additional flags
+#
+
+. /etc/rc.subr
+
+name="ctld_agent"
+rcvar="${name}_enable"
+
+load_rc_config $name
+
+: ${ctld_agent_enable:="NO"}
+: ${ctld_agent_user:="root"}
+: ${ctld_agent_listen:="[::1]:50051"}
+: ${ctld_agent_base_iqn:="iqn.2024-01.org.freebsd.csi"}
+: ${ctld_agent_base_nqn:="nqn.2024-01.org.freebsd.csi"}
+: ${ctld_agent_portal_group:="1"}
+: ${ctld_agent_ctl_config:="/etc/ctl.ucl"}
+: ${ctld_agent_auth_group:="ag0"}
+: ${ctld_agent_portal_group_name:="pg0"}
+: ${ctld_agent_logfile:="/var/log/ctld-agent.log"}
+
+pidfile="/var/run/${name}.pid"
+command="/usr/local/sbin/ctld-agent"
+
+# ZFS parent dataset is required
+required_vars="ctld_agent_zfs_parent"
+
+start_precmd="${name}_prestart"
+start_cmd="${name}_start"
+stop_postcmd="${name}_poststop"
+
+ctld_agent_prestart()
+{
+    # Verify ZFS parent dataset exists
+    if ! zfs list -H -o name "${ctld_agent_zfs_parent}" > /dev/null 2>&1; then
+        err 1 "ZFS dataset ${ctld_agent_zfs_parent} does not exist"
+    fi
+
+    # Build command arguments
+    command_args="--listen ${ctld_agent_listen} \
+        --zfs-parent ${ctld_agent_zfs_parent} \
+        --base-iqn ${ctld_agent_base_iqn} \
+        --base-nqn ${ctld_agent_base_nqn} \
+        --portal-group ${ctld_agent_portal_group} \
+        --ctl-config ${ctld_agent_ctl_config} \
+        --auth-group ${ctld_agent_auth_group} \
+        --portal-group-name ${ctld_agent_portal_group_name}"
+
+    # Add optional TLS arguments
+    if [ -n "${ctld_agent_tls_cert}" ] && [ -n "${ctld_agent_tls_key}" ]; then
+        command_args="${command_args} --tls-cert ${ctld_agent_tls_cert} --tls-key ${ctld_agent_tls_key}"
+        if [ -n "${ctld_agent_tls_client_ca}" ]; then
+            command_args="${command_args} --tls-client-ca ${ctld_agent_tls_client_ca}"
+        fi
+    fi
+
+    # Add any extra flags
+    command_args="${command_args} ${ctld_agent_flags}"
+
+    # Ensure log directory exists
+    install -d -m 0755 "$(dirname "${ctld_agent_logfile}")"
+}
+
+ctld_agent_start()
+{
+    echo "Starting ${name}."
+    /usr/sbin/daemon -c -f -p ${pidfile} -u ${ctld_agent_user} \
+        -o ${ctld_agent_logfile} \
+        ${command} ${command_args}
+}
+
+ctld_agent_poststop()
+{
+    rm -f ${pidfile}
+}
+
+run_rc_command "$1"
