@@ -13,7 +13,7 @@ use std::collections::HashMap;
 /// Test driver name constant
 #[test]
 fn test_driver_name() {
-    let driver_name = "freebsd.csi.io";
+    let driver_name = "csi.freebsd.org";
     assert!(!driver_name.is_empty());
     assert!(driver_name.contains('.'));
     // CSI driver names should follow DNS naming conventions

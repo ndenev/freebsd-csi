@@ -41,7 +41,7 @@ struct Args {
     node_id: Option<String>,
 
     /// ctld-agent gRPC endpoint
-    #[arg(long, default_value = "http://127.0.0.1:50051")]
+    #[arg(long, env = "AGENT_ENDPOINT", default_value = "http://127.0.0.1:50051")]
     agent_endpoint: String,
 
     /// Run in controller mode (enables controller service)
@@ -53,7 +53,7 @@ struct Args {
     node: bool,
 
     /// Driver name
-    #[arg(long, default_value = "freebsd.csi.io")]
+    #[arg(long, default_value = "csi.freebsd.org")]
     driver_name: String,
 
     /// Log level (trace, debug, info, warn, error)

@@ -144,7 +144,7 @@ The csi-driver runs in Kubernetes and implements the Container Storage Interface
 | `--agent-endpoint` | `http://127.0.0.1:50051` | ctld-agent gRPC endpoint |
 | `--controller` | `false` | Enable controller service |
 | `--node` | `true` | Enable node service |
-| `--driver-name` | `freebsd.csi.io` | CSI driver name |
+| `--driver-name` | `csi.freebsd.org` | CSI driver name |
 | `--log-level` | `info` | Log level (trace, debug, info, warn, error) |
 
 ### Environment Variables

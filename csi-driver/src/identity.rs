@@ -6,7 +6,7 @@ use tonic::{Request, Response, Status};
 
 use crate::csi;
 
-pub const DRIVER_NAME: &str = "freebsd.csi.io";
+pub const DRIVER_NAME: &str = "csi.freebsd.org";
 pub const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// CSI Identity Service
