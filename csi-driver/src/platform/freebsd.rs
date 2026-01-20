@@ -47,13 +47,10 @@ pub fn connect_iscsi(target_iqn: &str, _portal: Option<&str>) -> PlatformResult<
 /// Find the device associated with an iSCSI target.
 pub fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
     // Use iscsictl -L to list sessions and find the device
-    let output = Command::new("iscsictl")
-        .arg("-L")
-        .output()
-        .map_err(|e| {
-            error!(error = %e, "Failed to execute iscsictl -L");
-            Status::internal(format!("Failed to list iSCSI sessions: {}", e))
-        })?;
+    let output = Command::new("iscsictl").arg("-L").output().map_err(|e| {
+        error!(error = %e, "Failed to execute iscsictl -L");
+        Status::internal(format!("Failed to list iSCSI sessions: {}", e))
+    })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -81,20 +78,19 @@ pub fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
 
     // Find the most recently added da device
     for line in stdout.lines().rev() {
-        if let Some(start) = line.find("(da") {
-            if let Some(end) = line[start..].find(',') {
-                let device = &line[start + 1..start + end];
-                return Ok(format!("/dev/{}", device));
-            }
+        if let Some(start) = line.find("(da")
+            && let Some(end) = line[start..].find(',')
+        {
+            let device = &line[start + 1..start + end];
+            return Ok(format!("/dev/{}", device));
         }
     }
 
-    Err(Status::internal(
-        "Could not find device for iSCSI target",
-    ))
+    Err(Status::internal("Could not find device for iSCSI target"))
 }
 
 /// Disconnect from an iSCSI target.
+#[allow(dead_code)] // Platform API for future use
 pub fn disconnect_iscsi(target_iqn: &str) -> PlatformResult<()> {
     info!(target_iqn = %target_iqn, "Disconnecting from iSCSI target");
 
@@ -124,7 +120,11 @@ pub fn disconnect_iscsi(target_iqn: &str) -> PlatformResult<()> {
 }
 
 /// Connect to an NVMeoF target using nvmecontrol.
-pub fn connect_nvmeof(target_nqn: &str, _transport_addr: Option<&str>, _transport_port: Option<&str>) -> PlatformResult<String> {
+pub fn connect_nvmeof(
+    target_nqn: &str,
+    _transport_addr: Option<&str>,
+    _transport_port: Option<&str>,
+) -> PlatformResult<String> {
     info!(target_nqn = %target_nqn, "Connecting to NVMeoF target");
 
     let output = Command::new("nvmecontrol")
@@ -169,20 +169,19 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
     for line in stdout.lines() {
         if line.contains(target_nqn) || line.contains("nvme") {
             // Extract device name
-            if let Some(device) = line.split_whitespace().next() {
-                if device.starts_with("nvme") || device.starts_with("nda") {
-                    return Ok(format!("/dev/{}", device));
-                }
+            if let Some(device) = line.split_whitespace().next()
+                && (device.starts_with("nvme") || device.starts_with("nda"))
+            {
+                return Ok(format!("/dev/{}", device));
             }
         }
     }
 
-    Err(Status::internal(
-        "Could not find device for NVMeoF target",
-    ))
+    Err(Status::internal("Could not find device for NVMeoF target"))
 }
 
 /// Disconnect from an NVMeoF target.
+#[allow(dead_code)] // Platform API for future use
 pub fn disconnect_nvmeof(target_nqn: &str) -> PlatformResult<()> {
     info!(target_nqn = %target_nqn, "Disconnecting from NVMeoF target");
 
@@ -335,13 +334,10 @@ pub fn unmount(target: &str) -> PlatformResult<()> {
         return Ok(());
     }
 
-    let output = Command::new("umount")
-        .arg(target)
-        .output()
-        .map_err(|e| {
-            error!(error = %e, "Failed to execute umount");
-            Status::internal(format!("Failed to execute umount: {}", e))
-        })?;
+    let output = Command::new("umount").arg(target).output().map_err(|e| {
+        error!(error = %e, "Failed to execute umount");
+        Status::internal(format!("Failed to execute umount: {}", e))
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -359,12 +355,10 @@ pub fn unmount(target: &str) -> PlatformResult<()> {
 
 /// Check if a path is currently mounted.
 pub fn is_mounted(target: &str) -> PlatformResult<bool> {
-    let output = Command::new("mount")
-        .output()
-        .map_err(|e| {
-            error!(error = %e, "Failed to execute mount");
-            Status::internal(format!("Failed to check mounts: {}", e))
-        })?;
+    let output = Command::new("mount").output().map_err(|e| {
+        error!(error = %e, "Failed to execute mount");
+        Status::internal(format!("Failed to check mounts: {}", e))
+    })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -377,10 +371,10 @@ pub fn validate_fs_type(fs_type: &str) -> PlatformResult<&'static str> {
     match fs_type.to_lowercase().as_str() {
         "ufs" | "ffs" | "" => Ok("ufs"),
         "zfs" => Err(Status::invalid_argument(
-            "ZFS cannot be used as fsType for block volumes (ZFS manages its own storage)"
+            "ZFS cannot be used as fsType for block volumes (ZFS manages its own storage)",
         )),
         "ext4" | "xfs" => Err(Status::invalid_argument(
-            "ext4/xfs are not supported on FreeBSD. Use 'ufs' instead"
+            "ext4/xfs are not supported on FreeBSD. Use 'ufs' instead",
         )),
         _ => Err(Status::invalid_argument(format!(
             "Unsupported filesystem on FreeBSD: {}. Supported: ufs",
@@ -390,6 +384,7 @@ pub fn validate_fs_type(fs_type: &str) -> PlatformResult<&'static str> {
 }
 
 /// Get the default filesystem type for FreeBSD.
+#[allow(dead_code)] // Platform API for future use
 pub fn default_fs_type() -> &'static str {
     DEFAULT_FS_TYPE
 }

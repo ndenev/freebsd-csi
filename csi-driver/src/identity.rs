@@ -66,7 +66,9 @@ impl csi::identity_server::Identity for IdentityService {
             },
         ];
 
-        Ok(Response::new(csi::GetPluginCapabilitiesResponse { capabilities }))
+        Ok(Response::new(csi::GetPluginCapabilitiesResponse {
+            capabilities,
+        }))
     }
 
     /// Probes the plugin to check if it is ready.
@@ -99,7 +101,9 @@ mod tests {
     async fn test_get_plugin_capabilities() {
         let service = IdentityService::new();
         let request = Request::new(csi::GetPluginCapabilitiesRequest {});
-        let response = Identity::get_plugin_capabilities(&service, request).await.unwrap();
+        let response = Identity::get_plugin_capabilities(&service, request)
+            .await
+            .unwrap();
         let caps = response.into_inner();
 
         // Should have 2 capabilities: controller service and volume expansion

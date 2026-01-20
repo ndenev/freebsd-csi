@@ -23,6 +23,7 @@ pub type PlatformResult<T> = Result<T, Status>;
 
 /// Platform-agnostic interface for storage operations.
 /// Each platform module implements these functions.
+#[allow(dead_code)] // API trait for potential future use
 pub trait StorageOps {
     /// Connect to an iSCSI target and return the device path.
     fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<String>;
@@ -34,7 +35,11 @@ pub trait StorageOps {
     fn disconnect_iscsi(target_iqn: &str) -> PlatformResult<()>;
 
     /// Connect to an NVMeoF target and return the device path.
-    fn connect_nvmeof(target_nqn: &str, transport_addr: Option<&str>, transport_port: Option<&str>) -> PlatformResult<String>;
+    fn connect_nvmeof(
+        target_nqn: &str,
+        transport_addr: Option<&str>,
+        transport_port: Option<&str>,
+    ) -> PlatformResult<String>;
 
     /// Find the device associated with an NVMeoF target.
     fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String>;

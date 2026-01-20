@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use tracing::{debug, info, Level};
+use tracing::{Level, debug, info};
 use tracing_subscriber::FmtSubscriber;
 
 /// CSI proto generated types
@@ -27,7 +27,7 @@ mod platform;
 
 pub use agent_client::{AgentClient, TlsConfig};
 pub use controller::ControllerService;
-pub use identity::{IdentityService, DRIVER_NAME, DRIVER_VERSION};
+pub use identity::{DRIVER_NAME, DRIVER_VERSION, IdentityService};
 pub use node::NodeService;
 
 /// CLI arguments for the CSI driver
@@ -94,9 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => Level::INFO,
     };
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(level)
-        .finish();
+    let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
     // Determine node_id
@@ -119,10 +117,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = args.endpoint.clone();
 
     // Create services and build gRPC server
-    use tonic::transport::Server;
     use csi::controller_server::ControllerServer;
     use csi::identity_server::IdentityServer;
     use csi::node_server::NodeServer;
+    use tonic::transport::Server;
 
     let identity = IdentityService::new();
     let mut server = Server::builder();

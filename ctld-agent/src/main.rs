@@ -11,8 +11,8 @@ mod service;
 mod zfs;
 
 use ctl::{IscsiManager, NvmeofManager, PortalGroup};
-use service::proto::storage_agent_server::StorageAgentServer;
 use service::StorageService;
+use service::proto::storage_agent_server::StorageAgentServer;
 use zfs::ZfsManager;
 
 #[derive(Parser, Debug)]
@@ -110,7 +110,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match storage_service.restore_from_zfs().await {
         Ok(count) => {
             if count > 0 {
-                info!("Successfully restored {} volume(s) from ZFS metadata", count);
+                info!(
+                    "Successfully restored {} volume(s) from ZFS metadata",
+                    count
+                );
             }
         }
         Err(e) => {

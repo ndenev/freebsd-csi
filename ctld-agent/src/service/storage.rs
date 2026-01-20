@@ -166,7 +166,10 @@ impl StorageAgent for StorageService {
         request: Request<CreateVolumeRequest>,
     ) -> Result<Response<CreateVolumeResponse>, Status> {
         let req = request.into_inner();
-        info!("CreateVolume request: name={}, size={}", req.name, req.size_bytes);
+        info!(
+            "CreateVolume request: name={}, size={}",
+            req.name, req.size_bytes
+        );
 
         if req.name.is_empty() {
             return Err(Status::invalid_argument("volume name cannot be empty"));
@@ -175,8 +178,7 @@ impl StorageAgent for StorageService {
             return Err(Status::invalid_argument("size_bytes must be positive"));
         }
 
-        let export_type = ExportType::try_from(req.export_type)
-            .unwrap_or(ExportType::Unspecified);
+        let export_type = ExportType::try_from(req.export_type).unwrap_or(ExportType::Unspecified);
 
         if export_type == ExportType::Unspecified {
             return Err(Status::invalid_argument(
@@ -331,9 +333,8 @@ impl StorageAgent for StorageService {
         // Delete ZFS volume
         {
             let zfs = self.zfs.read().await;
-            zfs.delete_volume(&metadata.name).map_err(|e| {
-                Status::internal(format!("failed to delete ZFS volume: {}", e))
-            })?;
+            zfs.delete_volume(&metadata.name)
+                .map_err(|e| Status::internal(format!("failed to delete ZFS volume: {}", e)))?;
         }
 
         // Remove metadata
@@ -381,7 +382,10 @@ impl StorageAgent for StorageService {
                 .map_err(|e| Status::internal(format!("failed to resize volume: {}", e)))?;
         }
 
-        info!("Expanded volume {} to {} bytes", req.volume_id, req.new_size_bytes);
+        info!(
+            "Expanded volume {} to {} bytes",
+            req.volume_id, req.new_size_bytes
+        );
 
         Ok(Response::new(ExpandVolumeResponse {
             size_bytes: req.new_size_bytes,
@@ -413,11 +417,7 @@ impl StorageAgent for StorageService {
 
         for dataset in &datasets {
             // Extract volume name from full dataset path
-            let name = dataset
-                .name
-                .rsplit('/')
-                .next()
-                .unwrap_or(&dataset.name);
+            let name = dataset.name.rsplit('/').next().unwrap_or(&dataset.name);
 
             if let Some(metadata) = volumes_meta.get(name) {
                 volumes.push(self.dataset_to_volume(dataset, metadata));
@@ -435,9 +435,7 @@ impl StorageAgent for StorageService {
         };
 
         let start_idx = if !req.starting_token.is_empty() {
-            req.starting_token
-                .parse::<usize>()
-                .unwrap_or(0)
+            req.starting_token.parse::<usize>().unwrap_or(0)
         } else {
             0
         };
@@ -520,7 +518,10 @@ impl StorageAgent for StorageService {
         let _metadata = {
             let volumes = self.volumes.read().await;
             volumes.get(&req.source_volume_id).cloned().ok_or_else(|| {
-                Status::not_found(format!("source volume '{}' not found", req.source_volume_id))
+                Status::not_found(format!(
+                    "source volume '{}' not found",
+                    req.source_volume_id
+                ))
             })?
         };
 
@@ -613,7 +614,10 @@ impl StorageAgent for StorageService {
             snapshots.remove(&req.snapshot_id);
         }
 
-        info!("Deleted snapshot: {} (volume={}, snap={})", req.snapshot_id, volume_name, snap_name);
+        info!(
+            "Deleted snapshot: {} (volume={}, snap={})",
+            req.snapshot_id, volume_name, snap_name
+        );
         Ok(Response::new(DeleteSnapshotResponse {}))
     }
 

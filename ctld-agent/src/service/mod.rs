@@ -1,3 +1,3 @@
 pub mod storage;
 
-pub use storage::{proto, StorageService};
+pub use storage::{StorageService, proto};

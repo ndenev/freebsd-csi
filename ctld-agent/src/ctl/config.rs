@@ -37,6 +37,7 @@ impl Lun {
     }
 
     /// Set a custom serial number
+    #[allow(dead_code)] // Builder API for future use
     pub fn with_serial(mut self, serial: String) -> Self {
         self.serial = Some(serial);
         self
@@ -91,6 +92,7 @@ impl IscsiTarget {
     }
 
     /// Set an alias for this target
+    #[allow(dead_code)] // Builder API for future use
     pub fn with_alias(mut self, alias: String) -> Self {
         self.alias = Some(alias);
         self
@@ -128,12 +130,14 @@ impl PortalGroup {
     }
 
     /// Add a listen address
+    #[allow(dead_code)] // Builder API for future use
     pub fn with_listen(mut self, address: String) -> Self {
         self.listen.push(address);
         self
     }
 
     /// Set the discovery auth group
+    #[allow(dead_code)] // Builder API for future use
     pub fn with_discovery_auth(mut self, auth_group: String) -> Self {
         self.discovery_auth_group = Some(auth_group);
         self

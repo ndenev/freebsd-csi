@@ -101,6 +101,7 @@ impl IscsiManager {
     ///
     /// This creates an IscsiManager without UCL config support, using ctladm directly.
     /// For persistent configuration, use `new_with_ucl()` instead.
+    #[allow(dead_code)] // Alternative constructor for direct ctladm use
     pub fn new(base_iqn: String, portal_group: PortalGroup) -> Result<Self> {
         // Validate base IQN
         validate_name(&base_iqn)?;
@@ -130,11 +131,7 @@ impl IscsiManager {
     ) -> Result<Self> {
         validate_name(&base_iqn)?;
 
-        let ucl_manager = UclConfigManager::new(
-            config_path,
-            auth_group,
-            portal_group.name.clone(),
-        );
+        let ucl_manager = UclConfigManager::new(config_path, auth_group, portal_group.name.clone());
 
         info!(
             "Initializing IscsiManager with base_iqn={}, portal_group={}, UCL config",
@@ -172,9 +169,8 @@ impl IscsiManager {
             return Ok(());
         }
 
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            CtlError::ConfigError(format!("Failed to read {}: {}", config_path, e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| CtlError::ConfigError(format!("Failed to read {}: {}", config_path, e)))?;
 
         // Parse UCL
         let parser = Parser::new();
@@ -185,9 +181,8 @@ impl IscsiManager {
         // Convert to JSON and parse with serde_json for easier iteration
         // libucl's Object only supports iteration for arrays, not objects
         let json_str = doc.dump();
-        let json: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
-            CtlError::ParseError(format!("Failed to parse JSON output: {}", e))
-        })?;
+        let json: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| CtlError::ParseError(format!("Failed to parse JSON output: {}", e)))?;
 
         let mut loaded_count = 0;
         let mut targets = self.targets.write().unwrap();
@@ -206,11 +201,15 @@ impl IscsiManager {
                             if iqn.starts_with(&self.base_iqn) {
                                 match self.parse_target_from_json(iqn, target_config) {
                                     Some(target) => {
-                                        let name = iqn.rsplit(':').next().unwrap_or(iqn).to_string();
+                                        let name =
+                                            iqn.rsplit(':').next().unwrap_or(iqn).to_string();
                                         targets.insert(name, target);
                                         loaded_count += 1;
                                     }
-                                    None => warn!("Failed to parse target {} from config, skipping", iqn),
+                                    None => warn!(
+                                        "Failed to parse target {} from config, skipping",
+                                        iqn
+                                    ),
                                 }
                             }
                         }
@@ -243,14 +242,12 @@ impl IscsiManager {
         let name = iqn.rsplit(':').next()?.to_string();
         let mut target = IscsiTarget::new(name, iqn.to_string());
 
-        // Parse portal-group tag if present
-        if let Some(pg) = config.get("portal-group").and_then(|v| v.as_str()) {
-            // Extract tag number from "pg0" format
-            if let Some(tag_str) = pg.strip_prefix("pg") {
-                if let Ok(tag) = tag_str.parse::<u32>() {
-                    target = target.with_portal_group(tag);
-                }
-            }
+        // Parse portal-group tag if present (extract tag number from "pg0" format)
+        if let Some(pg) = config.get("portal-group").and_then(|v| v.as_str())
+            && let Some(tag_str) = pg.strip_prefix("pg")
+            && let Ok(tag) = tag_str.parse::<u32>()
+        {
+            target = target.with_portal_group(tag);
         }
 
         // Parse auth-group if present
@@ -259,14 +256,14 @@ impl IscsiManager {
         }
 
         // Parse LUNs - can be either an object with numeric keys or direct lun objects
-        if let Some(lun_section) = config.get("lun") {
-            if let Some(lun_obj) = lun_section.as_object() {
-                for (lun_id_str, lun_config) in lun_obj {
-                    if let Ok(lun_id) = lun_id_str.parse::<u32>() {
-                        if let Some(lun) = self.parse_lun_from_json(lun_id, lun_config) {
-                            target = target.with_lun(lun);
-                        }
-                    }
+        if let Some(lun_section) = config.get("lun")
+            && let Some(lun_obj) = lun_section.as_object()
+        {
+            for (lun_id_str, lun_config) in lun_obj {
+                if let Ok(lun_id) = lun_id_str.parse::<u32>()
+                    && let Some(lun) = self.parse_lun_from_json(lun_id, lun_config)
+                {
+                    target = target.with_lun(lun);
                 }
             }
         }
@@ -283,7 +280,10 @@ impl IscsiManager {
             if let Ok(bs_u32) = u32::try_from(bs) {
                 lun = lun.with_blocksize(bs_u32);
             } else {
-                warn!("Invalid blocksize value {} for LUN {}, using default", bs, lun_id);
+                warn!(
+                    "Invalid blocksize value {} for LUN {}, using default",
+                    bs, lun_id
+                );
             }
         }
 
@@ -385,6 +385,7 @@ impl IscsiManager {
     }
 
     /// Get a target by name
+    #[allow(dead_code)] // API method for future use
     pub fn get_target(&self, name: &str) -> Result<IscsiTarget> {
         validate_name(name)?;
 
@@ -396,17 +397,20 @@ impl IscsiManager {
     }
 
     /// List all active targets
+    #[allow(dead_code)] // API method for future use
     pub fn list_targets(&self) -> Vec<IscsiTarget> {
         let targets = self.targets.read().unwrap();
         targets.values().cloned().collect()
     }
 
     /// Get the portal group configuration
+    #[allow(dead_code)] // API method for future use
     pub fn portal_group(&self) -> &PortalGroup {
         &self.portal_group
     }
 
     /// Get the base IQN
+    #[allow(dead_code)] // API method for future use
     pub fn base_iqn(&self) -> &str {
         &self.base_iqn
     }
@@ -479,9 +483,7 @@ impl IscsiManager {
     fn reload_ctld(&self) -> Result<()> {
         debug!("Reloading ctld configuration");
 
-        let output = Command::new("service")
-            .args(["ctld", "reload"])
-            .output()?;
+        let output = Command::new("service").args(["ctld", "reload"]).output()?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -549,9 +551,9 @@ impl IscsiManager {
                 let parts: Vec<&str> = line.split(':').collect();
                 if parts.len() >= 2 {
                     let id_str = parts[1].trim();
-                    return id_str.parse().map_err(|_| {
-                        CtlError::ParseError(format!("invalid LUN ID: {}", id_str))
-                    });
+                    return id_str
+                        .parse()
+                        .map_err(|_| CtlError::ParseError(format!("invalid LUN ID: {}", id_str)));
                 }
             }
         }
@@ -733,11 +735,7 @@ mod tests {
     #[test]
     fn test_iscsi_manager_without_ucl() {
         let pg = PortalGroup::new(1, "pg1".to_string());
-        let manager = IscsiManager::new(
-            "iqn.2024-01.org.freebsd.csi".to_string(),
-            pg,
-        )
-        .unwrap();
+        let manager = IscsiManager::new("iqn.2024-01.org.freebsd.csi".to_string(), pg).unwrap();
 
         assert!(manager.ucl_manager.is_none());
     }
@@ -761,11 +759,7 @@ mod tests {
     #[test]
     fn test_load_config_no_ucl_manager() {
         let pg = PortalGroup::new(1, "pg1".to_string());
-        let mut manager = IscsiManager::new(
-            "iqn.2024-01.org.freebsd.csi".to_string(),
-            pg,
-        )
-        .unwrap();
+        let mut manager = IscsiManager::new("iqn.2024-01.org.freebsd.csi".to_string(), pg).unwrap();
 
         // Should not error when no UCL manager is configured
         assert!(manager.load_config().is_ok());

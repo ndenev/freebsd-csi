@@ -6,9 +6,9 @@
 //! - mkfs.ext4/mkfs.xfs for filesystem formatting
 //! - mount --bind for bind mounts
 
-use std::process::Command;
-use std::path::Path;
 use std::fs;
+use std::path::Path;
+use std::process::Command;
 
 use tonic::Status;
 use tracing::{debug, error, info, warn};
@@ -26,12 +26,22 @@ pub fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<S
     info!(target_iqn = %target_iqn, portal = ?portal, "Connecting to iSCSI target");
 
     let portal = portal.ok_or_else(|| {
-        Status::invalid_argument("Portal address is required for iSCSI on Linux (pass via volume_context)")
+        Status::invalid_argument(
+            "Portal address is required for iSCSI on Linux (pass via volume_context)",
+        )
     })?;
 
     // First, discover the target if not already known
     let discover_output = Command::new("iscsiadm")
-        .args(["-m", "discoverydb", "-t", "sendtargets", "-p", portal, "--discover"])
+        .args([
+            "-m",
+            "discoverydb",
+            "-t",
+            "sendtargets",
+            "-p",
+            portal,
+            "--discover",
+        ])
         .output()
         .map_err(|e| {
             error!(error = %e, "Failed to execute iscsiadm discovery");
@@ -66,7 +76,10 @@ pub fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<S
             info!(target_iqn = %target_iqn, "iSCSI session already exists");
         } else {
             error!(stderr = %stderr, "iscsiadm login failed");
-            return Err(Status::internal(format!("iscsiadm login failed: {}", stderr)));
+            return Err(Status::internal(format!(
+                "iscsiadm login failed: {}",
+                stderr
+            )));
         }
     }
 
@@ -86,17 +99,18 @@ pub fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<S
 pub fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
     // Try to find device via /dev/disk/by-path/ which has stable iSCSI paths
     let by_path = Path::new("/dev/disk/by-path");
-    if by_path.exists() {
-        if let Ok(entries) = fs::read_dir(by_path) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                // iSCSI paths look like: ip-<ip>:<port>-iscsi-<iqn>-lun-<lun>
-                if name_str.contains("iscsi") && name_str.contains(target_iqn) {
-                    if let Ok(link_target) = fs::canonicalize(entry.path()) {
-                        return Ok(link_target.to_string_lossy().to_string());
-                    }
-                }
+    if by_path.exists()
+        && let Ok(entries) = fs::read_dir(by_path)
+    {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            // iSCSI paths look like: ip-<ip>:<port>-iscsi-<iqn>-lun-<lun>
+            if name_str.contains("iscsi")
+                && name_str.contains(target_iqn)
+                && let Ok(link_target) = fs::canonicalize(entry.path())
+            {
+                return Ok(link_target.to_string_lossy().to_string());
             }
         }
     }
@@ -153,10 +167,14 @@ pub fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
                                         for scsi_entry in target_contents.flatten() {
                                             let block_path = scsi_entry.path().join("block");
                                             if block_path.exists() {
-                                                if let Ok(block_entries) = fs::read_dir(&block_path) {
+                                                if let Ok(block_entries) = fs::read_dir(&block_path)
+                                                {
                                                     for block_entry in block_entries.flatten() {
                                                         let dev_name = block_entry.file_name();
-                                                        return Ok(format!("/dev/{}", dev_name.to_string_lossy()));
+                                                        return Ok(format!(
+                                                            "/dev/{}",
+                                                            dev_name.to_string_lossy()
+                                                        ));
                                                     }
                                                 }
                                             }
@@ -206,11 +224,17 @@ pub fn disconnect_iscsi(target_iqn: &str) -> PlatformResult<()> {
 }
 
 /// Connect to an NVMeoF target using nvme-cli.
-pub fn connect_nvmeof(target_nqn: &str, transport_addr: Option<&str>, transport_port: Option<&str>) -> PlatformResult<String> {
+pub fn connect_nvmeof(
+    target_nqn: &str,
+    transport_addr: Option<&str>,
+    transport_port: Option<&str>,
+) -> PlatformResult<String> {
     info!(target_nqn = %target_nqn, transport_addr = ?transport_addr, "Connecting to NVMeoF target");
 
     let addr = transport_addr.ok_or_else(|| {
-        Status::invalid_argument("Transport address is required for NVMeoF on Linux (pass via volume_context)")
+        Status::invalid_argument(
+            "Transport address is required for NVMeoF on Linux (pass via volume_context)",
+        )
     })?;
 
     let port = transport_port.unwrap_or("4420"); // Default NVMe-oF port
@@ -218,11 +242,7 @@ pub fn connect_nvmeof(target_nqn: &str, transport_addr: Option<&str>, transport_
     // Connect using nvme-cli
     let output = Command::new("nvme")
         .args([
-            "connect",
-            "-t", "tcp",
-            "-a", addr,
-            "-s", port,
-            "-n", target_nqn,
+            "connect", "-t", "tcp", "-a", addr, "-s", port, "-n", target_nqn,
         ])
         .output()
         .map_err(|e| {
@@ -273,7 +293,10 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
                 if let Some(dev_path) = device.get("DevicePath").and_then(|p| p.as_str()) {
                     // Check if this device is associated with our NQN
                     // The NQN might be in the SubsystemNQN or ModelNumber field
-                    let subsys_nqn = device.get("SubsystemNQN").and_then(|n| n.as_str()).unwrap_or("");
+                    let subsys_nqn = device
+                        .get("SubsystemNQN")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("");
                     if subsys_nqn == target_nqn || subsys_nqn.contains(target_nqn) {
                         return Ok(dev_path.to_string());
                     }
@@ -307,13 +330,10 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
     }
 
     // Last resort: find most recent nvme device
-    let output = Command::new("nvme")
-        .arg("list")
-        .output()
-        .map_err(|e| {
-            error!(error = %e, "Failed to execute nvme list");
-            Status::internal(format!("Failed to list NVMe devices: {}", e))
-        })?;
+    let output = Command::new("nvme").arg("list").output().map_err(|e| {
+        error!(error = %e, "Failed to execute nvme list");
+        Status::internal(format!("Failed to list NVMe devices: {}", e))
+    })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
@@ -399,7 +419,7 @@ pub fn format_device(device: &str, fs_type: &str) -> PlatformResult<()> {
         }
         "ufs" | "ffs" => {
             return Err(Status::invalid_argument(
-                "UFS/FFS are not supported on Linux. Use 'ext4' or 'xfs' instead"
+                "UFS/FFS are not supported on Linux. Use 'ext4' or 'xfs' instead",
             ));
         }
         _ => {
@@ -471,7 +491,10 @@ pub fn bind_mount(source: &str, target: &str) -> PlatformResult<()> {
     // Ensure target directory exists
     std::fs::create_dir_all(target).map_err(|e| {
         error!(error = %e, "Failed to create bind mount target directory");
-        Status::internal(format!("Failed to create bind mount target directory: {}", e))
+        Status::internal(format!(
+            "Failed to create bind mount target directory: {}",
+            e
+        ))
     })?;
 
     let output = Command::new("mount")
@@ -501,13 +524,10 @@ pub fn unmount(target: &str) -> PlatformResult<()> {
         return Ok(());
     }
 
-    let output = Command::new("umount")
-        .arg(target)
-        .output()
-        .map_err(|e| {
-            error!(error = %e, "Failed to execute umount");
-            Status::internal(format!("Failed to execute umount: {}", e))
-        })?;
+    let output = Command::new("umount").arg(target).output().map_err(|e| {
+        error!(error = %e, "Failed to execute umount");
+        Status::internal(format!("Failed to execute umount: {}", e))
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -527,18 +547,16 @@ pub fn unmount(target: &str) -> PlatformResult<()> {
 pub fn is_mounted(target: &str) -> PlatformResult<bool> {
     // On Linux, check /proc/mounts for efficiency
     if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
-        return Ok(mounts.lines().any(|line| {
-            line.split_whitespace().nth(1) == Some(target)
-        }));
+        return Ok(mounts
+            .lines()
+            .any(|line| line.split_whitespace().nth(1) == Some(target)));
     }
 
     // Fallback to mount command
-    let output = Command::new("mount")
-        .output()
-        .map_err(|e| {
-            error!(error = %e, "Failed to execute mount");
-            Status::internal(format!("Failed to check mounts: {}", e))
-        })?;
+    let output = Command::new("mount").output().map_err(|e| {
+        error!(error = %e, "Failed to execute mount");
+        Status::internal(format!("Failed to check mounts: {}", e))
+    })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(stdout.lines().any(|line| line.contains(target)))
@@ -550,10 +568,10 @@ pub fn validate_fs_type(fs_type: &str) -> PlatformResult<&'static str> {
         "ext4" | "" => Ok("ext4"),
         "xfs" => Ok("xfs"),
         "zfs" => Err(Status::invalid_argument(
-            "ZFS cannot be used as fsType for block volumes (ZFS manages its own storage)"
+            "ZFS cannot be used as fsType for block volumes (ZFS manages its own storage)",
         )),
         "ufs" | "ffs" => Err(Status::invalid_argument(
-            "UFS/FFS are not supported on Linux. Use 'ext4' or 'xfs' instead"
+            "UFS/FFS are not supported on Linux. Use 'ext4' or 'xfs' instead",
         )),
         _ => Err(Status::invalid_argument(format!(
             "Unsupported filesystem on Linux: {}. Supported: ext4, xfs",

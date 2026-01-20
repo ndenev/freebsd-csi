@@ -47,7 +47,9 @@ impl NodeService {
         }
 
         // Disallow dangerous characters that could enable shell injection
-        let dangerous_chars = [';', '|', '&', '$', '`', '(', ')', '{', '}', '<', '>', '\n', '\r'];
+        let dangerous_chars = [
+            ';', '|', '&', '$', '`', '(', ')', '{', '}', '<', '>', '\n', '\r',
+        ];
         for c in dangerous_chars {
             if path.contains(c) {
                 return Err(Status::invalid_argument(format!(
@@ -74,9 +76,9 @@ impl NodeService {
         }
 
         // Target names should only contain alphanumeric, dots, colons, and dashes
-        let valid = target.chars().all(|c| {
-            c.is_ascii_alphanumeric() || c == '.' || c == ':' || c == '-' || c == '_'
-        });
+        let valid = target
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == ':' || c == '-' || c == '_');
 
         if !valid {
             return Err(Status::invalid_argument(
@@ -102,12 +104,11 @@ impl NodeService {
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         // Parse df output (second line, second column is total size in KB)
-        if let Some(line) = stdout.lines().nth(1) {
-            if let Some(size_kb) = line.split_whitespace().nth(1) {
-                if let Ok(size) = size_kb.parse::<i64>() {
-                    return Ok(size * 1024); // Convert KB to bytes
-                }
-            }
+        if let Some(line) = stdout.lines().nth(1)
+            && let Some(size_kb) = line.split_whitespace().nth(1)
+            && let Ok(size) = size_kb.parse::<i64>()
+        {
+            return Ok(size * 1024); // Convert KB to bytes
         }
 
         Err(Status::internal("Could not parse volume capacity"))
@@ -192,7 +193,9 @@ impl csi::node_server::Node for NodeService {
         // Connect to target and get device
         let device = match export_type.to_lowercase().as_str() {
             "iscsi" => platform::connect_iscsi(target_name, portal)?,
-            "nvmeof" | "nvme" => platform::connect_nvmeof(target_name, transport_addr, transport_port)?,
+            "nvmeof" | "nvme" => {
+                platform::connect_nvmeof(target_name, transport_addr, transport_port)?
+            }
             other => {
                 return Err(Status::invalid_argument(format!(
                     "Unsupported export type: {}",
@@ -368,11 +371,11 @@ impl csi::node_server::Node for NodeService {
         platform::unmount(target_path)?;
 
         // Try to remove the target directory
-        if Path::new(target_path).exists() {
-            if let Err(e) = std::fs::remove_dir(target_path) {
-                // Only warn, don't fail - the directory might not be empty
-                warn!(error = %e, target_path = %target_path, "Could not remove target directory");
-            }
+        if Path::new(target_path).exists()
+            && let Err(e) = std::fs::remove_dir(target_path)
+        {
+            // Only warn, don't fail - the directory might not be empty
+            warn!(error = %e, target_path = %target_path, "Could not remove target directory");
         }
 
         info!(
@@ -473,9 +476,7 @@ impl csi::node_server::Node for NodeService {
         &self,
         _request: Request<csi::NodeGetVolumeStatsRequest>,
     ) -> Result<Response<csi::NodeGetVolumeStatsResponse>, Status> {
-        Err(Status::unimplemented(
-            "NodeGetVolumeStats is not supported",
-        ))
+        Err(Status::unimplemented("NodeGetVolumeStats is not supported"))
     }
 }
 
@@ -510,14 +511,10 @@ mod tests {
 
     #[test]
     fn test_validate_target_name_valid() {
-        assert!(NodeService::validate_target_name(
-            "iqn.2023-01.com.example:storage.target1"
-        )
-        .is_ok());
-        assert!(NodeService::validate_target_name(
-            "nqn.2023-01.com.example:nvme.target1"
-        )
-        .is_ok());
+        assert!(
+            NodeService::validate_target_name("iqn.2023-01.com.example:storage.target1").is_ok()
+        );
+        assert!(NodeService::validate_target_name("nqn.2023-01.com.example:nvme.target1").is_ok());
     }
 
     #[test]

@@ -3,5 +3,7 @@ pub mod error;
 pub mod properties;
 
 pub use dataset::{Dataset, ZfsManager};
+// Re-export for module API
+#[allow(unused_imports)]
 pub use error::{Result, ZfsError};
 pub use properties::VolumeMetadata;

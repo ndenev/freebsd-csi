@@ -11,6 +11,7 @@ use std::path::Path;
 use super::error::{CtlError, Result};
 
 /// Default config file path
+#[allow(dead_code)] // Useful constant for external users
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/ctl.ucl";
 
 /// Validate a string for safe use in UCL configuration.
@@ -99,6 +100,7 @@ impl IscsiTargetUcl {
 
 /// Represents an NVMeoF subsystem in UCL format (if ctld supports it)
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Reserved for NVMeoF UCL config support
 pub struct NvmeSubsystemUcl {
     pub nqn: String,
     pub namespaces: Vec<NvmeNamespaceUcl>,
@@ -106,6 +108,7 @@ pub struct NvmeSubsystemUcl {
 
 /// Represents an NVMe namespace
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Reserved for NVMeoF UCL config support
 pub struct NvmeNamespaceUcl {
     pub id: u32,
     pub path: String,
@@ -119,6 +122,7 @@ impl NvmeSubsystemUcl {
     /// For now, this generates a placeholder comment.
     ///
     /// Returns an error if any field contains characters that could corrupt UCL syntax.
+    #[allow(dead_code)] // Reserved for NVMeoF UCL config support
     pub fn to_ucl_string(&self) -> Result<String> {
         // Validate all string fields before generating UCL
         validate_ucl_string(&self.nqn, "NQN")?;
@@ -222,6 +226,7 @@ impl UclConfigManager {
     }
 
     /// Create an IscsiTargetUcl with the manager's default auth/portal groups
+    #[allow(dead_code)] // Helper method for future use
     pub fn create_target(&self, iqn: &str, device_path: &str, lun_id: u32) -> IscsiTargetUcl {
         IscsiTargetUcl {
             iqn: iqn.to_string(),
@@ -298,11 +303,8 @@ mod tests {
             "pg0".to_string(),
         );
 
-        let target = manager.create_target(
-            "iqn.2024-01.org.freebsd.csi:test",
-            "/dev/zvol/tank/test",
-            0,
-        );
+        let target =
+            manager.create_target("iqn.2024-01.org.freebsd.csi:test", "/dev/zvol/tank/test", 0);
 
         assert_eq!(target.iqn, "iqn.2024-01.org.freebsd.csi:test");
         assert_eq!(target.auth_group, "ag0");

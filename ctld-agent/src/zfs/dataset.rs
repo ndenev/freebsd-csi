@@ -2,7 +2,7 @@ use std::process::Command;
 use tracing::instrument;
 
 use super::error::{Result, ZfsError};
-use super::properties::{VolumeMetadata, METADATA_PROPERTY};
+use super::properties::{METADATA_PROPERTY, VolumeMetadata};
 
 /// Validate that a name is safe for use in ZFS commands.
 /// Only allows alphanumeric characters, underscores, hyphens, and periods.
@@ -13,7 +13,10 @@ fn validate_name(name: &str) -> Result<()> {
     if name.contains("..") {
         return Err(ZfsError::InvalidName("path traversal not allowed".into()));
     }
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.') {
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
         return Err(ZfsError::InvalidName(format!(
             "invalid characters in name '{}': only alphanumeric, underscore, hyphen, and period allowed",
             name
@@ -28,12 +31,15 @@ pub struct Dataset {
     /// Full dataset name (e.g., "tank/csi/vol1")
     pub name: String,
     /// Used space in bytes
+    #[allow(dead_code)] // Dataset property for future use
     pub used: u64,
     /// Available space in bytes
+    #[allow(dead_code)] // Dataset property for future use
     pub available: u64,
     /// Referenced space in bytes
     pub referenced: u64,
     /// Mountpoint (None if not mounted or for volumes)
+    #[allow(dead_code)] // Dataset property for future use
     pub mountpoint: Option<String>,
 }
 
@@ -48,7 +54,9 @@ impl ZfsManager {
     pub fn new(parent_dataset: String) -> Result<Self> {
         // Validate dataset name
         if parent_dataset.is_empty() {
-            return Err(ZfsError::InvalidName("dataset name cannot be empty".to_string()));
+            return Err(ZfsError::InvalidName(
+                "dataset name cannot be empty".to_string(),
+            ));
         }
 
         // Verify parent dataset exists
@@ -85,8 +93,10 @@ impl ZfsManager {
         let output = Command::new("zfs")
             .args([
                 "create",
-                "-V", &size_bytes.to_string(),
-                "-o", "volmode=dev",
+                "-V",
+                &size_bytes.to_string(),
+                "-o",
+                "volmode=dev",
                 &full_name,
             ])
             .output()?;
@@ -116,9 +126,7 @@ impl ZfsManager {
             return Err(ZfsError::DatasetNotFound(full_name));
         }
 
-        let output = Command::new("zfs")
-            .args(["destroy", &full_name])
-            .output()?;
+        let output = Command::new("zfs").args(["destroy", &full_name]).output()?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -192,9 +200,7 @@ impl ZfsManager {
 
         let full_name = format!("{}@{}", self.full_path(volume_name), snap_name);
 
-        let output = Command::new("zfs")
-            .args(["destroy", &full_name])
-            .output()?;
+        let output = Command::new("zfs").args(["destroy", &full_name]).output()?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -222,10 +228,12 @@ impl ZfsManager {
             .args([
                 "list",
                 "-H",
-                "-p",  // Machine-parseable output (bytes)
-                "-t", "volume",
+                "-p", // Machine-parseable output (bytes)
+                "-t",
+                "volume",
                 "-r",
-                "-o", "name,used,avail,refer,mountpoint",
+                "-o",
+                "name,used,avail,refer,mountpoint",
                 &self.parent_dataset,
             ])
             .output()?;
@@ -245,8 +253,7 @@ impl ZfsManager {
 
             let dataset = self.parse_dataset_line(line)?;
             // Only include direct children (volumes under our parent)
-            if dataset.name.starts_with(&self.parent_dataset)
-                && dataset.name != self.parent_dataset
+            if dataset.name.starts_with(&self.parent_dataset) && dataset.name != self.parent_dataset
             {
                 datasets.push(dataset);
             }
@@ -287,6 +294,7 @@ impl ZfsManager {
     }
 
     /// Get volume metadata from ZFS user property
+    #[allow(dead_code)] // API method for future use
     #[instrument(skip(self))]
     pub fn get_volume_metadata(&self, name: &str) -> Result<Option<VolumeMetadata>> {
         validate_name(name)?;
@@ -407,8 +415,9 @@ impl ZfsManager {
             .args([
                 "list",
                 "-H",
-                "-p",  // Machine-parseable output (bytes)
-                "-o", "name,used,avail,refer,mountpoint",
+                "-p", // Machine-parseable output (bytes)
+                "-o",
+                "name,used,avail,refer,mountpoint",
                 full_name,
             ])
             .output()?;
@@ -422,9 +431,10 @@ impl ZfsManager {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let line = stdout.lines().next().ok_or_else(|| {
-            ZfsError::ParseError("empty output from zfs list".to_string())
-        })?;
+        let line = stdout
+            .lines()
+            .next()
+            .ok_or_else(|| ZfsError::ParseError("empty output from zfs list".to_string()))?;
 
         self.parse_dataset_line(line)
     }
@@ -467,9 +477,9 @@ impl ZfsManager {
             return Ok(0);
         }
 
-        size_str.parse::<u64>().map_err(|_| {
-            ZfsError::ParseError(format!("invalid size value: {}", size_str))
-        })
+        size_str
+            .parse::<u64>()
+            .map_err(|_| ZfsError::ParseError(format!("invalid size value: {}", size_str)))
     }
 }
 
@@ -481,7 +491,10 @@ mod tests {
     fn test_parse_size() {
         // With -p flag, ZFS outputs bytes directly
         assert_eq!(ZfsManager::parse_size("1024").unwrap(), 1024);
-        assert_eq!(ZfsManager::parse_size("1073741824").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(
+            ZfsManager::parse_size("1073741824").unwrap(),
+            1024 * 1024 * 1024
+        );
         assert_eq!(ZfsManager::parse_size("-").unwrap(), 0);
         // Invalid input should error
         assert!(ZfsManager::parse_size("1K").is_err());
@@ -523,9 +536,6 @@ mod tests {
         let manager = ZfsManager {
             parent_dataset: "tank/csi".to_string(),
         };
-        assert_eq!(
-            manager.get_device_path("vol1"),
-            "/dev/zvol/tank/csi/vol1"
-        );
+        assert_eq!(manager.get_device_path("vol1"), "/dev/zvol/tank/csi/vol1");
     }
 }

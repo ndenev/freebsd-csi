@@ -8,9 +8,9 @@ use std::path::PathBuf;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 
 use crate::agent::{
-    storage_agent_client::StorageAgentClient, CreateSnapshotRequest, CreateVolumeRequest,
-    DeleteSnapshotRequest, DeleteVolumeRequest, ExpandVolumeRequest, ExportType, GetVolumeRequest,
-    Snapshot, Volume,
+    CreateSnapshotRequest, CreateVolumeRequest, DeleteSnapshotRequest, DeleteVolumeRequest,
+    ExpandVolumeRequest, ExportType, GetVolumeRequest, Snapshot, Volume,
+    storage_agent_client::StorageAgentClient,
 };
 
 /// TLS configuration for connecting to ctld-agent

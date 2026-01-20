@@ -109,6 +109,7 @@ fn validate_device_path(path: &str) -> Result<()> {
 
 /// Represents an NVMe subsystem configuration
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields used for API completeness
 pub struct NvmeSubsystem {
     /// NVMe Qualified Name for the subsystem
     pub nqn: String,
@@ -256,6 +257,7 @@ impl NvmeofManager {
     ///
     /// # Returns
     /// Some(NvmeSubsystem) if found, None otherwise
+    #[allow(dead_code)] // API method for future use
     pub fn get_subsystem(&self, nqn: &str) -> Option<NvmeSubsystem> {
         let subsystems = self.subsystems.read().unwrap();
         subsystems.get(nqn).cloned()
@@ -265,23 +267,20 @@ impl NvmeofManager {
     ///
     /// # Returns
     /// A vector of all NvmeSubsystem instances
+    #[allow(dead_code)] // API method for future use
     pub fn list_subsystems(&self) -> Vec<NvmeSubsystem> {
         let subsystems = self.subsystems.read().unwrap();
         subsystems.values().cloned().collect()
     }
 
     /// Get the base NQN
+    #[allow(dead_code)] // API method for future use
     pub fn base_nqn(&self) -> &str {
         &self.base_nqn
     }
 
     /// Create a subsystem via ctladm (live operation)
-    fn create_subsystem_live(
-        &self,
-        nqn: &str,
-        device_path: &str,
-        volume_name: &str,
-    ) -> Result<()> {
+    fn create_subsystem_live(&self, nqn: &str, device_path: &str, volume_name: &str) -> Result<()> {
         // ctladm create -b block -o file=<path> -o vendor=FreeBSD -o product=<name> -S <nqn>
         debug!(
             "Running ctladm create for subsystem {} with device {}",

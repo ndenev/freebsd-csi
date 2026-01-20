@@ -28,6 +28,7 @@ fn create_volume_request(name: &str, size_bytes: i64, export_type: i32) -> HashM
 
 /// Test that empty volume names are rejected
 #[test]
+#[allow(clippy::const_is_empty)]
 fn test_empty_volume_name_validation() {
     let name = "";
     assert!(name.is_empty(), "Empty name should be detected");
@@ -48,7 +49,9 @@ fn test_valid_volume_name_characters() {
     ];
 
     for name in valid_names {
-        let is_valid = name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.');
+        let is_valid = name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.');
         assert!(
             !name.is_empty() && is_valid,
             "Name '{}' should be valid",
@@ -75,7 +78,9 @@ fn test_invalid_volume_name_characters() {
 
     for name in invalid_names {
         let is_valid = !name.is_empty()
-            && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.');
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.');
         assert!(!is_valid, "Name '{}' should be invalid", name);
     }
 }
@@ -95,19 +100,22 @@ fn test_zero_size_validation() {
 #[test]
 fn test_negative_size_validation() {
     let size_bytes: i64 = -1024;
-    assert!(size_bytes <= 0, "Negative size should be detected as invalid");
+    assert!(
+        size_bytes <= 0,
+        "Negative size should be detected as invalid"
+    );
 }
 
 /// Test that positive sizes are accepted
 #[test]
 fn test_valid_size_values() {
     let valid_sizes: Vec<i64> = vec![
-        1,                          // Minimum positive
-        1024,                       // 1 KB
-        1024 * 1024,                // 1 MB
-        1024 * 1024 * 1024,         // 1 GB
-        10 * 1024 * 1024 * 1024,    // 10 GB
-        100 * 1024 * 1024 * 1024,   // 100 GB
+        1,                        // Minimum positive
+        1024,                     // 1 KB
+        1024 * 1024,              // 1 MB
+        1024 * 1024 * 1024,       // 1 GB
+        10 * 1024 * 1024 * 1024,  // 10 GB
+        100 * 1024 * 1024 * 1024, // 100 GB
     ];
 
     for size in valid_sizes {
@@ -173,9 +181,22 @@ fn test_snapshot_id_format() {
 
     for id in valid_ids {
         let parts: Vec<&str> = id.split('@').collect();
-        assert_eq!(parts.len(), 2, "Snapshot ID '{}' should have exactly one @", id);
-        assert!(!parts[0].is_empty(), "Volume ID in '{}' should not be empty", id);
-        assert!(!parts[1].is_empty(), "Snapshot name in '{}' should not be empty", id);
+        assert_eq!(
+            parts.len(),
+            2,
+            "Snapshot ID '{}' should have exactly one @",
+            id
+        );
+        assert!(
+            !parts[0].is_empty(),
+            "Volume ID in '{}' should not be empty",
+            id
+        );
+        assert!(
+            !parts[1].is_empty(),
+            "Snapshot name in '{}' should not be empty",
+            id
+        );
     }
 }
 
@@ -183,10 +204,10 @@ fn test_snapshot_id_format() {
 #[test]
 fn test_invalid_snapshot_id_format() {
     let invalid_ids = vec![
-        "",              // Empty
-        "volume1",       // Missing @
-        "volume1@",      // Missing snapshot name
-        "@snap1",        // Missing volume ID
+        "",               // Empty
+        "volume1",        // Missing @
+        "volume1@",       // Missing snapshot name
+        "@snap1",         // Missing volume ID
         "vol@snap@extra", // Too many @
     ];
 
@@ -216,9 +237,9 @@ fn test_create_volume_request_params() {
 fn test_empty_request_params() {
     let params: HashMap<String, String> = HashMap::new();
 
-    assert!(params.get("name").is_none());
-    assert!(params.get("size_bytes").is_none());
-    assert!(params.get("export_type").is_none());
+    assert!(!params.contains_key("name"));
+    assert!(!params.contains_key("size_bytes"));
+    assert!(!params.contains_key("export_type"));
 }
 
 // ============================================================================
@@ -442,7 +463,10 @@ async fn test_multiple_concurrent_readers() {
 #[test]
 fn test_volume_context_construction() {
     let mut context: HashMap<String, String> = HashMap::new();
-    context.insert("target_name".to_string(), "iqn.2024-01.org.freebsd.csi:vol1".to_string());
+    context.insert(
+        "target_name".to_string(),
+        "iqn.2024-01.org.freebsd.csi:vol1".to_string(),
+    );
     context.insert("lun_id".to_string(), "0".to_string());
     context.insert("zfs_dataset".to_string(), "tank/csi/vol1".to_string());
     context.insert("export_type".to_string(), "iscsi".to_string());
@@ -460,6 +484,7 @@ fn test_volume_context_construction() {
 
 /// Test complete volume lifecycle parameter flow
 #[test]
+#[allow(clippy::const_is_empty)]
 fn test_volume_lifecycle_params() {
     // Create volume params
     let name = "test-vol";
@@ -485,6 +510,7 @@ fn test_volume_lifecycle_params() {
 
 /// Test complete snapshot lifecycle parameter flow
 #[test]
+#[allow(clippy::const_is_empty)]
 fn test_snapshot_lifecycle_params() {
     // Create snapshot params
     let source_volume_id = "test-vol";
