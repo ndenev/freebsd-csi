@@ -160,12 +160,14 @@ jobs:
           mkdir build && cd build
 
           # Configure for FreeBSD cross-compilation
+          # -fPIC is required for linking into PIE executables
           cmake .. \
             -DCMAKE_SYSTEM_NAME=FreeBSD \
             -DCMAKE_C_COMPILER=clang \
-            -DCMAKE_C_FLAGS="--target=x86_64-unknown-freebsd --sysroot=/tmp/freebsd-sysroot -I/tmp/freebsd-sysroot/usr/include" \
+            -DCMAKE_C_FLAGS="--target=x86_64-unknown-freebsd --sysroot=/tmp/freebsd-sysroot -I/tmp/freebsd-sysroot/usr/include -fPIC" \
             -DCMAKE_INSTALL_PREFIX=/tmp/freebsd-sysroot/usr/local \
             -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
             -G Ninja
 
           ninja
