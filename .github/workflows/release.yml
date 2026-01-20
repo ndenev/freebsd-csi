@@ -203,14 +203,18 @@ jobs:
           name: ctld-agent-freebsd${{ matrix.freebsd }}-amd64
           path: target/x86_64-unknown-freebsd/release/ctld-agent
 
-  # Create FreeBSD packages
+  # Create FreeBSD packages using real FreeBSD VM
   package-freebsd:
     name: Package (FreeBSD ${{ matrix.freebsd }})
     needs: build-ctld-agent-freebsd
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        freebsd: ['14', '15']
+        include:
+          - freebsd: '14'
+            freebsd_release: '14.2'
+          - freebsd: '15'
+            freebsd_release: '15.0'
     steps:
       - uses: actions/checkout@v4
 
@@ -235,7 +239,7 @@ jobs:
           name: ctld-agent-freebsd${{ matrix.freebsd }}-amd64
           path: pkg-staging/usr/local/sbin
 
-      - name: Prepare package structure
+      - name: Prepare package staging on host
         env:
           FREEBSD_MAJOR: ${{ matrix.freebsd }}
           PKG_VERSION: ${{ steps.version.outputs.version }}
@@ -259,13 +263,34 @@ jobs:
           sed -i "s/freebsd:\*:x86:64/freebsd:${FREEBSD_MAJOR}:x86:64/" \
             pkg-staging/+MANIFEST
 
-      - name: Create package archive
+      - name: Create package with pkg create
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: ${{ matrix.freebsd_release }}
+          usesh: true
+          copyback: true
+          run: |
+            set -e
+            PKG_VERSION="${{ steps.version.outputs.version }}"
+            FREEBSD_MAJOR="${{ matrix.freebsd }}"
+
+            # pkg create needs the manifest and root directory
+            cd pkg-staging
+
+            # Create package using pkg create
+            pkg create -M +MANIFEST -r . -o ..
+
+            # List created package
+            ls -la ../ctld-agent-*.pkg
+
+      - name: Rename package with version info
         env:
           PKG_VERSION: ${{ steps.version.outputs.version }}
           FREEBSD_MAJOR: ${{ matrix.freebsd }}
         run: |
-          cd pkg-staging
-          tar -cvJf "../ctld-agent-${PKG_VERSION}-freebsd${FREEBSD_MAJOR}-amd64.pkg" .
+          # pkg create names the file based on manifest, rename to include version
+          mv ctld-agent-*.pkg "ctld-agent-${PKG_VERSION}-freebsd${FREEBSD_MAJOR}-amd64.pkg" || true
+          ls -la ctld-agent-*.pkg
 
       - name: Upload package
         uses: actions/upload-artifact@v4
