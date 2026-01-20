@@ -9,12 +9,6 @@ on:
       tag:
         description: 'Release tag (e.g., v0.1.0)'
         required: true
-  workflow_call:
-    inputs:
-      tag:
-        description: 'Release tag (e.g., v0.1.0)'
-        required: true
-        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -37,16 +31,11 @@ jobs:
       - name: Get version
         id: version
         env:
-          # Handle both workflow_dispatch and workflow_call inputs
-          DISPATCH_TAG: ${{ github.event.inputs.tag }}
-          CALL_TAG: ${{ inputs.tag }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          # Priority: workflow_call input > workflow_dispatch input > git ref
-          if [ -n "${CALL_TAG}" ]; then
-            VERSION="${CALL_TAG}"
-          elif [ -n "${DISPATCH_TAG}" ]; then
-            VERSION="${DISPATCH_TAG}"
+          if [ -n "${INPUT_TAG}" ]; then
+            VERSION="${INPUT_TAG}"
           else
             VERSION="${REF_NAME}"
           fi
