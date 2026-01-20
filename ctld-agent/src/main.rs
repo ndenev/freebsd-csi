@@ -1,6 +1,7 @@
 use clap::Parser;
 use tracing::info;
 
+mod ctl;
 mod zfs;
 
 #[derive(Parser, Debug)]
