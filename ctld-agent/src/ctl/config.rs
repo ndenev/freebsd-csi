@@ -56,6 +56,8 @@ pub struct IscsiTarget {
     pub luns: Vec<Lun>,
     /// Target alias (optional human-readable name)
     pub alias: Option<String>,
+    /// Authentication group (optional)
+    pub auth_group: Option<String>,
 }
 
 impl IscsiTarget {
@@ -67,7 +69,13 @@ impl IscsiTarget {
             portal_group_tag: 1,
             luns: Vec::new(),
             alias: None,
+            auth_group: None,
         }
+    }
+
+    /// Generate an IQN for a volume
+    pub fn generate_iqn(base_iqn: &str, volume_name: &str) -> String {
+        format!("{}:{}", base_iqn, volume_name.replace('/', "-"))
     }
 
     /// Set the portal group tag
@@ -85,6 +93,12 @@ impl IscsiTarget {
     /// Set an alias for this target
     pub fn with_alias(mut self, alias: String) -> Self {
         self.alias = Some(alias);
+        self
+    }
+
+    /// Set an authentication group for this target
+    pub fn with_auth_group(mut self, auth_group: String) -> Self {
+        self.auth_group = Some(auth_group);
         self
     }
 }

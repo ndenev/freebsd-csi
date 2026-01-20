@@ -109,9 +109,13 @@ impl IscsiManager {
         })
     }
 
-    /// Generate a full IQN for a volume name
-    fn generate_iqn(&self, volume_name: &str) -> String {
-        format!("{}:{}", self.base_iqn, volume_name)
+    /// Load existing configuration from ctld
+    #[instrument(skip(self))]
+    pub fn load_config(&mut self) -> Result<()> {
+        // Parse existing ctl.conf to populate targets map
+        // For now, start with empty state - full implementation would parse the config
+        tracing::debug!("Loading CTL configuration");
+        Ok(())
     }
 
     /// Export a ZFS volume as an iSCSI target
@@ -126,7 +130,7 @@ impl IscsiManager {
         validate_name(volume_name)?;
         validate_device_path(device_path)?;
 
-        let iqn = self.generate_iqn(volume_name);
+        let iqn = IscsiTarget::generate_iqn(&self.base_iqn, volume_name);
         debug!("Exporting volume {} as iSCSI target {}", volume_name, iqn);
 
         // Check if target already exists
@@ -405,16 +409,15 @@ mod tests {
 
     #[test]
     fn test_generate_iqn() {
-        let pg = PortalGroup::new(1, "pg1".to_string());
-        let manager = IscsiManager {
-            base_iqn: "iqn.2024-01.com.example.storage".to_string(),
-            portal_group: pg,
-            targets: RwLock::new(HashMap::new()),
-        };
-
         assert_eq!(
-            manager.generate_iqn("vol1"),
+            IscsiTarget::generate_iqn("iqn.2024-01.com.example.storage", "vol1"),
             "iqn.2024-01.com.example.storage:vol1"
+        );
+
+        // Test with slashes in volume name (should be replaced with hyphens)
+        assert_eq!(
+            IscsiTarget::generate_iqn("iqn.2024-01.com.example.storage", "tank/csi/vol1"),
+            "iqn.2024-01.com.example.storage:tank-csi-vol1"
         );
     }
 
