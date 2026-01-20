@@ -3,6 +3,21 @@ use tracing::instrument;
 
 use super::error::{Result, ZfsError};
 
+/// Validate that a name is safe for use in ZFS commands.
+/// Only allows alphanumeric characters, underscores, hyphens, and periods.
+fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(ZfsError::InvalidName("name cannot be empty".into()));
+    }
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.') {
+        return Err(ZfsError::InvalidName(format!(
+            "invalid characters in name '{}': only alphanumeric, underscore, hyphen, and period allowed",
+            name
+        )));
+    }
+    Ok(())
+}
+
 /// Represents a ZFS dataset (filesystem or volume)
 #[derive(Debug, Clone)]
 pub struct Dataset {
@@ -56,22 +71,13 @@ impl ZfsManager {
     /// Create a new ZFS volume (zvol)
     #[instrument(skip(self))]
     pub fn create_volume(&self, name: &str, size_bytes: u64) -> Result<Dataset> {
-        // Validate name
-        if name.is_empty() || name.contains('/') {
-            return Err(ZfsError::InvalidName(format!(
-                "volume name '{}' is invalid (must be non-empty and not contain '/')",
-                name
-            )));
-        }
+        // Validate name for command injection prevention
+        validate_name(name)?;
 
         let full_name = self.full_path(name);
 
-        // Check if volume already exists
-        if self.dataset_exists(&full_name)? {
-            return Err(ZfsError::DatasetExists(full_name));
-        }
-
         // Create the volume with volmode=dev
+        // Let zfs create fail if already exists (avoids TOCTOU race)
         let output = Command::new("zfs")
             .args([
                 "create",
@@ -83,6 +89,9 @@ impl ZfsManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("already exists") {
+                return Err(ZfsError::DatasetExists(full_name));
+            }
             return Err(ZfsError::CommandFailed(stderr.to_string()));
         }
 
@@ -93,6 +102,9 @@ impl ZfsManager {
     /// Delete a ZFS volume
     #[instrument(skip(self))]
     pub fn delete_volume(&self, name: &str) -> Result<()> {
+        // Validate name for command injection prevention
+        validate_name(name)?;
+
         let full_name = self.full_path(name);
 
         // Check if volume exists
@@ -115,6 +127,9 @@ impl ZfsManager {
     /// Resize a ZFS volume
     #[instrument(skip(self))]
     pub fn resize_volume(&self, name: &str, new_size_bytes: u64) -> Result<()> {
+        // Validate name for command injection prevention
+        validate_name(name)?;
+
         let full_name = self.full_path(name);
 
         // Check if volume exists
@@ -137,13 +152,9 @@ impl ZfsManager {
     /// Create a snapshot of a volume
     #[instrument(skip(self))]
     pub fn create_snapshot(&self, volume_name: &str, snap_name: &str) -> Result<String> {
-        // Validate snapshot name
-        if snap_name.is_empty() || snap_name.contains('/') || snap_name.contains('@') {
-            return Err(ZfsError::InvalidName(format!(
-                "snapshot name '{}' is invalid",
-                snap_name
-            )));
-        }
+        // Validate names for command injection prevention
+        validate_name(volume_name)?;
+        validate_name(snap_name)?;
 
         let full_volume = self.full_path(volume_name);
         let snapshot_name = format!("{}@{}", full_volume, snap_name);
@@ -170,6 +181,9 @@ impl ZfsManager {
 
     /// Get information about a specific dataset
     pub fn get_dataset(&self, name: &str) -> Result<Dataset> {
+        // Validate name for command injection prevention
+        validate_name(name)?;
+
         let full_name = self.full_path(name);
         self.get_dataset_info(&full_name)
     }
@@ -180,6 +194,7 @@ impl ZfsManager {
             .args([
                 "list",
                 "-H",
+                "-p",  // Machine-parseable output (bytes)
                 "-t", "volume",
                 "-r",
                 "-o", "name,used,avail,refer,mountpoint",
@@ -233,6 +248,7 @@ impl ZfsManager {
             .args([
                 "list",
                 "-H",
+                "-p",  // Machine-parseable output (bytes)
                 "-o", "name,used,avail,refer,mountpoint",
                 full_name,
             ])
@@ -284,48 +300,17 @@ impl ZfsManager {
         })
     }
 
-    /// Parse a ZFS size string (with optional suffix) into bytes
+    /// Parse a ZFS size string into bytes.
+    /// With -p flag, ZFS outputs bytes directly as integers.
     fn parse_size(size_str: &str) -> Result<u64> {
         let size_str = size_str.trim();
         if size_str == "-" {
             return Ok(0);
         }
 
-        // Try parsing as plain number first (when -p flag would be used)
-        if let Ok(bytes) = size_str.parse::<u64>() {
-            return Ok(bytes);
-        }
-
-        // Parse with suffix (K, M, G, T, P, E)
-        let len = size_str.len();
-        if len < 2 {
-            return Err(ZfsError::ParseError(format!(
-                "invalid size string: {}",
-                size_str
-            )));
-        }
-
-        let (num_str, suffix) = size_str.split_at(len - 1);
-        let num: f64 = num_str.parse().map_err(|_| {
-            ZfsError::ParseError(format!("invalid size number: {}", num_str))
-        })?;
-
-        let multiplier: u64 = match suffix.to_uppercase().as_str() {
-            "K" => 1024,
-            "M" => 1024 * 1024,
-            "G" => 1024 * 1024 * 1024,
-            "T" => 1024 * 1024 * 1024 * 1024,
-            "P" => 1024 * 1024 * 1024 * 1024 * 1024,
-            "E" => 1024 * 1024 * 1024 * 1024 * 1024 * 1024,
-            _ => {
-                return Err(ZfsError::ParseError(format!(
-                    "unknown size suffix: {}",
-                    suffix
-                )))
-            }
-        };
-
-        Ok((num * multiplier as f64) as u64)
+        size_str.parse::<u64>().map_err(|_| {
+            ZfsError::ParseError(format!("invalid size value: {}", size_str))
+        })
     }
 }
 
@@ -335,12 +320,31 @@ mod tests {
 
     #[test]
     fn test_parse_size() {
+        // With -p flag, ZFS outputs bytes directly
         assert_eq!(ZfsManager::parse_size("1024").unwrap(), 1024);
-        assert_eq!(ZfsManager::parse_size("1K").unwrap(), 1024);
-        assert_eq!(ZfsManager::parse_size("1M").unwrap(), 1024 * 1024);
-        assert_eq!(ZfsManager::parse_size("1G").unwrap(), 1024 * 1024 * 1024);
-        assert_eq!(ZfsManager::parse_size("1.5G").unwrap(), (1.5 * 1024.0 * 1024.0 * 1024.0) as u64);
+        assert_eq!(ZfsManager::parse_size("1073741824").unwrap(), 1024 * 1024 * 1024);
         assert_eq!(ZfsManager::parse_size("-").unwrap(), 0);
+        // Invalid input should error
+        assert!(ZfsManager::parse_size("1K").is_err());
+        assert!(ZfsManager::parse_size("invalid").is_err());
+    }
+
+    #[test]
+    fn test_validate_name() {
+        // Valid names
+        assert!(validate_name("volume1").is_ok());
+        assert!(validate_name("vol-1").is_ok());
+        assert!(validate_name("vol_1").is_ok());
+        assert!(validate_name("vol.1").is_ok());
+        assert!(validate_name("Vol-1_test.snap").is_ok());
+
+        // Invalid names
+        assert!(validate_name("").is_err());
+        assert!(validate_name("vol/name").is_err());
+        assert!(validate_name("vol@snap").is_err());
+        assert!(validate_name("vol name").is_err());
+        assert!(validate_name("vol;rm -rf /").is_err());
+        assert!(validate_name("$(whoami)").is_err());
     }
 
     #[test]
