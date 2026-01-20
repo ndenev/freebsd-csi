@@ -144,7 +144,7 @@ jobs:
 
           # Determine FreeBSD version
           case "${FREEBSD_MAJOR}" in
-            14) FREEBSD_VERSION="14.2-RELEASE" ;;
+            14) FREEBSD_VERSION="14.3-RELEASE" ;;
             15) FREEBSD_VERSION="15.0-RELEASE" ;;
             *)  echo "Unknown FreeBSD version"; exit 1 ;;
           esac
