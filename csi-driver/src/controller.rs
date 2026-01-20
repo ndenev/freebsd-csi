@@ -99,19 +99,40 @@ impl ControllerService {
     }
 
     /// Convert agent Volume to CSI Volume.
-    fn agent_volume_to_csi(volume: &crate::agent::Volume) -> csi::Volume {
+    ///
+    /// `parameters` contains the original StorageClass parameters which may include
+    /// portal addresses and filesystem type needed by the node service.
+    fn agent_volume_to_csi(volume: &crate::agent::Volume, parameters: &HashMap<String, String>) -> csi::Volume {
         let mut volume_context = HashMap::new();
         volume_context.insert("target_name".to_string(), volume.target_name.clone());
         volume_context.insert("lun_id".to_string(), volume.lun_id.to_string());
         volume_context.insert("zfs_dataset".to_string(), volume.zfs_dataset.clone());
-        volume_context.insert(
-            "export_type".to_string(),
-            match ExportType::try_from(volume.export_type).unwrap_or(ExportType::Unspecified) {
-                ExportType::Iscsi => "iscsi".to_string(),
-                ExportType::Nvmeof => "nvmeof".to_string(),
-                ExportType::Unspecified => "unspecified".to_string(),
-            },
-        );
+
+        let export_type_str = match ExportType::try_from(volume.export_type).unwrap_or(ExportType::Unspecified) {
+            ExportType::Iscsi => "iscsi",
+            ExportType::Nvmeof => "nvmeof",
+            ExportType::Unspecified => "unspecified",
+        };
+        volume_context.insert("export_type".to_string(), export_type_str.to_string());
+
+        // Pass through portal/address info for node service (required on Linux)
+        // StorageClass parameters like: portal, targetPortal, transportAddr, transportPort
+        if let Some(portal) = parameters.get("portal").or_else(|| parameters.get("targetPortal")) {
+            volume_context.insert("portal".to_string(), portal.clone());
+        }
+
+        // For NVMeoF, pass transport address and port
+        if let Some(addr) = parameters.get("transportAddr").or_else(|| parameters.get("transport_addr")) {
+            volume_context.insert("transport_addr".to_string(), addr.clone());
+        }
+        if let Some(port) = parameters.get("transportPort").or_else(|| parameters.get("transport_port")) {
+            volume_context.insert("transport_port".to_string(), port.clone());
+        }
+
+        // Pass through filesystem type for node service
+        if let Some(fs_type) = parameters.get("fsType").or_else(|| parameters.get("fs_type")) {
+            volume_context.insert("fs_type".to_string(), fs_type.clone());
+        }
 
         csi::Volume {
             capacity_bytes: volume.size_bytes,
@@ -181,7 +202,7 @@ impl csi::controller_server::Controller for ControllerService {
         );
 
         Ok(Response::new(csi::CreateVolumeResponse {
-            volume: Some(Self::agent_volume_to_csi(&volume)),
+            volume: Some(Self::agent_volume_to_csi(&volume, &req.parameters)),
         }))
     }
 

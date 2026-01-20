@@ -23,6 +23,7 @@ mod agent_client;
 mod controller;
 mod identity;
 mod node;
+mod platform;
 
 pub use agent_client::{AgentClient, TlsConfig};
 pub use controller::ControllerService;
