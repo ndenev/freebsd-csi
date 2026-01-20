@@ -8,16 +8,14 @@ use super::error::{Result, ZfsError};
 pub struct Dataset {
     /// Full dataset name (e.g., "tank/csi/vol1")
     pub name: String,
-    /// Dataset type: "filesystem" or "volume"
-    pub dataset_type: String,
     /// Used space in bytes
     pub used: u64,
-    /// Available space in bytes (for filesystems) or volume size (for volumes)
+    /// Available space in bytes
     pub available: u64,
     /// Referenced space in bytes
     pub referenced: u64,
-    /// Volume size in bytes (only for volumes)
-    pub volsize: Option<u64>,
+    /// Mountpoint (None if not mounted or for volumes)
+    pub mountpoint: Option<String>,
 }
 
 /// Manager for ZFS operations under a parent dataset
@@ -184,7 +182,7 @@ impl ZfsManager {
                 "-H",
                 "-t", "volume",
                 "-r",
-                "-o", "name,type,used,avail,refer,volsize",
+                "-o", "name,used,avail,refer,mountpoint",
                 &self.parent_dataset,
             ])
             .output()?;
@@ -235,7 +233,7 @@ impl ZfsManager {
             .args([
                 "list",
                 "-H",
-                "-o", "name,type,used,avail,refer,volsize",
+                "-o", "name,used,avail,refer,mountpoint",
                 full_name,
             ])
             .output()?;
@@ -259,32 +257,30 @@ impl ZfsManager {
     /// Parse a line of ZFS output into a Dataset
     fn parse_dataset_line(&self, line: &str) -> Result<Dataset> {
         let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() < 6 {
+        if fields.len() < 5 {
             return Err(ZfsError::ParseError(format!(
-                "expected 6 fields, got {}: {}",
+                "expected 5 fields, got {}: {}",
                 fields.len(),
                 line
             )));
         }
 
         let name = fields[0].to_string();
-        let dataset_type = fields[1].to_string();
-        let used = Self::parse_size(fields[2])?;
-        let available = Self::parse_size(fields[3])?;
-        let referenced = Self::parse_size(fields[4])?;
-        let volsize = if fields[5] == "-" {
+        let used = Self::parse_size(fields[1])?;
+        let available = Self::parse_size(fields[2])?;
+        let referenced = Self::parse_size(fields[3])?;
+        let mountpoint = if fields[4] == "-" || fields[4] == "none" {
             None
         } else {
-            Some(Self::parse_size(fields[5])?)
+            Some(fields[4].to_string())
         };
 
         Ok(Dataset {
             name,
-            dataset_type,
             used,
             available,
             referenced,
-            volsize,
+            mountpoint,
         })
     }
 
