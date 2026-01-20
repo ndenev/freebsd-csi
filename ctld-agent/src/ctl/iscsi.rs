@@ -181,7 +181,7 @@ impl IscsiManager {
 
         // Build target configuration
         let lun = Lun::new(lun_id, device_path.to_string());
-        let target = IscsiTarget::new(volume_name.to_string(), iqn.clone())
+        let target = IscsiTarget::new(volume_name.to_string(), iqn)
             .with_portal_group(self.portal_group.tag)
             .with_lun(lun);
 
@@ -193,10 +193,19 @@ impl IscsiManager {
 
         // Write UCL config and reload ctld (or fall back to ctladm)
         if self.ucl_manager.is_some() {
-            self.write_config_and_reload()?;
+            if let Err(e) = self.write_config_and_reload() {
+                // Rollback cache on failure
+                let mut targets = self.targets.write().unwrap();
+                targets.remove(volume_name);
+                return Err(e);
+            }
         } else {
-            // Legacy path: use ctladm directly
-            self.add_target_live(volume_name, device_path)?;
+            // Legacy path: use ctladm directly - if this fails, also rollback
+            if let Err(e) = self.add_target_live(volume_name, device_path) {
+                let mut targets = self.targets.write().unwrap();
+                targets.remove(volume_name);
+                return Err(e);
+            }
         }
 
         info!("Successfully exported {} as iSCSI target", volume_name);
@@ -211,26 +220,30 @@ impl IscsiManager {
 
         debug!("Unexporting iSCSI target {}", target_name);
 
-        // Get target from cache to verify it exists
-        {
-            let targets = self.targets.read().unwrap();
-            if !targets.contains_key(target_name) {
-                return Err(CtlError::TargetNotFound(target_name.to_string()));
-            }
-        }
-
-        // Remove from cache
-        {
+        // Remove from cache, saving the target for potential rollback
+        let saved_target = {
             let mut targets = self.targets.write().unwrap();
-            targets.remove(target_name);
-        }
+            match targets.remove(target_name) {
+                Some(target) => target,
+                None => return Err(CtlError::TargetNotFound(target_name.to_string())),
+            }
+        };
 
         // Write UCL config and reload ctld (or fall back to ctladm)
         if self.ucl_manager.is_some() {
-            self.write_config_and_reload()?;
+            if let Err(e) = self.write_config_and_reload() {
+                // Rollback cache on failure - restore the removed target
+                let mut targets = self.targets.write().unwrap();
+                targets.insert(target_name.to_string(), saved_target);
+                return Err(e);
+            }
         } else {
-            // Legacy path: use ctladm directly
-            self.remove_target_live(target_name)?;
+            // Legacy path: use ctladm directly - if this fails, also rollback
+            if let Err(e) = self.remove_target_live(target_name) {
+                let mut targets = self.targets.write().unwrap();
+                targets.insert(target_name.to_string(), saved_target);
+                return Err(e);
+            }
         }
 
         info!("Successfully unexported iSCSI target {}", target_name);
