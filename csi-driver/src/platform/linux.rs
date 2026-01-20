@@ -16,6 +16,7 @@ use tracing::{debug, error, info, warn};
 use super::PlatformResult;
 
 /// Default filesystem type for Linux
+#[allow(dead_code)] // Platform constant for future use
 pub const DEFAULT_FS_TYPE: &str = "ext4";
 
 /// Connect to an iSCSI target using iscsiadm.
@@ -191,6 +192,7 @@ pub fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
 }
 
 /// Disconnect from an iSCSI target.
+#[allow(dead_code)] // Platform API for future use
 pub fn disconnect_iscsi(target_iqn: &str) -> PlatformResult<()> {
     info!(target_iqn = %target_iqn, "Disconnecting from iSCSI target");
 
@@ -346,6 +348,7 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
 }
 
 /// Disconnect from an NVMeoF target.
+#[allow(dead_code)] // Platform API for future use
 pub fn disconnect_nvmeof(target_nqn: &str) -> PlatformResult<()> {
     info!(target_nqn = %target_nqn, "Disconnecting from NVMeoF target");
 
@@ -577,6 +580,7 @@ pub fn validate_fs_type(fs_type: &str) -> PlatformResult<&'static str> {
 }
 
 /// Get the default filesystem type for Linux.
+#[allow(dead_code)] // Platform API for future use
 pub fn default_fs_type() -> &'static str {
     DEFAULT_FS_TYPE
 }
