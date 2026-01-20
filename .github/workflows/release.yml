@@ -41,7 +41,8 @@ jobs:
       - name: Get current version
         id: current
         run: |
-          VERSION=$(grep '^version' csi-driver/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          # Read from workspace Cargo.toml (root), not individual crates
+          VERSION=$(grep -A5 '\[workspace.package\]' Cargo.toml | grep '^version' | sed 's/.*"\(.*\)".*/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Current version: $VERSION"
 
@@ -62,13 +63,14 @@ jobs:
           echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
           echo "New version: $VERSION"
 
-      - name: Update Cargo.toml files
+      - name: Update workspace Cargo.toml
         env:
           NEW_VERSION: ${{ steps.bump.outputs.version }}
         run: |
-          sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" csi-driver/Cargo.toml
-          sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" ctld-agent/Cargo.toml
-          echo "Updated Cargo.toml files to $NEW_VERSION"
+          # Update version in [workspace.package] section of root Cargo.toml
+          # Individual crates inherit via version.workspace = true
+          sed -i "/\[workspace.package\]/,/^\[/ s/^version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
+          echo "Updated workspace Cargo.toml to $NEW_VERSION"
 
       - name: Update Chart.yaml
         env:
@@ -85,11 +87,8 @@ jobs:
           echo "Would bump to version: ${{ steps.bump.outputs.version }}"
           echo "Would create tag: ${{ steps.bump.outputs.tag }}"
           echo ""
-          echo "=== csi-driver/Cargo.toml changes ==="
-          git diff csi-driver/Cargo.toml
-          echo ""
-          echo "=== ctld-agent/Cargo.toml changes ==="
-          git diff ctld-agent/Cargo.toml
+          echo "=== Cargo.toml (workspace) changes ==="
+          git diff Cargo.toml
           echo ""
           echo "=== charts/freebsd-csi/Chart.yaml changes ==="
           git diff charts/freebsd-csi/Chart.yaml
@@ -101,7 +100,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add csi-driver/Cargo.toml ctld-agent/Cargo.toml charts/freebsd-csi/Chart.yaml
+          git add Cargo.toml charts/freebsd-csi/Chart.yaml
           git commit -m "Release $TAG"
           git tag "$TAG"
           git push origin HEAD --tags
