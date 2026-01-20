@@ -20,10 +20,12 @@ pub mod agent {
 mod agent_client;
 mod controller;
 mod identity;
+mod node;
 
 pub use agent_client::AgentClient;
 pub use controller::ControllerService;
 pub use identity::{IdentityService, DRIVER_NAME, DRIVER_VERSION};
+pub use node::NodeService;
 
 /// CLI arguments for the CSI driver
 #[derive(Parser, Debug)]
