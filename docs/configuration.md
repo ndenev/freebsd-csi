@@ -6,16 +6,22 @@ This document provides a comprehensive reference for all configuration options i
 
 - [ctld-agent Configuration](#ctld-agent-configuration)
   - [Command-Line Arguments](#command-line-arguments)
+  - [TLS Configuration](#tls-configuration)
   - [ZFS Dataset Requirements](#zfs-dataset-requirements)
   - [Network Configuration](#network-configuration)
 - [CSI Driver Configuration](#csi-driver-configuration)
   - [Command-Line Arguments](#csi-driver-command-line-arguments)
+  - [TLS Configuration](#csi-driver-tls-configuration)
   - [Environment Variables](#environment-variables)
   - [StorageClass Parameters](#storageclass-parameters)
 - [Security Considerations](#security-considerations)
+  - [mTLS Setup](#mtls-setup)
   - [RBAC Permissions](#rbac-permissions)
   - [Network Policies](#network-policies)
   - [Volume Access Control](#volume-access-control)
+- [Platform Support](#platform-support)
+  - [Linux Worker Nodes](#linux-worker-nodes)
+  - [FreeBSD Worker Nodes](#freebsd-worker-nodes)
 
 ---
 
@@ -32,6 +38,9 @@ The ctld-agent is the FreeBSD daemon that manages ZFS volumes and CTL exports.
 | `--base-iqn` | `iqn.2024-01.org.freebsd.csi` | No | Base iSCSI Qualified Name for target naming. |
 | `--base-nqn` | `nqn.2024-01.org.freebsd.csi` | No | Base NVMe Qualified Name for NVMeoF targets. |
 | `--portal-group` | `1` | No | Portal group tag for iSCSI targets. |
+| `--tls-cert` | - | No | TLS certificate file (PEM format) for server identity. |
+| `--tls-key` | - | No | TLS private key file (PEM format). |
+| `--tls-client-ca` | - | No | CA certificate for client verification (enables mTLS). |
 
 #### Examples
 
@@ -40,22 +49,31 @@ The ctld-agent is the FreeBSD daemon that manages ZFS volumes and CTL exports.
 ctld-agent --zfs-parent tank/csi
 ```
 
-**Production configuration with custom IQN:**
+**Production configuration with mTLS:**
 ```bash
 ctld-agent \
   --listen [::]:50051 \
   --zfs-parent tank/kubernetes/volumes \
   --base-iqn iqn.2024-01.com.example.storage \
-  --base-nqn nqn.2024-01.com.example.storage \
-  --portal-group 1
+  --tls-cert /etc/ctld-agent/server.crt \
+  --tls-key /etc/ctld-agent/server.key \
+  --tls-client-ca /etc/ctld-agent/ca.crt
 ```
 
-**Listen on specific interface:**
-```bash
-ctld-agent \
-  --listen 192.168.1.100:50051 \
-  --zfs-parent tank/csi
-```
+### TLS Configuration
+
+The ctld-agent supports optional TLS encryption and mutual TLS (mTLS) authentication.
+
+| Mode | Arguments Required | Description |
+|------|-------------------|-------------|
+| Plaintext | None | No encryption (development only) |
+| TLS (server-only) | `--tls-cert`, `--tls-key` | Encrypted connection, no client verification |
+| mTLS | `--tls-cert`, `--tls-key`, `--tls-client-ca` | Encrypted connection with client certificate verification |
+
+**Environment variables:**
+- `TLS_CERT_PATH` - Alternative to `--tls-cert`
+- `TLS_KEY_PATH` - Alternative to `--tls-key`
+- `TLS_CLIENT_CA_PATH` - Alternative to `--tls-client-ca`
 
 ### ZFS Dataset Requirements
 
@@ -89,11 +107,13 @@ zfs set reservation=50G tank/csi
 zfs set atime=off tank/csi
 ```
 
-#### Volume Naming
+#### Volume Metadata
 
-Volumes are created as zvols under the parent dataset:
-- Dataset path: `{zfs-parent}/{volume-name}`
-- Example: `tank/csi/pvc-12345678-abcd-efgh-ijkl-123456789abc`
+Volume metadata is automatically persisted in ZFS user properties:
+- Property: `user:csi:metadata`
+- Contains: export type, target name, LUN ID, creation time
+
+This metadata survives ctld-agent restarts and is automatically restored on startup.
 
 ### Network Configuration
 
@@ -146,6 +166,30 @@ The csi-driver runs in Kubernetes and implements the Container Storage Interface
 | `--node` | `true` | Enable node service |
 | `--driver-name` | `csi.freebsd.org` | CSI driver name |
 | `--log-level` | `info` | Log level (trace, debug, info, warn, error) |
+| `--tls-cert` | - | TLS certificate file for client identity |
+| `--tls-key` | - | TLS private key file |
+| `--tls-ca` | - | CA certificate for server verification |
+| `--tls-domain` | `ctld-agent` | Domain name for TLS certificate verification |
+
+### CSI Driver TLS Configuration
+
+The CSI driver supports mTLS for secure communication with ctld-agent.
+
+**All three options must be provided together for mTLS:**
+- `--tls-cert` / `TLS_CERT_PATH`
+- `--tls-key` / `TLS_KEY_PATH`
+- `--tls-ca` / `TLS_CA_PATH`
+
+**Example with mTLS:**
+```bash
+csi-driver \
+  --controller \
+  --agent-endpoint https://ctld-agent.storage.svc:50051 \
+  --tls-cert /etc/csi/client.crt \
+  --tls-key /etc/csi/client.key \
+  --tls-ca /etc/csi/ca.crt \
+  --tls-domain ctld-agent
+```
 
 ### Environment Variables
 
@@ -153,6 +197,10 @@ The csi-driver runs in Kubernetes and implements the Container Storage Interface
 |----------|-------------|
 | `CSI_NODE_ID` | Alternative to `--node-id` argument |
 | `AGENT_ENDPOINT` | Alternative to `--agent-endpoint` argument |
+| `TLS_CERT_PATH` | Alternative to `--tls-cert` argument |
+| `TLS_KEY_PATH` | Alternative to `--tls-key` argument |
+| `TLS_CA_PATH` | Alternative to `--tls-ca` argument |
+| `TLS_DOMAIN` | Alternative to `--tls-domain` argument |
 | `RUST_LOG` | Control logging verbosity (e.g., `debug`, `csi_driver=trace`) |
 
 ### StorageClass Parameters
@@ -162,11 +210,23 @@ StorageClass parameters control how volumes are provisioned:
 | Parameter | Values | Default | Description |
 |-----------|--------|---------|-------------|
 | `exportType` | `iscsi`, `nvmeof` | `iscsi` | Protocol for exporting volumes |
-| `fsType` | `ufs` | `ufs` | Filesystem type for formatting volumes |
+| `fsType` | `ext4`, `xfs` (Linux); `ufs` (FreeBSD) | `ext4` | Filesystem type for formatting volumes |
+| `portal` | `<host>:<port>` | - | **Required for iSCSI on Linux.** iSCSI portal address |
+| `transportAddr` | `<host>` | - | **Required for NVMeoF.** NVMe-oF transport address |
+| `transportPort` | `<port>` | `4420` | NVMe-oF transport port |
+
+#### Filesystem Types by Platform
+
+| Platform | Supported fsType | Default |
+|----------|-----------------|---------|
+| Linux | `ext4`, `xfs` | `ext4` |
+| FreeBSD | `ufs` | `ufs` |
+
+> **Note:** `zfs` cannot be used as `fsType` because ZFS manages its own storage layer and cannot format block devices.
 
 #### Example StorageClasses
 
-**iSCSI with UFS:**
+**iSCSI with ext4 (Linux workers):**
 ```yaml
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -175,7 +235,24 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
-  fsType: ufs
+  fsType: ext4
+  portal: "192.168.1.100:3260"  # REQUIRED for Linux
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+```
+
+**iSCSI with XFS:**
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: freebsd-zfs-iscsi-xfs
+provisioner: csi.freebsd.org
+parameters:
+  exportType: iscsi
+  fsType: xfs
+  portal: "192.168.1.100:3260"
 allowVolumeExpansion: true
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
@@ -190,7 +267,9 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: nvmeof
-  fsType: ufs
+  fsType: ext4
+  transportAddr: "192.168.1.100"  # REQUIRED
+  transportPort: "4420"
 allowVolumeExpansion: true
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
@@ -205,7 +284,8 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
-  fsType: ufs
+  fsType: ext4
+  portal: "192.168.1.100:3260"
 allowVolumeExpansion: true
 reclaimPolicy: Retain
 volumeBindingMode: Immediate
@@ -214,6 +294,51 @@ volumeBindingMode: Immediate
 ---
 
 ## Security Considerations
+
+### mTLS Setup
+
+For production deployments, enable mTLS between the CSI driver and ctld-agent.
+
+#### Generate Certificates
+
+```bash
+# Generate CA
+openssl genrsa -out ca.key 4096
+openssl req -new -x509 -days 365 -key ca.key -out ca.crt \
+  -subj "/CN=FreeBSD-CSI-CA"
+
+# Generate server certificate (ctld-agent)
+openssl genrsa -out server.key 4096
+openssl req -new -key server.key -out server.csr \
+  -subj "/CN=ctld-agent"
+openssl x509 -req -days 365 -in server.csr \
+  -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt
+
+# Generate client certificate (csi-driver)
+openssl genrsa -out client.key 4096
+openssl req -new -key client.key -out client.csr \
+  -subj "/CN=csi-driver"
+openssl x509 -req -days 365 -in client.csr \
+  -CA ca.crt -CAkey ca.key -CAcreateserial -out client.crt
+```
+
+#### Deploy Certificates
+
+**On FreeBSD (ctld-agent):**
+```bash
+mkdir -p /etc/ctld-agent
+cp ca.crt server.crt server.key /etc/ctld-agent/
+chmod 600 /etc/ctld-agent/*.key
+```
+
+**In Kubernetes (csi-driver):**
+```bash
+kubectl create secret generic csi-tls-certs \
+  --from-file=ca.crt=ca.crt \
+  --from-file=client.crt=client.crt \
+  --from-file=client.key=client.key \
+  -n kube-system
+```
 
 ### RBAC Permissions
 
@@ -308,7 +433,7 @@ Best practices for network security:
 
 1. **Dedicated storage network** - Use a separate VLAN for storage traffic
 2. **Firewall rules** - Restrict access to storage ports (3260, 4420, 50051)
-3. **TLS for gRPC** - Consider using TLS between CSI driver and ctld-agent
+3. **mTLS for gRPC** - Enable mTLS between CSI driver and ctld-agent
 
 #### ZFS Permissions
 
@@ -326,6 +451,57 @@ zfs allow -u csi-user create,destroy,mount,snapshot tank/csi
 
 ---
 
+## Platform Support
+
+### Linux Worker Nodes
+
+Linux worker nodes are the primary deployment target. Required packages:
+
+**For iSCSI:**
+```bash
+# Debian/Ubuntu
+apt-get install open-iscsi
+
+# RHEL/CentOS/Fedora
+dnf install iscsi-initiator-utils
+
+# Start the iSCSI daemon
+systemctl enable --now iscsid
+```
+
+**For NVMeoF:**
+```bash
+# Debian/Ubuntu
+apt-get install nvme-cli
+
+# RHEL/CentOS/Fedora
+dnf install nvme-cli
+
+# Load NVMe-oF kernel modules
+modprobe nvme-tcp
+```
+
+**Filesystem tools:**
+```bash
+# ext4 (usually pre-installed)
+apt-get install e2fsprogs
+
+# XFS
+apt-get install xfsprogs
+```
+
+### FreeBSD Worker Nodes
+
+FreeBSD worker nodes are supported but experimental (Kubernetes on FreeBSD is limited).
+
+**Required packages:**
+- iSCSI initiator (built-in)
+- NVMe support (built-in)
+
+**Filesystem:** UFS (the default on FreeBSD)
+
+---
+
 ## Troubleshooting
 
 ### Common Issues
@@ -340,10 +516,17 @@ zfs allow -u csi-user create,destroy,mount,snapshot tank/csi
 - Verify network connectivity from Kubernetes to ctld-agent
 - Ensure sufficient ZFS pool space
 
-**Mount failures:**
-- Verify iSCSI initiator is running on worker nodes
-- Check target discovery: `iscsictl -L`
+**Mount failures on Linux:**
+- Verify iSCSI initiator is running: `systemctl status iscsid`
+- Check iSCSI sessions: `iscsiadm -m session`
+- Verify portal is reachable: `nc -zv <portal-ip> 3260`
 - Review CSI node pod logs
+
+**mTLS connection fails:**
+- Verify certificate paths are correct
+- Check certificate validity: `openssl x509 -in cert.crt -text -noout`
+- Ensure CA matches: certificates must be signed by the same CA
+- Check domain name matches `--tls-domain`
 
 ### Logging
 

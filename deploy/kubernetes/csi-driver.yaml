@@ -106,7 +106,16 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
             - name: AGENT_ENDPOINT
-              value: "ctld-agent.storage.svc.cluster.local:50051"
+              value: "https://ctld-agent.storage.svc.cluster.local:50051"
+            # TLS configuration - uncomment and configure for mTLS
+            # - name: TLS_CERT_PATH
+            #   value: "/etc/csi-tls/client.crt"
+            # - name: TLS_KEY_PATH
+            #   value: "/etc/csi-tls/client.key"
+            # - name: TLS_CA_PATH
+            #   value: "/etc/csi-tls/ca.crt"
+            # - name: TLS_DOMAIN
+            #   value: "ctld-agent"
           resources:
             requests:
               cpu: 50m
@@ -117,12 +126,23 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
+            # Uncomment for mTLS
+            # - name: tls-certs
+            #   mountPath: /etc/csi-tls
+            #   readOnly: true
           securityContext:
             privileged: true
 
       volumes:
         - name: socket-dir
           emptyDir: {}
+        # Uncomment for mTLS - create secret with:
+        # kubectl create secret generic csi-tls-certs \
+        #   --from-file=ca.crt --from-file=client.crt --from-file=client.key \
+        #   -n kube-system
+        # - name: tls-certs
+        #   secret:
+        #     secretName: csi-tls-certs
 
 ---
 apiVersion: apps/v1
@@ -169,12 +189,10 @@ spec:
             - "--nodeid=$(NODE_ID)"
             - "--node"
           env:
-            - name: NODE_NAME
+            - name: NODE_ID
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: AGENT_ENDPOINT
-              value: "ctld-agent.storage.svc.cluster.local:50051"
           resources:
             requests:
               cpu: 50m
@@ -192,6 +210,13 @@ spec:
               mountPropagation: Bidirectional
             - name: dev
               mountPath: /dev
+            # Host paths for iSCSI/NVMe tools
+            - name: host-iscsi
+              mountPath: /etc/iscsi
+              readOnly: true
+            - name: host-sys
+              mountPath: /sys
+              readOnly: true
 
       volumes:
         - name: socket-dir
@@ -209,4 +234,12 @@ spec:
         - name: dev
           hostPath:
             path: /dev
+            type: Directory
+        - name: host-iscsi
+          hostPath:
+            path: /etc/iscsi
+            type: DirectoryOrCreate
+        - name: host-sys
+          hostPath:
+            path: /sys
             type: Directory
