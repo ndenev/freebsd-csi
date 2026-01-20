@@ -229,16 +229,17 @@ impl NvmeofManager {
 
         debug!("Unexporting NVMeoF subsystem {}", nqn);
 
-        // Verify subsystem exists in cache
-        {
+        // Get the subsystem from cache (need namespace_id for ctladm remove)
+        let namespace_id = {
             let subsystems = self.subsystems.read().unwrap();
-            if !subsystems.contains_key(nqn) {
-                return Err(CtlError::TargetNotFound(nqn.to_string()));
+            match subsystems.get(nqn) {
+                Some(subsystem) => subsystem.namespace_id,
+                None => return Err(CtlError::TargetNotFound(nqn.to_string())),
             }
-        }
+        };
 
-        // Remove the subsystem via ctladm
-        self.remove_subsystem_live(nqn)?;
+        // Remove the subsystem via ctladm using the LUN ID
+        self.remove_subsystem_live(nqn, namespace_id)?;
 
         // Remove from cache
         {
@@ -319,12 +320,15 @@ impl NvmeofManager {
     }
 
     /// Remove a subsystem via ctladm (live operation)
-    fn remove_subsystem_live(&self, nqn: &str) -> Result<()> {
-        // ctladm remove -b block -S <nqn>
-        debug!("Running ctladm remove for subsystem {}", nqn);
+    fn remove_subsystem_live(&self, nqn: &str, lun_id: u32) -> Result<()> {
+        // ctladm remove -b block -l <lun_id>
+        debug!(
+            "Running ctladm remove for subsystem {} (LUN ID {})",
+            nqn, lun_id
+        );
 
         let output = Command::new("ctladm")
-            .args(["remove", "-b", "block", "-S", nqn])
+            .args(["remove", "-b", "block", "-l", &lun_id.to_string()])
             .output()?;
 
         if !output.status.success() {
