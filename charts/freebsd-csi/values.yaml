@@ -1,5 +1,9 @@
 # FreeBSD CSI Driver Helm Chart Values
 
+# Namespace to deploy resources (defaults to freebsd-csi)
+# Can be overridden with --namespace flag or this value
+namespace: freebsd-csi
+
 nameOverride: ""
 fullnameOverride: ""
 

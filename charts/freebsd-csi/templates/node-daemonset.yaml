@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: {{ include "freebsd-csi.fullname" . }}-node
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "freebsd-csi.namespace" . }}
   labels:
     {{- include "freebsd-csi.labels" . | nindent 4 }}
     app.kubernetes.io/component: node
