@@ -5,6 +5,7 @@ use tracing::{debug, info, instrument, warn};
 
 use super::config::{IscsiTarget, Lun, PortalGroup};
 use super::error::{CtlError, Result};
+use super::ucl_config::{IscsiTargetUcl, LunUcl, UclConfigManager};
 
 /// Validate that a name is safe for use in CTL/iSCSI commands.
 /// For IQN format, allows: alphanumeric, underscore, hyphen, period, colon.
@@ -89,10 +90,15 @@ pub struct IscsiManager {
     portal_group: PortalGroup,
     /// In-memory cache of active targets
     targets: RwLock<HashMap<String, IscsiTarget>>,
+    /// UCL config manager for persistent configuration (None = use ctladm directly)
+    ucl_manager: Option<UclConfigManager>,
 }
 
 impl IscsiManager {
     /// Create a new IscsiManager with the given base IQN and portal group
+    ///
+    /// This creates an IscsiManager without UCL config support, using ctladm directly.
+    /// For persistent configuration, use `new_with_ucl()` instead.
     pub fn new(base_iqn: String, portal_group: PortalGroup) -> Result<Self> {
         // Validate base IQN
         validate_name(&base_iqn)?;
@@ -106,6 +112,38 @@ impl IscsiManager {
             base_iqn,
             portal_group,
             targets: RwLock::new(HashMap::new()),
+            ucl_manager: None,
+        })
+    }
+
+    /// Create a new IscsiManager with UCL config support
+    ///
+    /// This creates an IscsiManager that writes targets to a UCL config file
+    /// and reloads ctld, providing persistent configuration across reboots.
+    pub fn new_with_ucl(
+        base_iqn: String,
+        portal_group: PortalGroup,
+        config_path: String,
+        auth_group: String,
+    ) -> Result<Self> {
+        validate_name(&base_iqn)?;
+
+        let ucl_manager = UclConfigManager::new(
+            config_path,
+            auth_group,
+            portal_group.name.clone(),
+        );
+
+        info!(
+            "Initializing IscsiManager with base_iqn={}, portal_group={}, UCL config",
+            base_iqn, portal_group.name
+        );
+
+        Ok(Self {
+            base_iqn,
+            portal_group,
+            targets: RwLock::new(HashMap::new()),
+            ucl_manager: Some(ucl_manager),
         })
     }
 
@@ -141,14 +179,9 @@ impl IscsiManager {
             }
         }
 
-        // Create the LUN via ctladm
-        let ctl_lun_id = self.add_target_live(volume_name, device_path)?;
-
         // Build target configuration
-        let mut lun = Lun::new(lun_id, device_path.to_string());
-        lun.ctl_lun_id = Some(ctl_lun_id);
-
-        let target = IscsiTarget::new(volume_name.to_string(), iqn)
+        let lun = Lun::new(lun_id, device_path.to_string());
+        let target = IscsiTarget::new(volume_name.to_string(), iqn.clone())
             .with_portal_group(self.portal_group.tag)
             .with_lun(lun);
 
@@ -156,6 +189,14 @@ impl IscsiManager {
         {
             let mut targets = self.targets.write().unwrap();
             targets.insert(volume_name.to_string(), target.clone());
+        }
+
+        // Write UCL config and reload ctld (or fall back to ctladm)
+        if self.ucl_manager.is_some() {
+            self.write_config_and_reload()?;
+        } else {
+            // Legacy path: use ctladm directly
+            self.add_target_live(volume_name, device_path)?;
         }
 
         info!("Successfully exported {} as iSCSI target", volume_name);
@@ -170,22 +211,26 @@ impl IscsiManager {
 
         debug!("Unexporting iSCSI target {}", target_name);
 
-        // Get target from cache to verify it exists (LUN ID is embedded in name)
-        let _target = {
+        // Get target from cache to verify it exists
+        {
             let targets = self.targets.read().unwrap();
-            targets
-                .get(target_name)
-                .cloned()
-                .ok_or_else(|| CtlError::TargetNotFound(target_name.to_string()))?
-        };
-
-        // Remove the LUN via ctladm
-        self.remove_target_live(target_name)?;
+            if !targets.contains_key(target_name) {
+                return Err(CtlError::TargetNotFound(target_name.to_string()));
+            }
+        }
 
         // Remove from cache
         {
             let mut targets = self.targets.write().unwrap();
             targets.remove(target_name);
+        }
+
+        // Write UCL config and reload ctld (or fall back to ctladm)
+        if self.ucl_manager.is_some() {
+            self.write_config_and_reload()?;
+        } else {
+            // Legacy path: use ctladm directly
+            self.remove_target_live(target_name)?;
         }
 
         info!("Successfully unexported iSCSI target {}", target_name);
@@ -284,7 +329,6 @@ impl IscsiManager {
     }
 
     /// Reload ctld configuration
-    #[allow(dead_code)]
     fn reload_ctld(&self) -> Result<()> {
         debug!("Reloading ctld configuration");
 
@@ -302,6 +346,50 @@ impl IscsiManager {
         }
 
         info!("Successfully reloaded ctld configuration");
+        Ok(())
+    }
+
+    /// Write all targets to UCL config and reload ctld
+    fn write_config_and_reload(&self) -> Result<()> {
+        let ucl_manager = match &self.ucl_manager {
+            Some(m) => m,
+            None => return Ok(()), // No UCL manager, skip
+        };
+
+        // Read user content (non-CSI targets)
+        let user_content = ucl_manager.read_user_config()?;
+
+        // Convert cached targets to UCL format
+        let targets = self.targets.read().unwrap();
+        let ucl_targets: Vec<IscsiTargetUcl> = targets
+            .values()
+            .map(|t| {
+                let luns: Vec<LunUcl> = t
+                    .luns
+                    .iter()
+                    .map(|l| LunUcl {
+                        id: l.id,
+                        path: l.device_path.clone(),
+                        blocksize: l.blocksize,
+                    })
+                    .collect();
+
+                IscsiTargetUcl {
+                    iqn: t.iqn.clone(),
+                    auth_group: ucl_manager.auth_group.clone(),
+                    portal_group: ucl_manager.portal_group.clone(),
+                    luns,
+                }
+            })
+            .collect();
+        drop(targets);
+
+        // Write config
+        ucl_manager.write_config(&user_content, &ucl_targets)?;
+
+        // Reload ctld
+        self.reload_ctld()?;
+
         Ok(())
     }
 
@@ -428,6 +516,7 @@ mod tests {
             base_iqn: "iqn.2024-01.com.example".to_string(),
             portal_group: pg,
             targets: RwLock::new(HashMap::new()),
+            ucl_manager: None,
         };
 
         // Test typical ctladm output format
@@ -452,6 +541,7 @@ mod tests {
             base_iqn: "iqn.2024-01.com.example".to_string(),
             portal_group: pg,
             targets: RwLock::new(HashMap::new()),
+            ucl_manager: None,
         };
 
         assert!(manager.list_targets().is_empty());
@@ -464,6 +554,7 @@ mod tests {
             base_iqn: "iqn.2024-01.com.example".to_string(),
             portal_group: pg,
             targets: RwLock::new(HashMap::new()),
+            ucl_manager: None,
         };
 
         let result = manager.get_target("nonexistent");
@@ -472,5 +563,35 @@ mod tests {
             Err(CtlError::TargetNotFound(name)) => assert_eq!(name, "nonexistent"),
             _ => panic!("expected TargetNotFound error"),
         }
+    }
+
+    #[test]
+    fn test_iscsi_manager_with_ucl() {
+        let pg = PortalGroup::new(0, "pg0".to_string());
+        let manager = IscsiManager::new_with_ucl(
+            "iqn.2024-01.org.freebsd.csi".to_string(),
+            pg,
+            "/tmp/test-ctl.ucl".to_string(),
+            "ag0".to_string(),
+        )
+        .unwrap();
+
+        assert!(manager.ucl_manager.is_some());
+        let ucl_manager = manager.ucl_manager.as_ref().unwrap();
+        assert_eq!(ucl_manager.config_path, "/tmp/test-ctl.ucl");
+        assert_eq!(ucl_manager.auth_group, "ag0");
+        assert_eq!(ucl_manager.portal_group, "pg0");
+    }
+
+    #[test]
+    fn test_iscsi_manager_without_ucl() {
+        let pg = PortalGroup::new(1, "pg1".to_string());
+        let manager = IscsiManager::new(
+            "iqn.2024-01.org.freebsd.csi".to_string(),
+            pg,
+        )
+        .unwrap();
+
+        assert!(manager.ucl_manager.is_none());
     }
 }
