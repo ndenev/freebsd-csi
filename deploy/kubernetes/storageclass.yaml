@@ -1,0 +1,25 @@
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: freebsd-zfs-iscsi
+provisioner: csi.freebsd.org
+parameters:
+  exportType: iscsi
+  fsType: ufs
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: freebsd-zfs-nvmeof
+provisioner: csi.freebsd.org
+parameters:
+  exportType: nvmeof
+  fsType: ufs
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
