@@ -20,12 +20,14 @@ driver:
   logLevel: info
 
 # ctld-agent connection settings
+# NOTE: ctld-agent runs on an EXTERNAL FreeBSD storage server, NOT in Kubernetes
 agent:
-  # gRPC endpoint of the ctld-agent running on FreeBSD storage server
+  # gRPC endpoint of the ctld-agent (REQUIRED - must be reachable from cluster)
+  # This is the FreeBSD storage server running ctld-agent
   # Examples:
   #   - "http://192.168.1.100:50051" (plaintext)
-  #   - "https://ctld-agent.storage.svc.cluster.local:50051" (TLS)
-  endpoint: "http://ctld-agent.storage.svc.cluster.local:50051"
+  #   - "https://storage.example.com:50051" (TLS)
+  endpoint: ""
 
 # TLS configuration for mTLS with ctld-agent
 tls:

@@ -93,3 +93,12 @@ TLS secret name
 {{- printf "%s-tls" (include "freebsd-csi.fullname" .) }}
 {{- end }}
 {{- end }}
+
+{{/*
+Validate required values
+*/}}
+{{- define "freebsd-csi.validateValues" -}}
+{{- if not .Values.agent.endpoint }}
+{{- fail "agent.endpoint is required. Set it to your FreeBSD storage server address (e.g., --set agent.endpoint=http://192.168.1.100:50051)" }}
+{{- end }}
+{{- end }}

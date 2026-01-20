@@ -105,9 +105,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            # REQUIRED: ctld-agent endpoint (FreeBSD storage server, NOT in-cluster)
             - name: AGENT_ENDPOINT
-              value: "https://ctld-agent.storage.svc.cluster.local:50051"
-            # TLS configuration - uncomment and configure for mTLS
+              value: "http://<FREEBSD-STORAGE-SERVER>:50051"
+            # TLS configuration - uncomment and configure for mTLS with ctld-agent
             # - name: TLS_CERT_PATH
             #   value: "/etc/csi-tls/client.crt"
             # - name: TLS_KEY_PATH
