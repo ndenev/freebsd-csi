@@ -17,6 +17,10 @@ pub mod agent {
     tonic::include_proto!("ctld_agent.v1");
 }
 
+mod identity;
+
+pub use identity::{IdentityService, DRIVER_NAME, DRIVER_VERSION};
+
 /// CLI arguments for the CSI driver
 #[derive(Parser, Debug)]
 #[command(name = "csi-driver")]
