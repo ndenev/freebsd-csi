@@ -3,7 +3,7 @@
 //! This module handles reading and writing ctld UCL configuration files,
 //! allowing CSI-managed targets to coexist with user-managed targets.
 
-use std::fmt::Write as FmtWrite;
+use std::fmt::Write;
 use std::fs;
 use std::io::BufRead;
 use std::path::Path;
@@ -12,6 +12,40 @@ use super::error::{CtlError, Result};
 
 /// Default config file path
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/ctl.ucl";
+
+/// Validate a string for safe use in UCL configuration.
+/// Rejects characters that could corrupt UCL syntax: ", {, }, \
+/// Also validates reasonable length.
+fn validate_ucl_string(value: &str, field_name: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(CtlError::ConfigError(format!(
+            "{} cannot be empty",
+            field_name
+        )));
+    }
+
+    // Maximum reasonable length
+    if value.len() > 1024 {
+        return Err(CtlError::ConfigError(format!(
+            "{} '{}...' exceeds maximum length of 1024 characters",
+            field_name,
+            &value[..50]
+        )));
+    }
+
+    // Reject characters that could corrupt UCL syntax
+    const FORBIDDEN_CHARS: &[char] = &['"', '{', '}', '\\'];
+    for c in FORBIDDEN_CHARS {
+        if value.contains(*c) {
+            return Err(CtlError::ConfigError(format!(
+                "{} contains forbidden character '{}': {}",
+                field_name, c, value
+            )));
+        }
+    }
+
+    Ok(())
+}
 
 /// Marker comment for CSI-managed section start
 const CSI_SECTION_START: &str = "# BEGIN CSI-MANAGED TARGETS - DO NOT EDIT";
@@ -37,7 +71,17 @@ pub struct IscsiTargetUcl {
 
 impl IscsiTargetUcl {
     /// Generate UCL string representation of this target
-    pub fn to_ucl_string(&self) -> String {
+    ///
+    /// Returns an error if any field contains characters that could corrupt UCL syntax.
+    pub fn to_ucl_string(&self) -> Result<String> {
+        // Validate all string fields before generating UCL
+        validate_ucl_string(&self.iqn, "IQN")?;
+        validate_ucl_string(&self.auth_group, "auth-group")?;
+        validate_ucl_string(&self.portal_group, "portal-group")?;
+        for lun in &self.luns {
+            validate_ucl_string(&lun.path, "LUN path")?;
+        }
+
         let mut s = String::new();
         writeln!(s, "target \"{}\" {{", self.iqn).unwrap();
         writeln!(s, "    auth-group = \"{}\"", self.auth_group).unwrap();
@@ -49,7 +93,7 @@ impl IscsiTargetUcl {
             writeln!(s, "    }}").unwrap();
         }
         writeln!(s, "}}").unwrap();
-        s
+        Ok(s)
     }
 }
 
@@ -70,14 +114,22 @@ pub struct NvmeNamespaceUcl {
 impl NvmeSubsystemUcl {
     /// Generate UCL string representation of this subsystem
     /// Note: ctld may not support NVMeoF via config - verify with FreeBSD docs
-    pub fn to_ucl_string(&self) -> String {
+    ///
+    /// Returns an error if any field contains characters that could corrupt UCL syntax.
+    pub fn to_ucl_string(&self) -> Result<String> {
+        // Validate all string fields before generating UCL
+        validate_ucl_string(&self.nqn, "NQN")?;
+        for ns in &self.namespaces {
+            validate_ucl_string(&ns.path, "namespace path")?;
+        }
+
         let mut s = String::new();
         writeln!(s, "# NVMeoF subsystem (may require ctladm for now)").unwrap();
         writeln!(s, "# nqn: {}", self.nqn).unwrap();
         for ns in &self.namespaces {
             writeln!(s, "# namespace {}: {}", ns.id, ns.path).unwrap();
         }
-        s
+        Ok(s)
     }
 }
 
@@ -105,18 +157,14 @@ impl UclConfigManager {
             return Ok(String::new());
         }
 
-        let file = fs::File::open(path).map_err(|e| {
-            CtlError::CommandFailed(format!("Failed to open {}: {}", self.config_path, e))
-        })?;
+        let file = fs::File::open(path)?;
 
         let reader = std::io::BufReader::new(file);
         let mut user_content = String::new();
         let mut in_csi_section = false;
 
         for line in reader.lines() {
-            let line = line.map_err(|e| {
-                CtlError::CommandFailed(format!("Failed to read {}: {}", self.config_path, e))
-            })?;
+            let line = line?;
 
             if line.trim() == CSI_SECTION_START {
                 in_csi_section = true;
@@ -150,7 +198,7 @@ impl UclConfigManager {
         content.push('\n');
 
         for target in targets {
-            content.push_str(&target.to_ucl_string());
+            content.push_str(&target.to_ucl_string()?);
             content.push('\n');
         }
 
@@ -159,15 +207,12 @@ impl UclConfigManager {
 
         // Write atomically via temp file
         let temp_path = format!("{}.tmp", self.config_path);
-        fs::write(&temp_path, &content).map_err(|e| {
-            CtlError::CommandFailed(format!("Failed to write {}: {}", temp_path, e))
-        })?;
+        fs::write(&temp_path, &content)?;
 
         fs::rename(&temp_path, &self.config_path).map_err(|e| {
-            CtlError::CommandFailed(format!(
-                "Failed to rename {} to {}: {}",
-                temp_path, self.config_path, e
-            ))
+            // Best effort cleanup of temp file on rename failure
+            let _ = fs::remove_file(&temp_path);
+            CtlError::Io(e)
         })?;
 
         Ok(())
@@ -205,7 +250,7 @@ mod tests {
             }],
         };
 
-        let ucl = target.to_ucl_string();
+        let ucl = target.to_ucl_string().unwrap();
         assert!(ucl.contains("iqn.2024-01.org.freebsd.csi:vol1"));
         assert!(ucl.contains("auth-group"));
         assert!(ucl.contains("ag0"));
@@ -234,7 +279,7 @@ mod tests {
             ],
         };
 
-        let ucl = target.to_ucl_string();
+        let ucl = target.to_ucl_string().unwrap();
         assert!(ucl.contains("lun 0"));
         assert!(ucl.contains("lun 1"));
         assert!(ucl.contains("vol2-data"));
@@ -261,5 +306,64 @@ mod tests {
         assert_eq!(target.portal_group, "pg0");
         assert_eq!(target.luns.len(), 1);
         assert_eq!(target.luns[0].path, "/dev/zvol/tank/test");
+    }
+
+    #[test]
+    fn test_validate_ucl_string_valid() {
+        // Valid strings
+        assert!(validate_ucl_string("ag0", "test").is_ok());
+        assert!(validate_ucl_string("iqn.2024-01.org.freebsd.csi:vol1", "test").is_ok());
+        assert!(validate_ucl_string("/dev/zvol/tank/csi/vol1", "test").is_ok());
+        assert!(validate_ucl_string("portal-group-1", "test").is_ok());
+    }
+
+    #[test]
+    fn test_validate_ucl_string_invalid_chars() {
+        // Double quotes
+        assert!(validate_ucl_string("test\"value", "field").is_err());
+
+        // Braces
+        assert!(validate_ucl_string("test{value", "field").is_err());
+        assert!(validate_ucl_string("test}value", "field").is_err());
+
+        // Backslash
+        assert!(validate_ucl_string("test\\value", "field").is_err());
+    }
+
+    #[test]
+    fn test_validate_ucl_string_empty() {
+        assert!(validate_ucl_string("", "field").is_err());
+    }
+
+    #[test]
+    fn test_to_ucl_string_rejects_invalid_iqn() {
+        let target = IscsiTargetUcl {
+            iqn: "iqn.2024-01.org.freebsd.csi:vol1\"injection".to_string(),
+            auth_group: "ag0".to_string(),
+            portal_group: "pg0".to_string(),
+            luns: vec![LunUcl {
+                id: 0,
+                path: "/dev/zvol/tank/csi/vol1".to_string(),
+                blocksize: 512,
+            }],
+        };
+
+        assert!(target.to_ucl_string().is_err());
+    }
+
+    #[test]
+    fn test_to_ucl_string_rejects_invalid_path() {
+        let target = IscsiTargetUcl {
+            iqn: "iqn.2024-01.org.freebsd.csi:vol1".to_string(),
+            auth_group: "ag0".to_string(),
+            portal_group: "pg0".to_string(),
+            luns: vec![LunUcl {
+                id: 0,
+                path: "/dev/zvol/tank/csi/vol1\"}; malicious".to_string(),
+                blocksize: 512,
+            }],
+        };
+
+        assert!(target.to_ucl_string().is_err());
     }
 }
