@@ -24,6 +24,7 @@
 #   ctld_agent_tls_cert="/path/to/cert.pem"   # TLS certificate
 #   ctld_agent_tls_key="/path/to/key.pem"     # TLS key
 #   ctld_agent_tls_client_ca="/path/to/ca.pem" # Client CA for mTLS
+#   ctld_agent_log_level="info"           # Log level (trace, debug, info, warn, error)
 #   ctld_agent_flags=""                   # Additional flags
 #
 
@@ -43,6 +44,7 @@ load_rc_config $name
 : ${ctld_agent_ctl_config:="/etc/ctl.ucl"}
 : ${ctld_agent_auth_group:="ag0"}
 : ${ctld_agent_portal_group_name:="pg0"}
+: ${ctld_agent_log_level:="info"}
 : ${ctld_agent_logfile:="/var/log/ctld-agent.log"}
 
 pidfile="/var/run/${name}.pid"
@@ -72,7 +74,8 @@ ctld_agent_prestart()
         --portal-group ${ctld_agent_portal_group} \
         --ctl-config ${ctld_agent_ctl_config} \
         --auth-group ${ctld_agent_auth_group} \
-        --portal-group-name ${ctld_agent_portal_group_name}"
+        --portal-group-name ${ctld_agent_portal_group_name} \
+        --log-level ${ctld_agent_log_level}"
 
     # Add optional TLS arguments
     if [ -n "${ctld_agent_tls_cert}" ] && [ -n "${ctld_agent_tls_key}" ]; then

@@ -4,7 +4,8 @@ use std::sync::Arc;
 use clap::Parser;
 use tokio::sync::RwLock;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
-use tracing::info;
+use tracing::{Level, info};
+use tracing_subscriber::FmtSubscriber;
 
 mod ctl;
 mod service;
@@ -62,14 +63,33 @@ struct Args {
     /// CA certificate for client verification (enables mTLS)
     #[arg(long, env = "TLS_CLIENT_CA_PATH")]
     tls_client_ca: Option<PathBuf>,
+
+    /// Log level (trace, debug, info, warn, error)
+    #[arg(long, env = "LOG_LEVEL", default_value = "info")]
+    log_level: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
     let args = Args::parse();
 
+    // Initialize tracing with configured log level
+    let level = match args.log_level.to_lowercase().as_str() {
+        "trace" => Level::TRACE,
+        "debug" => Level::DEBUG,
+        "info" => Level::INFO,
+        "warn" => Level::WARN,
+        "error" => Level::ERROR,
+        _ => Level::INFO,
+    };
+
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(level)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
+
     info!("Starting ctld-agent on {}", args.listen);
+    info!("Log level: {}", args.log_level);
     info!("ZFS parent dataset: {}", args.zfs_parent);
     info!("Base IQN: {}", args.base_iqn);
     info!("Base NQN: {}", args.base_nqn);
