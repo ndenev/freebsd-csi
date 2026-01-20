@@ -3,6 +3,8 @@
 # Namespace to deploy resources (defaults to freebsd-csi)
 # Can be overridden with --namespace flag or this value
 namespace: freebsd-csi
+# Create the namespace if it doesn't exist
+createNamespace: true
 
 nameOverride: ""
 fullnameOverride: ""

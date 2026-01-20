@@ -1,0 +1,10 @@
+{{- if .Values.namespace }}
+{{- if .Values.createNamespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace }}
+  labels:
+    {{- include "freebsd-csi.labels" . | nindent 4 }}
+{{- end }}
+{{- end }}
