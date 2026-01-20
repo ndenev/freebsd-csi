@@ -82,9 +82,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let zfs_manager = ZfsManager::new(args.zfs_parent.clone())?;
     let zfs = Arc::new(RwLock::new(zfs_manager));
 
-    // Initialize iSCSI manager
-    let portal_group = PortalGroup::new(args.portal_group, format!("pg{}", args.portal_group));
-    let iscsi_manager = IscsiManager::new(args.base_iqn.clone(), portal_group)?;
+    // Initialize iSCSI manager with UCL config support
+    let portal_group = PortalGroup::new(args.portal_group, args.portal_group_name.clone());
+    let iscsi_manager = IscsiManager::new_with_ucl(
+        args.base_iqn.clone(),
+        portal_group,
+        args.ctl_config.to_string_lossy().to_string(),
+        args.auth_group.clone(),
+    )?;
     let iscsi = Arc::new(RwLock::new(iscsi_manager));
 
     // Initialize NVMeoF manager
