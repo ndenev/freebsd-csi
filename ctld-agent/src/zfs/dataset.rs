@@ -41,6 +41,8 @@ pub struct Dataset {
     /// Mountpoint (None if not mounted or for volumes)
     #[allow(dead_code)] // Dataset property for future use
     pub mountpoint: Option<String>,
+    /// Volume size in bytes (only for zvols)
+    pub volsize: Option<u64>,
 }
 
 /// Manager for ZFS operations under a parent dataset
@@ -457,7 +459,7 @@ impl ZfsManager {
                 "-H",
                 "-p", // Machine-parseable output (bytes)
                 "-o",
-                "name,used,avail,refer,mountpoint",
+                "name,used,avail,refer,mountpoint,volsize",
                 full_name,
             ])
             .output()?;
@@ -482,9 +484,9 @@ impl ZfsManager {
     /// Parse a line of ZFS output into a Dataset
     fn parse_dataset_line(&self, line: &str) -> Result<Dataset> {
         let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() < 5 {
+        if fields.len() < 6 {
             return Err(ZfsError::ParseError(format!(
-                "expected 5 fields, got {}: {}",
+                "expected 6 fields, got {}: {}",
                 fields.len(),
                 line
             )));
@@ -499,6 +501,12 @@ impl ZfsManager {
         } else {
             Some(fields[4].to_string())
         };
+        // volsize is only present for zvols, "-" for filesystems
+        let volsize = if fields[5] == "-" || fields[5] == "none" {
+            None
+        } else {
+            Some(Self::parse_size(fields[5])?)
+        };
 
         Ok(Dataset {
             name,
@@ -506,6 +514,7 @@ impl ZfsManager {
             available,
             referenced,
             mountpoint,
+            volsize,
         })
     }
 

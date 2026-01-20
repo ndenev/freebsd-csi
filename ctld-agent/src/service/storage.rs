@@ -144,10 +144,12 @@ impl StorageService {
         dataset: &crate::zfs::Dataset,
         metadata: &VolumeMetadata,
     ) -> Volume {
+        // Use volsize for zvols (the actual volume capacity), fall back to referenced
+        let size_bytes = dataset.volsize.unwrap_or(dataset.referenced) as i64;
         Volume {
             id: metadata.id.clone(),
             name: metadata.name.clone(),
-            size_bytes: dataset.referenced as i64,
+            size_bytes,
             zfs_dataset: dataset.name.clone(),
             export_type: metadata.export_type.into(),
             target_name: metadata.target_name.clone(),
