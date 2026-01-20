@@ -1,6 +1,8 @@
 use clap::Parser;
 use tracing::info;
 
+mod zfs;
+
 #[derive(Parser, Debug)]
 #[command(name = "ctld-agent")]
 #[command(about = "FreeBSD ZFS/CTL storage agent for Kubernetes CSI")]
