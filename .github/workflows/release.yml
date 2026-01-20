@@ -298,10 +298,76 @@ jobs:
           name: ctld-agent-freebsd${{ matrix.freebsd }}-pkg
           path: ctld-agent-*.pkg
 
+  # Package and publish Helm chart
+  helm-chart:
+    name: Publish Helm Chart
+    runs-on: ubuntu-latest
+    needs: build-csi-driver
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ -n "${INPUT_TAG}" ]; then
+            VERSION="${INPUT_TAG}"
+          else
+            VERSION="${REF_NAME}"
+          fi
+          # Version without 'v' prefix for Helm
+          VERSION_NUM="${VERSION#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "version_num=${VERSION_NUM}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+
+      - name: Update chart version
+        env:
+          VERSION_NUM: ${{ steps.version.outputs.version_num }}
+        run: |
+          # Update Chart.yaml with release version
+          sed -i "s/^version:.*/version: ${VERSION_NUM}/" charts/freebsd-csi/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${VERSION_NUM}\"/" charts/freebsd-csi/Chart.yaml
+
+          cat charts/freebsd-csi/Chart.yaml
+
+      - name: Package Helm chart
+        run: |
+          helm package charts/freebsd-csi -d helm-packages/
+          ls -la helm-packages/
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push Helm chart to OCI registry
+        env:
+          VERSION_NUM: ${{ steps.version.outputs.version_num }}
+        run: |
+          helm push helm-packages/freebsd-csi-${VERSION_NUM}.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
+
+      - name: Upload Helm chart artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: helm-packages/*.tgz
+
   # Create GitHub Release
   release:
     name: Create Release
-    needs: [build-csi-driver, build-ctld-agent-freebsd, package-freebsd]
+    needs: [build-csi-driver, build-ctld-agent-freebsd, package-freebsd, helm-chart]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -348,6 +414,9 @@ jobs:
           # FreeBSD packages
           cp artifacts/ctld-agent-freebsd14-pkg/*.pkg release-assets/
           cp artifacts/ctld-agent-freebsd15-pkg/*.pkg release-assets/
+
+          # Helm chart
+          cp artifacts/helm-chart/*.tgz release-assets/
 
           # Generate checksums
           cd release-assets

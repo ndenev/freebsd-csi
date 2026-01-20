@@ -98,7 +98,7 @@ spec:
           image: ghcr.io/ndenev/freebsd-csi-driver:latest
           args:
             - "--endpoint=unix:///csi/csi.sock"
-            - "--nodeid=$(NODE_ID)"
+            - "--node-id=$(NODE_ID)"
             - "--controller"
           env:
             - name: NODE_ID
@@ -186,7 +186,7 @@ spec:
           image: ghcr.io/ndenev/freebsd-csi-driver:latest
           args:
             - "--endpoint=unix:///csi/csi.sock"
-            - "--nodeid=$(NODE_ID)"
+            - "--node-id=$(NODE_ID)"
             - "--node"
           env:
             - name: NODE_ID
