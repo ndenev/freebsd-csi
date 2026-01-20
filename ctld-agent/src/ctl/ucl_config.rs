@@ -113,7 +113,10 @@ pub struct NvmeNamespaceUcl {
 
 impl NvmeSubsystemUcl {
     /// Generate UCL string representation of this subsystem
-    /// Note: ctld may not support NVMeoF via config - verify with FreeBSD docs
+    ///
+    /// Note: FreeBSD 15.0+ ctld supports NVMeoF via `controller` blocks.
+    /// Full UCL support for NVMeoF is planned for a future release.
+    /// For now, this generates a placeholder comment.
     ///
     /// Returns an error if any field contains characters that could corrupt UCL syntax.
     pub fn to_ucl_string(&self) -> Result<String> {

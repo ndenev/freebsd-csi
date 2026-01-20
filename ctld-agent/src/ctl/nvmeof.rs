@@ -2,6 +2,28 @@
 //!
 //! This module provides functionality to export ZFS volumes as NVMeoF subsystems
 //! using FreeBSD's CTL (CAM Target Layer) via ctladm.
+//!
+//! ## Note on Configuration Persistence
+//!
+//! FreeBSD 15.0+ ctld supports NVMeoF via UCL configuration using `controller` blocks
+//! (instead of `target` for iSCSI) and `transport-group` (instead of `portal-group`).
+//!
+//! Currently, this implementation uses ctladm commands directly for simplicity.
+//! This means NVMeoF exports are ephemeral and won't persist across reboots.
+//! A future enhancement could add UCL config support similar to IscsiManager.
+//!
+//! For persistent NVMeoF configuration, manually add to `/etc/ctl.ucl`:
+//! ```text
+//! controller "nqn.2024-01.org.freebsd.csi:vol-name" {
+//!     auth-group = "no-authentication"
+//!     transport-group = "tg0"
+//!     namespace {
+//!         1 {
+//!             path = "/dev/zvol/tank/csi/vol-name"
+//!         }
+//!     }
+//! }
+//! ```
 
 use std::collections::HashMap;
 use std::process::Command;
