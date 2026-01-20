@@ -2,13 +2,19 @@ syntax = "proto3";
 
 package ctld_agent.v1;
 
+enum ExportType {
+    EXPORT_TYPE_UNSPECIFIED = 0;
+    EXPORT_TYPE_ISCSI = 1;
+    EXPORT_TYPE_NVMEOF = 2;
+}
+
 // Volume represents a ZFS dataset exported via iSCSI or NVMeoF
 message Volume {
     string id = 1;
     string name = 2;
     int64 size_bytes = 3;
     string zfs_dataset = 4;
-    string export_type = 5;  // "iscsi" or "nvmeof"
+    ExportType export_type = 5;
     string target_name = 6;  // iSCSI IQN or NVMeoF NQN
     int32 lun_id = 7;
     map<string, string> parameters = 8;
@@ -17,7 +23,7 @@ message Volume {
 message CreateVolumeRequest {
     string name = 1;
     int64 size_bytes = 2;
-    string export_type = 3;
+    ExportType export_type = 3;
     map<string, string> parameters = 4;
 }
 
@@ -82,6 +88,25 @@ message DeleteSnapshotRequest {
 
 message DeleteSnapshotResponse {}
 
+message ListSnapshotsRequest {
+    string source_volume_id = 1;  // optional filter by volume
+    int32 max_entries = 2;
+    string starting_token = 3;
+}
+
+message ListSnapshotsResponse {
+    repeated Snapshot snapshots = 1;
+    string next_token = 2;
+}
+
+message GetSnapshotRequest {
+    string snapshot_id = 1;
+}
+
+message GetSnapshotResponse {
+    Snapshot snapshot = 1;
+}
+
 // The storage agent service
 service StorageAgent {
     // Volume operations
@@ -94,4 +119,6 @@ service StorageAgent {
     // Snapshot operations
     rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
     rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+    rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+    rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
 }
