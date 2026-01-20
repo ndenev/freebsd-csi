@@ -15,6 +15,7 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
+libucl = "0.2"
 
 [build-dependencies]
 tonic-prost-build = "0.14"
