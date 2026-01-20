@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "freebsd-csi.fullname" . }}-controller
-  namespace: {{ include "freebsd-csi.namespace" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "freebsd-csi.labels" . | nindent 4 }}
     app.kubernetes.io/component: controller

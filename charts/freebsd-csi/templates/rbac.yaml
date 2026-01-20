@@ -46,7 +46,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: {{ include "freebsd-csi.serviceAccountName" . }}
-    namespace: {{ include "freebsd-csi.namespace" . }}
+    namespace: {{ .Release.Namespace }}
 roleRef:
   kind: ClusterRole
   name: {{ include "freebsd-csi.fullname" . }}

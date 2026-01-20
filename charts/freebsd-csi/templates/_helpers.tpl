@@ -95,17 +95,6 @@ TLS secret name
 {{- end }}
 
 {{/*
-Namespace to use - prefers .Values.namespace, falls back to .Release.Namespace
-*/}}
-{{- define "freebsd-csi.namespace" -}}
-{{- if .Values.namespace }}
-{{- .Values.namespace }}
-{{- else }}
-{{- .Release.Namespace }}
-{{- end }}
-{{- end }}
-
-{{/*
 Validate required values
 */}}
 {{- define "freebsd-csi.validateValues" -}}
