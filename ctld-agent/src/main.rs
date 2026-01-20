@@ -1,8 +1,9 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
 use tokio::sync::RwLock;
-use tonic::transport::Server;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tracing::info;
 
 mod ctl;
@@ -37,6 +38,18 @@ struct Args {
     /// Portal group tag for iSCSI
     #[arg(long, default_value = "1")]
     portal_group: u32,
+
+    /// TLS certificate file (PEM format)
+    #[arg(long, env = "TLS_CERT_PATH")]
+    tls_cert: Option<PathBuf>,
+
+    /// TLS private key file (PEM format)
+    #[arg(long, env = "TLS_KEY_PATH")]
+    tls_key: Option<PathBuf>,
+
+    /// CA certificate for client verification (enables mTLS)
+    #[arg(long, env = "TLS_CLIENT_CA_PATH")]
+    tls_client_ca: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -84,8 +97,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("gRPC server listening on {}", addr);
 
+    // Build the gRPC server with optional TLS
+    let mut builder = Server::builder();
+
+    // Configure TLS if certificates provided
+    if let (Some(cert_path), Some(key_path)) = (&args.tls_cert, &args.tls_key) {
+        let cert = tokio::fs::read(cert_path).await?;
+        let key = tokio::fs::read(key_path).await?;
+        let identity = Identity::from_pem(cert, key);
+
+        let mut tls = ServerTlsConfig::new().identity(identity);
+
+        // If client CA provided, require client certificates (mTLS)
+        if let Some(ca_path) = &args.tls_client_ca {
+            let ca = tokio::fs::read(ca_path).await?;
+            tls = tls.client_ca_root(Certificate::from_pem(ca));
+            info!("mTLS enabled - client certificates required");
+        } else {
+            info!("TLS enabled (server-only, no client verification)");
+        }
+
+        builder = builder.tls_config(tls)?;
+    } else {
+        info!("TLS disabled - running in plaintext mode");
+    }
+
     // Start the gRPC server
-    Server::builder()
+    builder
         .add_service(StorageAgentServer::new(storage_service))
         .serve(addr)
         .await?;

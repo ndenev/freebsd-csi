@@ -3,13 +3,24 @@
 //! Provides a wrapper around the ctld-agent gRPC client for volume and snapshot operations.
 
 use std::collections::HashMap;
-use tonic::transport::Channel;
+use std::path::PathBuf;
+
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 
 use crate::agent::{
     storage_agent_client::StorageAgentClient, CreateSnapshotRequest, CreateVolumeRequest,
     DeleteSnapshotRequest, DeleteVolumeRequest, ExpandVolumeRequest, ExportType, GetVolumeRequest,
     Snapshot, Volume,
 };
+
+/// TLS configuration for connecting to ctld-agent
+#[derive(Debug, Clone)]
+pub struct TlsConfig {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    pub ca_path: PathBuf,
+    pub domain: String,
+}
 
 /// Client wrapper for the ctld-agent storage service.
 #[derive(Debug, Clone)]
@@ -18,9 +29,38 @@ pub struct AgentClient {
 }
 
 impl AgentClient {
-    /// Connect to the ctld-agent at the specified endpoint.
+    /// Connect to the ctld-agent at the specified endpoint (plaintext).
     pub async fn connect(endpoint: &str) -> Result<Self, tonic::transport::Error> {
         let client = StorageAgentClient::connect(endpoint.to_string()).await?;
+        Ok(Self { client })
+    }
+
+    /// Connect to ctld-agent with optional mTLS
+    pub async fn connect_with_tls(
+        endpoint: &str,
+        tls: Option<TlsConfig>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let channel = if let Some(tls) = tls {
+            let cert = tokio::fs::read(&tls.cert_path).await?;
+            let key = tokio::fs::read(&tls.key_path).await?;
+            let ca = tokio::fs::read(&tls.ca_path).await?;
+
+            let tls_config = ClientTlsConfig::new()
+                .identity(Identity::from_pem(cert, key))
+                .ca_certificate(Certificate::from_pem(ca))
+                .domain_name(&tls.domain);
+
+            Channel::from_shared(endpoint.to_string())?
+                .tls_config(tls_config)?
+                .connect()
+                .await?
+        } else {
+            Channel::from_shared(endpoint.to_string())?
+                .connect()
+                .await?
+        };
+
+        let client = StorageAgentClient::new(channel);
         Ok(Self { client })
     }
 

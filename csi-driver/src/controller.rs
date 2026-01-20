@@ -10,7 +10,7 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
 use crate::agent::ExportType;
-use crate::agent_client::AgentClient;
+use crate::agent_client::{AgentClient, TlsConfig};
 use crate::csi;
 
 /// Default volume size: 1GB
@@ -26,6 +26,8 @@ const DEFAULT_VOLUME_SIZE: i64 = 1024 * 1024 * 1024;
 pub struct ControllerService {
     /// Agent endpoint for ctld-agent connection
     agent_endpoint: String,
+    /// TLS configuration for mTLS connection to ctld-agent
+    tls_config: Option<TlsConfig>,
     /// Lazily initialized agent client connection
     client: Mutex<Option<AgentClient>>,
 }
@@ -35,6 +37,16 @@ impl ControllerService {
     pub fn new(agent_endpoint: String) -> Self {
         Self {
             agent_endpoint,
+            tls_config: None,
+            client: Mutex::new(None),
+        }
+    }
+
+    /// Create a new ControllerService with mTLS configuration.
+    pub fn with_tls(agent_endpoint: String, tls_config: Option<TlsConfig>) -> Self {
+        Self {
+            agent_endpoint,
+            tls_config,
             client: Mutex::new(None),
         }
     }
@@ -46,12 +58,12 @@ impl ControllerService {
             return Ok(client.clone());
         }
 
-        info!(endpoint = %self.agent_endpoint, "Connecting to ctld-agent");
-        let client = AgentClient::connect(&self.agent_endpoint)
+        info!(endpoint = %self.agent_endpoint, tls = %self.tls_config.is_some(), "Connecting to ctld-agent");
+        let client = AgentClient::connect_with_tls(&self.agent_endpoint, self.tls_config.clone())
             .await
             .map_err(|e| {
                 error!(error = %e, "Failed to connect to ctld-agent");
-                Status::unavailable(format!("Failed to connect to agent: {}", e))
+                Status::unavailable("Agent connection failed")
             })?;
 
         *guard = Some(client.clone());

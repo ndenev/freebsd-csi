@@ -3,8 +3,10 @@
 //! Kubernetes CSI driver that implements the Container Storage Interface
 //! and communicates with the ctld-agent for iSCSI target management.
 
+use std::path::PathBuf;
+
 use clap::Parser;
-use tracing::{info, Level};
+use tracing::{debug, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 /// CSI proto generated types
@@ -22,7 +24,7 @@ mod controller;
 mod identity;
 mod node;
 
-pub use agent_client::AgentClient;
+pub use agent_client::{AgentClient, TlsConfig};
 pub use controller::ControllerService;
 pub use identity::{IdentityService, DRIVER_NAME, DRIVER_VERSION};
 pub use node::NodeService;
@@ -59,6 +61,22 @@ struct Args {
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// TLS certificate file (PEM format)
+    #[arg(long, env = "TLS_CERT_PATH")]
+    tls_cert: Option<PathBuf>,
+
+    /// TLS private key file (PEM format)
+    #[arg(long, env = "TLS_KEY_PATH")]
+    tls_key: Option<PathBuf>,
+
+    /// CA certificate for server verification
+    #[arg(long, env = "TLS_CA_PATH")]
+    tls_ca: Option<PathBuf>,
+
+    /// TLS domain name (for server certificate verification)
+    #[arg(long, env = "TLS_DOMAIN", default_value = "ctld-agent")]
+    tls_domain: String,
 }
 
 #[tokio::main]
@@ -111,7 +129,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.controller {
         info!("Enabling Controller service");
-        let controller = ControllerService::new(args.agent_endpoint.clone());
+
+        // Build TLS config if all required paths are provided
+        let tls_config = match (&args.tls_cert, &args.tls_key, &args.tls_ca) {
+            (Some(cert), Some(key), Some(ca)) => {
+                debug!(
+                    cert = %cert.display(),
+                    key = %key.display(),
+                    ca = %ca.display(),
+                    "TLS certificate paths configured"
+                );
+                info!(domain = %args.tls_domain, "mTLS enabled for agent connection");
+                Some(TlsConfig {
+                    cert_path: cert.clone(),
+                    key_path: key.clone(),
+                    ca_path: ca.clone(),
+                    domain: args.tls_domain.clone(),
+                })
+            }
+            (None, None, None) => {
+                info!("TLS disabled - using plaintext connection to agent");
+                None
+            }
+            _ => {
+                return Err("TLS configuration incomplete: all of --tls-cert, --tls-key, and --tls-ca must be provided together".into());
+            }
+        };
+
+        let controller = ControllerService::with_tls(args.agent_endpoint.clone(), tls_config);
         router = router.add_service(ControllerServer::new(controller));
     }
 
