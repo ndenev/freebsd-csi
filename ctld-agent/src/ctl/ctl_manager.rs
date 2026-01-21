@@ -4,19 +4,14 @@
 //! simplifying the architecture and reducing code duplication.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::process::Command;
 use std::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 
 use super::error::{CtlError, Result};
+use super::types::{DevicePath, ExportType, Iqn, Nqn, TargetName};
 use super::ucl_config::{Controller, CtlConfig, Target, UclConfigManager};
-
-/// Export type for CTL volumes
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExportType {
-    Iscsi,
-    Nvmeof,
-}
 
 /// Represents a CTL export (either iSCSI target or NVMeoF controller)
 #[derive(Debug, Clone)]
@@ -24,81 +19,13 @@ pub struct Export {
     /// Volume name (used as key)
     pub volume_name: String,
     /// Path to the backing device (e.g., /dev/zvol/tank/csi/vol1)
-    pub device_path: String,
+    pub device_path: DevicePath,
     /// Export type (iSCSI or NVMeoF)
     pub export_type: ExportType,
     /// Target name (IQN for iSCSI, NQN for NVMeoF)
-    pub target_name: String,
+    pub target_name: TargetName,
     /// LUN ID (for iSCSI) or Namespace ID (for NVMeoF)
     pub lun_id: u32,
-}
-
-/// Validate that a name is safe for use in CTL commands.
-/// For IQN/NQN format, allows: alphanumeric, underscore, hyphen, period, colon.
-fn validate_name(name: &str) -> Result<()> {
-    if name.is_empty() {
-        return Err(CtlError::InvalidName("name cannot be empty".into()));
-    }
-
-    if name.len() > 223 {
-        return Err(CtlError::InvalidName(format!(
-            "name '{}' exceeds maximum length of 223 characters",
-            name
-        )));
-    }
-
-    if !name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == ':')
-    {
-        return Err(CtlError::InvalidName(format!(
-            "invalid characters in name '{}': only alphanumeric, underscore, hyphen, period, and colon allowed",
-            name
-        )));
-    }
-
-    if name.contains("..") {
-        return Err(CtlError::InvalidName(format!(
-            "name '{}' contains path traversal sequence",
-            name
-        )));
-    }
-
-    Ok(())
-}
-
-/// Validate a device path is a valid zvol path
-fn validate_device_path(path: &str) -> Result<()> {
-    if path.is_empty() {
-        return Err(CtlError::InvalidName("device path cannot be empty".into()));
-    }
-
-    if !path.starts_with("/dev/zvol/") {
-        return Err(CtlError::InvalidName(format!(
-            "device path '{}' must be under /dev/zvol/",
-            path
-        )));
-    }
-
-    if path.contains("..") {
-        return Err(CtlError::InvalidName(format!(
-            "device path '{}' contains path traversal sequence",
-            path
-        )));
-    }
-
-    let path_part = &path["/dev/zvol/".len()..];
-    if !path_part
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/')
-    {
-        return Err(CtlError::InvalidName(format!(
-            "device path '{}' contains invalid characters",
-            path
-        )));
-    }
-
-    Ok(())
 }
 
 /// Unified manager for CTL exports (iSCSI and NVMeoF)
@@ -137,8 +64,11 @@ impl CtlManager {
         auth_group: String,
         transport_group: String,
     ) -> Result<Self> {
-        validate_name(&base_iqn)?;
-        validate_name(&base_nqn)?;
+        // Validate base IQN/NQN format
+        Iqn::parse(&base_iqn)
+            .map_err(|_| CtlError::InvalidName(format!("invalid base IQN format: {}", base_iqn)))?;
+        Nqn::parse(&base_nqn)
+            .map_err(|_| CtlError::InvalidName(format!("invalid base NQN format: {}", base_nqn)))?;
 
         let ucl_manager = UclConfigManager::new(config_path);
 
@@ -159,69 +89,71 @@ impl CtlManager {
     }
 
     /// Generate an IQN for a volume
-    pub fn generate_iqn(&self, volume_name: &str) -> String {
-        format!("{}:{}", self.base_iqn, volume_name)
+    pub fn generate_iqn(&self, volume_name: &str) -> Result<Iqn> {
+        Iqn::new(&self.base_iqn, volume_name)
     }
 
     /// Generate an NQN for a volume
-    pub fn generate_nqn(&self, volume_name: &str) -> String {
-        format!("{}:{}", self.base_nqn, volume_name.replace('/', "-"))
+    pub fn generate_nqn(&self, volume_name: &str) -> Result<Nqn> {
+        Nqn::new(&self.base_nqn, volume_name)
     }
 
     /// Load existing exports from UCL config file
     #[instrument(skip(self))]
     pub fn load_config(&mut self) -> Result<()> {
         let config_path = &self.ucl_manager.config_path;
-
-        // Parse the UCL config using uclicious
         let config = CtlConfig::from_file(config_path)?;
 
         let mut exports = self.exports.write().unwrap();
         let mut loaded_iscsi = 0;
         let mut loaded_nvmeof = 0;
 
-        // Load iSCSI targets matching our base IQN
-        for (iqn, target) in config.targets_with_prefix(&self.base_iqn) {
-            let Some(volume_name) = iqn.rsplit(':').next() else {
-                continue;
-            };
+        // Load iSCSI targets matching our base IQN using filter_map
+        let iscsi_exports: Vec<_> = config
+            .targets_with_prefix(&self.base_iqn)
+            .filter_map(|(iqn_str, target)| {
+                let volume_name = iqn_str.rsplit(':').next()?;
+                let (lun_id_str, lun) = target.lun.iter().next()?;
+                let lun_id = lun_id_str.parse::<u32>().unwrap_or(0);
+                let iqn = Iqn::parse(iqn_str).ok()?;
+                let device_path = DevicePath::parse(&lun.path).ok()?;
 
-            // Get first LUN
-            let Some((lun_id_str, lun)) = target.lun.iter().next() else {
-                continue;
-            };
-            let lun_id = lun_id_str.parse::<u32>().unwrap_or(0);
+                Some(Export {
+                    volume_name: volume_name.to_string(),
+                    device_path,
+                    export_type: ExportType::Iscsi,
+                    target_name: iqn.into(),
+                    lun_id,
+                })
+            })
+            .collect();
 
-            let export = Export {
-                volume_name: volume_name.to_string(),
-                device_path: lun.path.clone(),
-                export_type: ExportType::Iscsi,
-                target_name: iqn.clone(),
-                lun_id,
-            };
+        for export in iscsi_exports {
             exports.insert(export.volume_name.clone(), export);
             loaded_iscsi += 1;
         }
 
-        // Load NVMeoF controllers matching our base NQN
-        for (nqn, controller) in config.controllers_with_prefix(&self.base_nqn) {
-            let Some(volume_name) = nqn.rsplit(':').next() else {
-                continue;
-            };
+        // Load NVMeoF controllers matching our base NQN using filter_map
+        let nvmeof_exports: Vec<_> = config
+            .controllers_with_prefix(&self.base_nqn)
+            .filter_map(|(nqn_str, controller)| {
+                let volume_name = nqn_str.rsplit(':').next()?;
+                let (ns_id_str, ns) = controller.namespace.iter().next()?;
+                let ns_id = ns_id_str.parse::<u32>().unwrap_or(0);
+                let nqn = Nqn::parse(nqn_str).ok()?;
+                let device_path = DevicePath::parse(&ns.path).ok()?;
 
-            // Get first namespace
-            let Some((ns_id_str, ns)) = controller.namespace.iter().next() else {
-                continue;
-            };
-            let ns_id = ns_id_str.parse::<u32>().unwrap_or(0);
+                Some(Export {
+                    volume_name: volume_name.to_string(),
+                    device_path,
+                    export_type: ExportType::Nvmeof,
+                    target_name: nqn.into(),
+                    lun_id: ns_id,
+                })
+            })
+            .collect();
 
-            let export = Export {
-                volume_name: volume_name.to_string(),
-                device_path: ns.path.clone(),
-                export_type: ExportType::Nvmeof,
-                target_name: nqn.clone(),
-                lun_id: ns_id,
-            };
+        for export in nvmeof_exports {
             exports.insert(export.volume_name.clone(), export);
             loaded_nvmeof += 1;
         }
@@ -244,42 +176,38 @@ impl CtlManager {
         export_type: ExportType,
         lun_id: u32,
     ) -> Result<Export> {
-        validate_name(volume_name)?;
-        validate_device_path(device_path)?;
-
-        let target_name = match export_type {
-            ExportType::Iscsi => self.generate_iqn(volume_name),
-            ExportType::Nvmeof => self.generate_nqn(volume_name),
+        // Validate and parse inputs using newtypes
+        let device_path = DevicePath::parse(device_path)?;
+        let target_name: TargetName = match export_type {
+            ExportType::Iscsi => self.generate_iqn(volume_name)?.into(),
+            ExportType::Nvmeof => self.generate_nqn(volume_name)?.into(),
         };
 
         debug!(
-            "Exporting volume {} as {:?} target {}",
+            "Exporting volume {} as {} target {}",
             volume_name, export_type, target_name
         );
 
-        // Check if already exists
-        {
-            let exports = self.exports.read().unwrap();
-            if exports.contains_key(volume_name) {
-                return Err(CtlError::TargetExists(volume_name.to_string()));
-            }
-        }
-
         let export = Export {
             volume_name: volume_name.to_string(),
-            device_path: device_path.to_string(),
+            device_path,
             export_type,
             target_name,
             lun_id,
         };
 
-        // Store in cache
-        {
-            let mut exports = self.exports.write().unwrap();
-            exports.insert(volume_name.to_string(), export.clone());
+        // Use Entry API for atomic check-and-insert
+        let mut exports = self.exports.write().unwrap();
+        match exports.entry(volume_name.to_string()) {
+            Entry::Occupied(_) => {
+                return Err(CtlError::TargetExists(volume_name.to_string()));
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(export.clone());
+            }
         }
 
-        info!("Exported {} as {:?} (cache only)", volume_name, export_type);
+        info!("Exported {} as {} (cache only)", volume_name, export_type);
         Ok(export)
     }
 
@@ -288,15 +216,11 @@ impl CtlManager {
     /// Updates in-memory cache only. Call `write_config()` to persist.
     #[instrument(skip(self))]
     pub fn unexport_volume(&self, volume_name: &str) -> Result<()> {
-        validate_name(volume_name)?;
-
         debug!("Unexporting volume {}", volume_name);
 
-        {
-            let mut exports = self.exports.write().unwrap();
-            if exports.remove(volume_name).is_none() {
-                return Err(CtlError::TargetNotFound(volume_name.to_string()));
-            }
+        let mut exports = self.exports.write().unwrap();
+        if exports.remove(volume_name).is_none() {
+            return Err(CtlError::TargetNotFound(volume_name.to_string()));
         }
 
         info!("Unexported {} (cache only)", volume_name);
@@ -327,18 +251,18 @@ impl CtlManager {
                         self.auth_group.clone(),
                         self.portal_group_name.clone(),
                         export.lun_id,
-                        export.device_path.clone(),
+                        export.device_path.as_str().to_string(),
                     );
-                    iscsi_targets.push((export.target_name.clone(), target));
+                    iscsi_targets.push((export.target_name.to_string(), target));
                 }
                 ExportType::Nvmeof => {
                     let controller = Controller::new(
                         self.auth_group.clone(),
                         self.transport_group.clone(),
                         export.lun_id,
-                        export.device_path.clone(),
+                        export.device_path.as_str().to_string(),
                     );
-                    nvme_controllers.push((export.target_name.clone(), controller));
+                    nvme_controllers.push((export.target_name.to_string(), controller));
                 }
             }
         }
@@ -390,45 +314,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_validate_name_valid() {
-        assert!(validate_name("volume1").is_ok());
-        assert!(validate_name("vol-1").is_ok());
-        assert!(validate_name("vol_1").is_ok());
-        assert!(validate_name("vol.1").is_ok());
-        assert!(validate_name("iqn.2024-01.com.example:target").is_ok());
-        assert!(validate_name("nqn.2024-01.com.example:target").is_ok());
-    }
-
-    #[test]
-    fn test_validate_name_invalid() {
-        assert!(validate_name("").is_err());
-        assert!(validate_name("vol/name").is_err());
-        assert!(validate_name("vol@snap").is_err());
-        assert!(validate_name("vol name").is_err());
-        assert!(validate_name("vol;rm -rf /").is_err());
-        assert!(validate_name("..").is_err());
-    }
-
-    #[test]
-    fn test_validate_device_path_valid() {
-        assert!(validate_device_path("/dev/zvol/tank/vol1").is_ok());
-        assert!(validate_device_path("/dev/zvol/tank/csi/pvc-123").is_ok());
-    }
-
-    #[test]
-    fn test_validate_device_path_invalid() {
-        assert!(validate_device_path("").is_err());
-        assert!(validate_device_path("/dev/da0").is_err());
-        assert!(validate_device_path("/dev/zvol/../etc/passwd").is_err());
-    }
-
-    #[test]
     fn test_export_struct() {
+        let device_path = DevicePath::parse("/dev/zvol/tank/vol1").unwrap();
+        let iqn = Iqn::parse("iqn.2024-01.com.example:vol1").unwrap();
+
         let export = Export {
             volume_name: "vol1".to_string(),
-            device_path: "/dev/zvol/tank/vol1".to_string(),
+            device_path,
             export_type: ExportType::Iscsi,
-            target_name: "iqn.2024-01.com.example:vol1".to_string(),
+            target_name: iqn.into(),
             lun_id: 0,
         };
 

@@ -1,8 +1,30 @@
-use std::process::Command;
+use std::process::{Command, Output};
 use tracing::{debug, info, instrument, warn};
 
 use super::error::{Result, ZfsError};
 use super::properties::{METADATA_PROPERTY, VolumeMetadata};
+
+/// Check command output for success or return appropriate error.
+///
+/// This helper reduces boilerplate for checking command results.
+/// It handles common error patterns like "does not exist" and "already exists".
+fn check_command_result(output: &Output, context: &str) -> Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Map common error patterns to specific error types
+    if stderr.contains("does not exist") || stderr.contains("not found") {
+        return Err(ZfsError::DatasetNotFound(context.to_string()));
+    }
+    if stderr.contains("already exists") {
+        return Err(ZfsError::DatasetExists(context.to_string()));
+    }
+
+    Err(ZfsError::CommandFailed(format!("{}: {}", context, stderr)))
+}
 
 /// Validate that a name is safe for use in ZFS commands.
 /// Only allows alphanumeric characters, underscores, hyphens, and periods.
@@ -98,14 +120,9 @@ impl ZfsManager {
             ])
             .output()?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("already exists") {
-                warn!(volume = %full_name, "Volume already exists");
-                return Err(ZfsError::DatasetExists(full_name));
-            }
-            warn!(volume = %full_name, error = %stderr, "Failed to create volume");
-            return Err(ZfsError::CommandFailed(stderr.to_string()));
+        if let Err(e) = check_command_result(&output, &full_name) {
+            warn!(volume = %full_name, error = %e, "Failed to create volume");
+            return Err(e);
         }
 
         info!(volume = %full_name, size_bytes, "ZFS volume created successfully");
@@ -130,10 +147,9 @@ impl ZfsManager {
 
         let output = Command::new("zfs").args(["destroy", &full_name]).output()?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(volume = %full_name, error = %stderr, "Failed to delete volume");
-            return Err(ZfsError::CommandFailed(stderr.to_string()));
+        if let Err(e) = check_command_result(&output, &full_name) {
+            warn!(volume = %full_name, error = %e, "Failed to delete volume");
+            return Err(e);
         }
 
         info!(volume = %full_name, "ZFS volume deleted successfully");
@@ -159,10 +175,9 @@ impl ZfsManager {
             .args(["set", &format!("volsize={}", new_size_bytes), &full_name])
             .output()?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(volume = %full_name, error = %stderr, "Failed to resize volume");
-            return Err(ZfsError::CommandFailed(stderr.to_string()));
+        if let Err(e) = check_command_result(&output, &full_name) {
+            warn!(volume = %full_name, error = %e, "Failed to resize volume");
+            return Err(e);
         }
 
         info!(volume = %full_name, new_size_bytes, "ZFS volume resized successfully");
@@ -190,14 +205,9 @@ impl ZfsManager {
             .args(["snapshot", &snapshot_name])
             .output()?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("already exists") {
-                warn!(snapshot = %snapshot_name, "Snapshot already exists");
-                return Err(ZfsError::DatasetExists(snapshot_name));
-            }
-            warn!(snapshot = %snapshot_name, error = %stderr, "Failed to create snapshot");
-            return Err(ZfsError::CommandFailed(stderr.to_string()));
+        if let Err(e) = check_command_result(&output, &snapshot_name) {
+            warn!(snapshot = %snapshot_name, error = %e, "Failed to create snapshot");
+            return Err(e);
         }
 
         info!(snapshot = %snapshot_name, "ZFS snapshot created successfully");
@@ -216,14 +226,9 @@ impl ZfsManager {
 
         let output = Command::new("zfs").args(["destroy", &full_name]).output()?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("does not exist") || stderr.contains("not found") {
-                warn!(snapshot = %full_name, "Snapshot not found for deletion");
-                return Err(ZfsError::DatasetNotFound(full_name));
-            }
-            warn!(snapshot = %full_name, error = %stderr, "Failed to delete snapshot");
-            return Err(ZfsError::CommandFailed(stderr.to_string()));
+        if let Err(e) = check_command_result(&output, &full_name) {
+            warn!(snapshot = %full_name, error = %e, "Failed to delete snapshot");
+            return Err(e);
         }
 
         info!(snapshot = %full_name, "ZFS snapshot deleted successfully");

@@ -37,12 +37,20 @@ fn to_ctl_export_type(export_type: ExportType) -> Option<CtlExportType> {
     }
 }
 
-/// Convert ExportType to string for ZFS metadata
-fn export_type_to_string(export_type: ExportType) -> &'static str {
+/// Convert proto ExportType to CTL ExportType (for ZFS metadata storage)
+fn proto_to_ctl_export_type(export_type: ExportType) -> Option<CtlExportType> {
     match export_type {
-        ExportType::Iscsi => "ISCSI",
-        ExportType::Nvmeof => "NVMEOF",
-        ExportType::Unspecified => "UNSPECIFIED",
+        ExportType::Iscsi => Some(CtlExportType::Iscsi),
+        ExportType::Nvmeof => Some(CtlExportType::Nvmeof),
+        ExportType::Unspecified => None,
+    }
+}
+
+/// Convert CTL ExportType to proto ExportType
+fn ctl_to_proto_export_type(export_type: CtlExportType) -> ExportType {
+    match export_type {
+        CtlExportType::Iscsi => ExportType::Iscsi,
+        CtlExportType::Nvmeof => ExportType::Nvmeof,
     }
 }
 
@@ -153,17 +161,8 @@ impl StorageService {
         let mut volumes = self.volumes.write().await;
 
         for (vol_name, zfs_meta) in volumes_with_metadata {
-            let export_type = match zfs_meta.export_type.as_str() {
-                "ISCSI" => ExportType::Iscsi,
-                "NVMEOF" => ExportType::Nvmeof,
-                _ => {
-                    warn!(
-                        "Unknown export type '{}' for volume '{}', skipping",
-                        zfs_meta.export_type, vol_name
-                    );
-                    continue;
-                }
-            };
+            // Convert CTL ExportType to proto ExportType
+            let export_type = ctl_to_proto_export_type(zfs_meta.export_type);
 
             let metadata = VolumeMetadata {
                 id: vol_name.clone(),
@@ -338,7 +337,7 @@ impl StorageAgent for StorageService {
                     warn!("Failed to export volume: {}", e);
                     Status::internal(format!("failed to export volume: {}", e))
                 })?;
-            export.target_name
+            export.target_name.to_string()
         };
 
         // Write UCL config and reload ctld
@@ -366,8 +365,10 @@ impl StorageAgent for StorageService {
         }
 
         // Persist metadata to ZFS user property
+        let ctl_export_type_for_zfs =
+            proto_to_ctl_export_type(export_type).expect("already validated");
         let zfs_metadata = ZfsVolumeMetadata {
-            export_type: export_type_to_string(export_type).to_string(),
+            export_type: ctl_export_type_for_zfs,
             target_name: target_name.clone(),
             lun_id: Some(lun_id as u32),
             namespace_id: None,

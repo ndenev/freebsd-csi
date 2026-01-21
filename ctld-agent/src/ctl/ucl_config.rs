@@ -8,7 +8,7 @@ use std::fmt::Write;
 use std::fs;
 use std::path::Path;
 
-use uclicious::{Uclicious, Priority, DEFAULT_DUPLICATE_STRATEGY};
+use uclicious::{DEFAULT_DUPLICATE_STRATEGY, Priority, Uclicious};
 
 use super::error::{CtlError, Result};
 
@@ -142,7 +142,13 @@ impl ToUcl for Target {
         let ind = indent(level);
 
         writeln!(s, "{}auth-group = {};", ind, ucl_quote(&self.auth_group)).unwrap();
-        writeln!(s, "{}portal-group = {};", ind, ucl_quote(&self.portal_group)).unwrap();
+        writeln!(
+            s,
+            "{}portal-group = {};",
+            ind,
+            ucl_quote(&self.portal_group)
+        )
+        .unwrap();
 
         // Sort LUN IDs for consistent output
         let mut lun_ids: Vec<_> = self.lun.keys().collect();
@@ -248,8 +254,9 @@ impl CtlConfig {
         }
 
         // Read file content
-        let content = fs::read_to_string(path)
-            .map_err(|e| CtlError::ConfigError(format!("Failed to read {}: {}", path.display(), e)))?;
+        let content = fs::read_to_string(path).map_err(|e| {
+            CtlError::ConfigError(format!("Failed to read {}: {}", path.display(), e))
+        })?;
 
         // Use uclicious builder to parse
         let mut builder = Self::builder()
@@ -257,7 +264,9 @@ impl CtlConfig {
 
         builder
             .add_chunk_full(&content, Priority::default(), DEFAULT_DUPLICATE_STRATEGY)
-            .map_err(|e| CtlError::ParseError(format!("Failed to parse {}: {}", path.display(), e)))?;
+            .map_err(|e| {
+                CtlError::ParseError(format!("Failed to parse {}: {}", path.display(), e))
+            })?;
 
         builder
             .build()
@@ -266,7 +275,9 @@ impl CtlConfig {
 
     /// Get all iSCSI targets matching a prefix
     pub fn targets_with_prefix(&self, prefix: &str) -> impl Iterator<Item = (&String, &Target)> {
-        self.target.iter().filter(move |(iqn, _)| iqn.starts_with(prefix))
+        self.target
+            .iter()
+            .filter(move |(iqn, _)| iqn.starts_with(prefix))
     }
 
     /// Get all NVMeoF controllers matching a prefix
@@ -385,7 +396,10 @@ impl UclConfigManager {
 #[allow(dead_code)]
 pub fn validate_ucl_string(value: &str, field_name: &str) -> Result<()> {
     if value.is_empty() {
-        return Err(CtlError::ConfigError(format!("{} cannot be empty", field_name)));
+        return Err(CtlError::ConfigError(format!(
+            "{} cannot be empty",
+            field_name
+        )));
     }
 
     if value.len() > 1024 {

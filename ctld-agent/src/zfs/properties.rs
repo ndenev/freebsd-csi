@@ -3,11 +3,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::ctl::ExportType;
+
 /// Metadata stored as ZFS user property for each volume
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumeMetadata {
-    /// Export type: "ISCSI" or "NVMEOF"
-    pub export_type: String,
+    /// Export type (iSCSI or NVMeoF)
+    pub export_type: ExportType,
     /// Target name (IQN for iSCSI, NQN for NVMeoF)
     pub target_name: String,
     /// LUN ID for iSCSI exports
