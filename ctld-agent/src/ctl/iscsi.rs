@@ -128,10 +128,16 @@ impl IscsiManager {
         portal_group: PortalGroup,
         config_path: String,
         auth_group: String,
+        transport_group: String,
     ) -> Result<Self> {
         validate_name(&base_iqn)?;
 
-        let ucl_manager = UclConfigManager::new(config_path, auth_group, portal_group.name.clone());
+        let ucl_manager = UclConfigManager::new(
+            config_path,
+            auth_group,
+            portal_group.name.clone(),
+            transport_group,
+        );
 
         info!(
             "Initializing IscsiManager with base_iqn={}, portal_group={}, UCL config",
@@ -533,8 +539,9 @@ impl IscsiManager {
             .collect();
         drop(targets);
 
-        // Write config
-        ucl_manager.write_config(&user_content, &ucl_targets)?;
+        // Write config (empty NVMeoF list - iSCSI manager only handles iSCSI)
+        // TODO: Coordinate with NvmeofManager to avoid clobbering NVMeoF entries
+        ucl_manager.write_config(&user_content, &ucl_targets, &[])?;
 
         // Reload ctld
         self.reload_ctld()?;
@@ -722,6 +729,7 @@ mod tests {
             pg,
             "/tmp/test-ctl.ucl".to_string(),
             "ag0".to_string(),
+            "tg0".to_string(),
         )
         .unwrap();
 
@@ -730,6 +738,7 @@ mod tests {
         assert_eq!(ucl_manager.config_path, "/tmp/test-ctl.ucl");
         assert_eq!(ucl_manager.auth_group, "ag0");
         assert_eq!(ucl_manager.portal_group, "pg0");
+        assert_eq!(ucl_manager.transport_group, "tg0");
     }
 
     #[test]
@@ -748,6 +757,7 @@ mod tests {
             pg,
             "/nonexistent/path/test.ucl".to_string(),
             "ag0".to_string(),
+            "tg0".to_string(),
         )
         .unwrap();
 
@@ -813,6 +823,7 @@ target "iqn.2024-01.com.other:external" {
             pg,
             config_path.to_string_lossy().to_string(),
             "ag0".to_string(),
+            "tg0".to_string(),
         )
         .unwrap();
 

@@ -52,6 +52,10 @@ struct Args {
     #[arg(long, env = "CTL_PORTAL_GROUP_NAME", default_value = "pg0")]
     portal_group_name: String,
 
+    /// Transport group name for NVMeoF controllers (used in UCL config, FreeBSD 15.0+)
+    #[arg(long, env = "CTL_TRANSPORT_GROUP_NAME", default_value = "tg0")]
+    transport_group_name: String,
+
     /// TLS certificate file (PEM format)
     #[arg(long, env = "TLS_CERT_PATH")]
     tls_cert: Option<PathBuf>,
@@ -97,6 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("CTL config path: {}", args.ctl_config.display());
     info!("Auth group: {}", args.auth_group);
     info!("Portal group name: {}", args.portal_group_name);
+    info!("Transport group name: {}", args.transport_group_name);
 
     // Initialize ZFS manager
     let zfs_manager = ZfsManager::new(args.zfs_parent.clone())?;
@@ -109,6 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         portal_group,
         args.ctl_config.to_string_lossy().to_string(),
         args.auth_group.clone(),
+        args.transport_group_name.clone(),
     )?;
 
     // Load existing targets from UCL config (startup recovery)

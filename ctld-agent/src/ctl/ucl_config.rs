@@ -98,44 +98,60 @@ impl IscsiTargetUcl {
     }
 }
 
-/// Represents an NVMeoF subsystem in UCL format (if ctld supports it)
+/// Represents an NVMeoF controller in UCL format (FreeBSD 15.0+)
+///
+/// FreeBSD 15.0+ ctld supports NVMeoF via `controller` blocks:
+/// ```ucl
+/// controller "nqn.2024-01.org.freebsd.csi:vol-name" {
+///     auth-group = "no-authentication"
+///     transport-group = "tg0"
+///     namespace {
+///         1 {
+///             path = "/dev/zvol/tank/csi/vol-name"
+///         }
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Reserved for NVMeoF UCL config support
-pub struct NvmeSubsystemUcl {
+pub struct NvmeControllerUcl {
     pub nqn: String,
+    pub auth_group: String,
+    pub transport_group: String,
     pub namespaces: Vec<NvmeNamespaceUcl>,
 }
 
 /// Represents an NVMe namespace
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Reserved for NVMeoF UCL config support
 pub struct NvmeNamespaceUcl {
     pub id: u32,
     pub path: String,
 }
 
-impl NvmeSubsystemUcl {
-    /// Generate UCL string representation of this subsystem
-    ///
-    /// Note: FreeBSD 15.0+ ctld supports NVMeoF via `controller` blocks.
-    /// Full UCL support for NVMeoF is planned for a future release.
-    /// For now, this generates a placeholder comment.
+impl NvmeControllerUcl {
+    /// Generate UCL string representation of this controller (FreeBSD 15.0+)
     ///
     /// Returns an error if any field contains characters that could corrupt UCL syntax.
-    #[allow(dead_code)] // Reserved for NVMeoF UCL config support
     pub fn to_ucl_string(&self) -> Result<String> {
         // Validate all string fields before generating UCL
         validate_ucl_string(&self.nqn, "NQN")?;
+        validate_ucl_string(&self.auth_group, "auth-group")?;
+        validate_ucl_string(&self.transport_group, "transport-group")?;
         for ns in &self.namespaces {
             validate_ucl_string(&ns.path, "namespace path")?;
         }
 
         let mut s = String::new();
-        writeln!(s, "# NVMeoF subsystem (may require ctladm for now)").unwrap();
-        writeln!(s, "# nqn: {}", self.nqn).unwrap();
+        writeln!(s, "controller \"{}\" {{", self.nqn).unwrap();
+        writeln!(s, "    auth-group = \"{}\"", self.auth_group).unwrap();
+        writeln!(s, "    transport-group = \"{}\"", self.transport_group).unwrap();
         for ns in &self.namespaces {
-            writeln!(s, "# namespace {}: {}", ns.id, ns.path).unwrap();
+            writeln!(s, "    namespace {{").unwrap();
+            writeln!(s, "        {} {{", ns.id).unwrap();
+            writeln!(s, "            path = \"{}\"", ns.path).unwrap();
+            writeln!(s, "        }}").unwrap();
+            writeln!(s, "    }}").unwrap();
         }
+        writeln!(s, "}}").unwrap();
         Ok(s)
     }
 }
@@ -145,15 +161,23 @@ pub struct UclConfigManager {
     pub config_path: String,
     pub auth_group: String,
     pub portal_group: String,
+    /// Transport group for NVMeoF (FreeBSD 15.0+)
+    pub transport_group: String,
 }
 
 impl UclConfigManager {
     /// Create a new UclConfigManager
-    pub fn new(config_path: String, auth_group: String, portal_group: String) -> Self {
+    pub fn new(
+        config_path: String,
+        auth_group: String,
+        portal_group: String,
+        transport_group: String,
+    ) -> Self {
         Self {
             config_path,
             auth_group,
             portal_group,
+            transport_group,
         }
     }
 
@@ -191,8 +215,13 @@ impl UclConfigManager {
         Ok(user_content)
     }
 
-    /// Write the config file with user content + CSI-managed targets
-    pub fn write_config(&self, user_content: &str, targets: &[IscsiTargetUcl]) -> Result<()> {
+    /// Write the config file with user content + CSI-managed iSCSI targets and NVMeoF controllers
+    pub fn write_config(
+        &self,
+        user_content: &str,
+        iscsi_targets: &[IscsiTargetUcl],
+        nvme_controllers: &[NvmeControllerUcl],
+    ) -> Result<()> {
         let mut content = user_content.to_string();
 
         // Ensure newline before CSI section
@@ -204,8 +233,15 @@ impl UclConfigManager {
         content.push_str(CSI_SECTION_START);
         content.push('\n');
 
-        for target in targets {
+        // Write iSCSI targets
+        for target in iscsi_targets {
             content.push_str(&target.to_ucl_string()?);
+            content.push('\n');
+        }
+
+        // Write NVMeoF controllers (FreeBSD 15.0+)
+        for controller in nvme_controllers {
+            content.push_str(&controller.to_ucl_string()?);
             content.push('\n');
         }
 
@@ -227,7 +263,7 @@ impl UclConfigManager {
 
     /// Create an IscsiTargetUcl with the manager's default auth/portal groups
     #[allow(dead_code)] // Helper method for future use
-    pub fn create_target(&self, iqn: &str, device_path: &str, lun_id: u32) -> IscsiTargetUcl {
+    pub fn create_iscsi_target(&self, iqn: &str, device_path: &str, lun_id: u32) -> IscsiTargetUcl {
         IscsiTargetUcl {
             iqn: iqn.to_string(),
             auth_group: self.auth_group.clone(),
@@ -236,6 +272,24 @@ impl UclConfigManager {
                 id: lun_id,
                 path: device_path.to_string(),
                 blocksize: 512,
+            }],
+        }
+    }
+
+    /// Create an NvmeControllerUcl with the manager's default auth/transport groups
+    pub fn create_nvme_controller(
+        &self,
+        nqn: &str,
+        device_path: &str,
+        namespace_id: u32,
+    ) -> NvmeControllerUcl {
+        NvmeControllerUcl {
+            nqn: nqn.to_string(),
+            auth_group: self.auth_group.clone(),
+            transport_group: self.transport_group.clone(),
+            namespaces: vec![NvmeNamespaceUcl {
+                id: namespace_id,
+                path: device_path.to_string(),
             }],
         }
     }
@@ -296,21 +350,65 @@ mod tests {
     }
 
     #[test]
-    fn test_ucl_config_manager_create_target() {
+    fn test_ucl_config_manager_create_iscsi_target() {
         let manager = UclConfigManager::new(
             "/etc/ctl.ucl".to_string(),
             "ag0".to_string(),
             "pg0".to_string(),
+            "tg0".to_string(),
         );
 
-        let target =
-            manager.create_target("iqn.2024-01.org.freebsd.csi:test", "/dev/zvol/tank/test", 0);
+        let target = manager
+            .create_iscsi_target("iqn.2024-01.org.freebsd.csi:test", "/dev/zvol/tank/test", 0);
 
         assert_eq!(target.iqn, "iqn.2024-01.org.freebsd.csi:test");
         assert_eq!(target.auth_group, "ag0");
         assert_eq!(target.portal_group, "pg0");
         assert_eq!(target.luns.len(), 1);
         assert_eq!(target.luns[0].path, "/dev/zvol/tank/test");
+    }
+
+    #[test]
+    fn test_ucl_config_manager_create_nvme_controller() {
+        let manager = UclConfigManager::new(
+            "/etc/ctl.ucl".to_string(),
+            "no-authentication".to_string(),
+            "pg0".to_string(),
+            "tg0".to_string(),
+        );
+
+        let controller = manager.create_nvme_controller(
+            "nqn.2024-01.org.freebsd.csi:test",
+            "/dev/zvol/tank/test",
+            1,
+        );
+
+        assert_eq!(controller.nqn, "nqn.2024-01.org.freebsd.csi:test");
+        assert_eq!(controller.auth_group, "no-authentication");
+        assert_eq!(controller.transport_group, "tg0");
+        assert_eq!(controller.namespaces.len(), 1);
+        assert_eq!(controller.namespaces[0].id, 1);
+        assert_eq!(controller.namespaces[0].path, "/dev/zvol/tank/test");
+    }
+
+    #[test]
+    fn test_nvme_controller_to_ucl_string() {
+        let controller = NvmeControllerUcl {
+            nqn: "nqn.2024-01.org.freebsd.csi:vol1".to_string(),
+            auth_group: "no-authentication".to_string(),
+            transport_group: "tg0".to_string(),
+            namespaces: vec![NvmeNamespaceUcl {
+                id: 1,
+                path: "/dev/zvol/tank/csi/vol1".to_string(),
+            }],
+        };
+
+        let ucl = controller.to_ucl_string().unwrap();
+        assert!(ucl.contains("controller \"nqn.2024-01.org.freebsd.csi:vol1\""));
+        assert!(ucl.contains("auth-group = \"no-authentication\""));
+        assert!(ucl.contains("transport-group = \"tg0\""));
+        assert!(ucl.contains("namespace {"));
+        assert!(ucl.contains("path = \"/dev/zvol/tank/csi/vol1\""));
     }
 
     #[test]
