@@ -6,14 +6,13 @@ This guide covers the complete installation process for the FreeBSD CSI driver, 
 
 - [FreeBSD Storage Node Setup](#freebsd-storage-node-setup)
   - [Prerequisites](#prerequisites)
+  - [Installing ctld-agent](#installing-ctld-agent)
   - [ZFS Pool Configuration](#zfs-pool-configuration)
   - [CTL Configuration](#ctl-configuration)
-  - [Building ctld-agent](#building-ctld-agent)
   - [Running ctld-agent](#running-ctld-agent)
 - [Kubernetes Cluster Setup](#kubernetes-cluster-setup)
   - [Prerequisites](#kubernetes-prerequisites)
-  - [Deploying RBAC](#deploying-rbac)
-  - [Deploying the CSI Driver](#deploying-the-csi-driver)
+  - [Installing with Helm](#installing-with-helm)
   - [Creating StorageClasses](#creating-storageclasses)
   - [Verifying Installation](#verifying-installation)
 - [Building from Source](#building-from-source)
@@ -28,18 +27,33 @@ This guide covers the complete installation process for the FreeBSD CSI driver, 
 
 Ensure your FreeBSD storage node meets the following requirements:
 
-- **FreeBSD 13.0 or later**
+- **FreeBSD 13.0 or later** (FreeBSD 15.0+ for NVMeoF support)
 - **ZFS** filesystem support (included by default)
-- **Rust 1.75+** toolchain for building from source
 - **Network connectivity** to Kubernetes nodes
 - **Root access** for ZFS and CTL configuration
 
-Install the Rust toolchain if not present:
+### Installing ctld-agent
+
+**Option 1: Install from pkg (recommended)**
 
 ```bash
+pkg install ctld-agent
+```
+
+**Option 2: Build from source**
+
+```bash
+# Install Rust toolchain
 pkg install rust
-# or
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Clone and build
+git clone https://github.com/ndenev/freebsd-csi
+cd freebsd-csi
+cargo build --release -p ctld-agent
+
+# Install the binary
+cp target/release/ctld-agent /usr/local/sbin/
+chmod 755 /usr/local/sbin/ctld-agent
 ```
 
 ### ZFS Pool Configuration
@@ -107,7 +121,31 @@ The ctld-agent manages CTL (CAM Target Layer) configuration automatically. Howev
    sysrc ctld_enable="YES"
    ```
 
-4. **For NVMeoF support**, ensure the nvmf kernel module is loaded:
+4. **Create base CTL configuration** (`/etc/ctl.ucl`):
+
+   ```text
+   auth-group ag0 {
+       auth-type = none
+   }
+
+   portal-group pg0 {
+       discovery-auth-group = no-authentication
+       listen = 0.0.0.0:3260
+   }
+
+   # CSI targets will be added below by ctld-agent
+   ```
+
+5. **For NVMeoF support** (FreeBSD 15.0+), add transport group to `/etc/ctl.ucl`:
+
+   ```text
+   transport-group tg0 {
+       transport-type = tcp
+       listen = 0.0.0.0:4420
+   }
+   ```
+
+   And load the nvmf kernel module:
 
    ```bash
    kldload nvmf
@@ -119,82 +157,34 @@ The ctld-agent manages CTL (CAM Target Layer) configuration automatically. Howev
    nvmf_load="YES"
    ```
 
-### Building ctld-agent
-
-1. **Clone the repository**
-
-   ```bash
-   git clone https://github.com/ndenev/freebsd-csi
-   cd freebsd-csi
-   ```
-
-2. **Build the ctld-agent**
-
-   ```bash
-   cargo build --release -p ctld-agent
-   ```
-
-3. **Install the binary**
-
-   ```bash
-   cp target/release/ctld-agent /usr/local/sbin/
-   chmod 755 /usr/local/sbin/ctld-agent
-   ```
-
 ### Running ctld-agent
 
-1. **Basic usage**
+1. **Configure the service** in `/etc/rc.conf`:
 
    ```bash
-   ctld-agent --zfs-parent tank/csi --listen [::]:50051
-   ```
-
-2. **With custom iSCSI/NVMeoF naming**
-
-   ```bash
-   ctld-agent \
-     --zfs-parent tank/csi \
-     --listen [::]:50051 \
-     --base-iqn iqn.2024-01.com.example.storage \
-     --base-nqn nqn.2024-01.com.example.storage \
-     --portal-group 1
-   ```
-
-3. **Create a service script** (`/usr/local/etc/rc.d/ctld_agent`):
-
-   ```sh
-   #!/bin/sh
-
-   # PROVIDE: ctld_agent
-   # REQUIRE: LOGIN zfs
-   # KEYWORD: shutdown
-
-   . /etc/rc.subr
-
-   name="ctld_agent"
-   rcvar="${name}_enable"
-   command="/usr/local/sbin/ctld-agent"
-   command_args="--zfs-parent tank/csi --listen [::]:50051"
-   pidfile="/var/run/${name}.pid"
-
-   start_cmd="${name}_start"
-
-   ctld_agent_start()
-   {
-       ${command} ${command_args} &
-       echo $! > ${pidfile}
-   }
-
-   load_rc_config $name
-   run_rc_command "$1"
-   ```
-
-4. **Enable and start the service**
-
-   ```bash
-   chmod +x /usr/local/etc/rc.d/ctld_agent
    sysrc ctld_agent_enable="YES"
+   sysrc ctld_agent_flags="--zfs-parent tank/csi --listen [::]:50051"
+   ```
+
+2. **Start the service**
+
+   ```bash
    service ctld_agent start
+   ```
+
+3. **Verify it's running**
+
+   ```bash
+   service ctld_agent status
+   sockstat -4l | grep 50051
+   ```
+
+4. **Optional: Custom configuration**
+
+   For custom IQN/NQN naming:
+
+   ```bash
+   sysrc ctld_agent_flags="--zfs-parent tank/csi --listen [::]:50051 --base-iqn iqn.2024-01.com.example.storage --base-nqn nqn.2024-01.com.example.storage"
    ```
 
 ---
@@ -203,7 +193,8 @@ The ctld-agent manages CTL (CAM Target Layer) configuration automatically. Howev
 
 ### Kubernetes Prerequisites
 
-- **Kubernetes 1.28+** cluster
+- **Kubernetes 1.25+** cluster
+- **Helm 3.x** installed
 - **kubectl** configured with cluster admin access
 - **Network connectivity** from Kubernetes nodes to FreeBSD storage node(s)
 - **iSCSI initiator** or **NVMeoF initiator** on worker nodes
@@ -221,56 +212,96 @@ systemctl enable iscsid
 systemctl start iscsid
 ```
 
-### Deploying RBAC
+### Installing with Helm
 
-Deploy the required ServiceAccount, ClusterRole, and ClusterRoleBinding:
+**Option 1: Install from OCI Registry (recommended)**
 
 ```bash
-kubectl apply -f deploy/kubernetes/rbac.yaml
+helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
+  --namespace freebsd-csi \
+  --create-namespace \
+  --set agent.endpoint=http://<FREEBSD-STORAGE-IP>:50051
 ```
 
-This creates:
-- `freebsd-csi-controller` ServiceAccount in `kube-system`
-- `freebsd-csi-controller` ClusterRole with permissions for:
-  - PersistentVolumes and PersistentVolumeClaims
-  - StorageClasses and CSINodes
-  - VolumeSnapshots and VolumeSnapshotContents
-  - Events and Nodes
+**Option 2: Install from source**
 
-### Deploying the CSI Driver
+```bash
+git clone https://github.com/ndenev/freebsd-csi
+cd freebsd-csi
 
-1. **Update the agent endpoint** in `deploy/kubernetes/csi-driver.yaml`:
+helm install freebsd-csi charts/freebsd-csi \
+  --namespace freebsd-csi \
+  --create-namespace \
+  --set agent.endpoint=http://<FREEBSD-STORAGE-IP>:50051
+```
 
-   Edit the `AGENT_ENDPOINT` environment variable to point to your FreeBSD storage node:
+**With TLS enabled:**
 
-   ```yaml
-   env:
-     - name: AGENT_ENDPOINT
-       value: "your-freebsd-node.example.com:50051"
-   ```
-
-2. **Deploy the CSI driver**
-
-   ```bash
-   kubectl apply -f deploy/kubernetes/csi-driver.yaml
-   ```
-
-   This deploys:
-   - CSIDriver object (`csi.freebsd.org`)
-   - Controller Deployment (with sidecar containers)
-   - Node DaemonSet (for volume mounting)
+```bash
+helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
+  --namespace freebsd-csi \
+  --create-namespace \
+  --set agent.endpoint=https://<FREEBSD-STORAGE-IP>:50051 \
+  --set tls.enabled=true \
+  --set tls.existingSecret=ctld-agent-tls
+```
 
 ### Creating StorageClasses
 
-Deploy the predefined StorageClasses:
+**Option 1: Create during Helm installation**
 
 ```bash
-kubectl apply -f deploy/kubernetes/storageclass.yaml
+# iSCSI StorageClass
+helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
+  --namespace freebsd-csi \
+  --create-namespace \
+  --set agent.endpoint=http://<FREEBSD-STORAGE-IP>:50051 \
+  --set storageClassIscsi.create=true \
+  --set storageClassIscsi.parameters.portal=<FREEBSD-STORAGE-IP>:3260
+
+# NVMeoF StorageClass (FreeBSD 15.0+)
+helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
+  --namespace freebsd-csi \
+  --create-namespace \
+  --set agent.endpoint=http://<FREEBSD-STORAGE-IP>:50051 \
+  --set storageClassNvmeof.create=true \
+  --set storageClassNvmeof.parameters.transportAddr=<FREEBSD-STORAGE-IP>
 ```
 
-This creates two StorageClasses:
-- `freebsd-zfs-iscsi` - Volumes exported via iSCSI
-- `freebsd-zfs-nvmeof` - Volumes exported via NVMeoF
+**Option 2: Create manually after installation**
+
+iSCSI StorageClass:
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: freebsd-zfs-iscsi
+provisioner: csi.freebsd.org
+parameters:
+  exportType: iscsi
+  fsType: ext4
+  portal: "<FREEBSD-STORAGE-IP>:3260"
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+```
+
+NVMeoF StorageClass:
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: freebsd-zfs-nvmeof
+provisioner: csi.freebsd.org
+parameters:
+  exportType: nvmeof
+  fsType: ext4
+  transportAddr: "<FREEBSD-STORAGE-IP>"
+  transportPort: "4420"
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+```
 
 ### Verifying Installation
 
@@ -289,13 +320,13 @@ This creates two StorageClasses:
 2. **Check controller deployment**
 
    ```bash
-   kubectl get pods -n kube-system -l app=freebsd-csi-controller
+   kubectl get pods -n freebsd-csi -l app.kubernetes.io/component=controller
    ```
 
 3. **Check node DaemonSet**
 
    ```bash
-   kubectl get pods -n kube-system -l app=freebsd-csi-node
+   kubectl get pods -n freebsd-csi -l app.kubernetes.io/component=node
    ```
 
 4. **Check StorageClasses**
@@ -409,4 +440,5 @@ ENTRYPOINT ["/usr/local/bin/csi-driver"]
 ## Next Steps
 
 - [Configuration Reference](configuration.md) - Detailed configuration options
+- [Helm Chart README](../charts/freebsd-csi/README.md) - Helm chart documentation
 - Review the [README](../README.md) for usage examples

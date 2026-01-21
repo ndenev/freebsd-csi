@@ -17,7 +17,6 @@
 #   ctld_agent_listen="[::]:50051"        # Listen address (default: [::1]:50051)
 #   ctld_agent_base_iqn="iqn.2024-01.org.freebsd.csi"  # Base IQN
 #   ctld_agent_base_nqn="nqn.2024-01.org.freebsd.csi"  # Base NQN
-#   ctld_agent_portal_group="1"           # Portal group tag
 #   ctld_agent_ctl_config="/etc/ctl.ucl"  # CTL config file
 #   ctld_agent_auth_group="ag0"           # Auth group name
 #   ctld_agent_portal_group_name="pg0"    # Portal group name
@@ -40,7 +39,6 @@ load_rc_config $name
 : ${ctld_agent_listen:="[::1]:50051"}
 : ${ctld_agent_base_iqn:="iqn.2024-01.org.freebsd.csi"}
 : ${ctld_agent_base_nqn:="nqn.2024-01.org.freebsd.csi"}
-: ${ctld_agent_portal_group:="1"}
 : ${ctld_agent_ctl_config:="/etc/ctl.ucl"}
 : ${ctld_agent_auth_group:="ag0"}
 : ${ctld_agent_portal_group_name:="pg0"}
@@ -71,7 +69,6 @@ ctld_agent_prestart()
         --zfs-parent ${ctld_agent_zfs_parent} \
         --base-iqn ${ctld_agent_base_iqn} \
         --base-nqn ${ctld_agent_base_nqn} \
-        --portal-group ${ctld_agent_portal_group} \
         --ctl-config ${ctld_agent_ctl_config} \
         --auth-group ${ctld_agent_auth_group} \
         --portal-group-name ${ctld_agent_portal_group_name} \

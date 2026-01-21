@@ -38,7 +38,6 @@ The ctld-agent is the FreeBSD daemon that manages ZFS volumes and CTL exports.
 | `--zfs-parent` | - | **Yes** | ZFS parent dataset where volumes will be created (e.g., `tank/csi`). |
 | `--base-iqn` | `iqn.2024-01.org.freebsd.csi` | No | Base iSCSI Qualified Name for target naming. |
 | `--base-nqn` | `nqn.2024-01.org.freebsd.csi` | No | Base NVMe Qualified Name for NVMeoF targets. |
-| `--portal-group` | `1` | No | Portal group tag for iSCSI targets. |
 | `--tls-cert` | - | No | TLS certificate file (PEM format) for server identity. |
 | `--tls-key` | - | No | TLS private key file (PEM format). |
 | `--tls-client-ca` | - | No | CA certificate for client verification (enables mTLS). |

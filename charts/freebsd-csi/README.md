@@ -52,10 +52,15 @@ helm install freebsd-csi charts/freebsd-csi \
 | `tls.clientCert` | Client certificate (base64 encoded) | `""` |
 | `tls.clientKey` | Client key (base64 encoded) | `""` |
 | `tls.domain` | TLS domain for server verification | `ctld-agent` |
-| `storageClass.create` | Create a StorageClass | `false` |
-| `storageClass.name` | StorageClass name | `freebsd-zfs` |
-| `storageClass.default` | Set as default StorageClass | `false` |
-| `storageClass.parameters` | StorageClass parameters | See values.yaml |
+| `storageClassIscsi.create` | Create an iSCSI StorageClass | `false` |
+| `storageClassIscsi.name` | iSCSI StorageClass name | `freebsd-zfs-iscsi` |
+| `storageClassIscsi.default` | Set as default StorageClass | `false` |
+| `storageClassIscsi.parameters.portal` | **Required if create=true.** iSCSI portal address | `""` |
+| `storageClassNvmeof.create` | Create an NVMeoF StorageClass | `false` |
+| `storageClassNvmeof.name` | NVMeoF StorageClass name | `freebsd-zfs-nvmeof` |
+| `storageClassNvmeof.default` | Set as default StorageClass | `false` |
+| `storageClassNvmeof.parameters.transportAddr` | **Required if create=true.** NVMeoF target address | `""` |
+| `storageClassNvmeof.parameters.transportPort` | NVMeoF transport port | `4420` |
 | `serviceAccount.create` | Create ServiceAccount | `true` |
 | `rbac.create` | Create RBAC resources | `true` |
 
@@ -81,15 +86,26 @@ helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
   --set tls.existingSecret=ctld-agent-tls
 ```
 
-### With StorageClass
+### With iSCSI StorageClass
 
 ```bash
 helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
   --namespace freebsd-csi \
   --create-namespace \
   --set agent.endpoint=http://192.168.1.100:50051 \
-  --set storageClass.create=true \
-  --set storageClass.parameters.portal=192.168.1.100:3260
+  --set storageClassIscsi.create=true \
+  --set storageClassIscsi.parameters.portal=192.168.1.100:3260
+```
+
+### With NVMeoF StorageClass (FreeBSD 15.0+)
+
+```bash
+helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
+  --namespace freebsd-csi \
+  --create-namespace \
+  --set agent.endpoint=http://192.168.1.100:50051 \
+  --set storageClassNvmeof.create=true \
+  --set storageClassNvmeof.parameters.transportAddr=192.168.1.100
 ```
 
 ### Using values.yaml
@@ -100,14 +116,19 @@ Create a `my-values.yaml`:
 agent:
   endpoint: "http://192.168.1.100:50051"
 
-storageClass:
+storageClassIscsi:
   create: true
-  name: freebsd-zfs
+  name: freebsd-zfs-iscsi
   default: true
   parameters:
-    exportType: iscsi
     fsType: ext4
     portal: "192.168.1.100:3260"
+
+# Optional: Also create NVMeoF StorageClass (FreeBSD 15.0+ required on storage server)
+# storageClassNvmeof:
+#   create: true
+#   parameters:
+#     transportAddr: "192.168.1.100"
 
 controller:
   resources:
@@ -126,15 +147,16 @@ helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
   -f my-values.yaml
 ```
 
-## Creating a StorageClass
+## Creating StorageClasses Manually
 
-If you didn't create a StorageClass during installation, create one manually:
+If you didn't create StorageClasses during installation, create them manually:
 
+**iSCSI StorageClass:**
 ```yaml
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: freebsd-zfs
+  name: freebsd-zfs-iscsi
 provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
@@ -145,13 +167,12 @@ reclaimPolicy: Delete
 volumeBindingMode: Immediate
 ```
 
-For NVMe-oF instead of iSCSI:
-
+**NVMeoF StorageClass (FreeBSD 15.0+ on storage server):**
 ```yaml
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: freebsd-zfs-nvme
+  name: freebsd-zfs-nvmeof
 provisioner: csi.freebsd.org
 parameters:
   exportType: nvmeof
@@ -160,6 +181,7 @@ parameters:
   transportPort: "4420"
 allowVolumeExpansion: true
 reclaimPolicy: Delete
+volumeBindingMode: Immediate
 ```
 
 ## Verifying Installation

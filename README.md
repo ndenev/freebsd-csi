@@ -53,10 +53,10 @@ This project provides enterprise-grade block storage for Kubernetes clusters usi
 
 ## Prerequisites
 
-- **FreeBSD 13.0+** on storage node(s)
+- **FreeBSD 13.0+** on storage node(s) (FreeBSD 15.0+ for NVMeoF)
 - **ZFS** pool configured for storage
-- **Rust 1.75+** (for building from source)
-- **Kubernetes 1.28+** cluster
+- **Kubernetes 1.25+** cluster
+- **Helm 3.x** for deployment
 - Network connectivity between Kubernetes nodes and FreeBSD storage node(s)
 
 ## Quick Start
@@ -64,21 +64,40 @@ This project provides enterprise-grade block storage for Kubernetes clusters usi
 ### 1. FreeBSD Storage Node Setup
 
 ```bash
-# Create ZFS pool and parent dataset
+# Install ctld-agent from pkg (recommended)
+pkg install ctld-agent
+
+# Or build from source
+git clone https://github.com/ndenev/freebsd-csi
+cd freebsd-csi
+cargo build --release -p ctld-agent
+cp target/release/ctld-agent /usr/local/sbin/
+
+# Create ZFS parent dataset
 zfs create tank/csi
 
-# Build and run ctld-agent
-cargo build --release -p ctld-agent
-./target/release/ctld-agent --zfs-parent tank/csi --listen [::]:50051
+# Configure and start ctld-agent
+sysrc ctld_agent_enable="YES"
+sysrc ctld_agent_flags="--zfs-parent tank/csi --listen [::]:50051"
+service ctld_agent start
 ```
 
-### 2. Kubernetes Deployment
+### 2. Kubernetes Deployment (Helm)
 
 ```bash
-# Deploy RBAC, CSI driver, and StorageClasses
-kubectl apply -f deploy/kubernetes/rbac.yaml
-kubectl apply -f deploy/kubernetes/csi-driver.yaml
-kubectl apply -f deploy/kubernetes/storageclass.yaml
+# Install from OCI registry
+helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
+  --namespace freebsd-csi \
+  --create-namespace \
+  --set agent.endpoint=http://<FREEBSD-STORAGE-IP>:50051 \
+  --set storageClassIscsi.create=true \
+  --set storageClassIscsi.parameters.portal=<FREEBSD-STORAGE-IP>:3260
+
+# Or install from source
+helm install freebsd-csi charts/freebsd-csi \
+  --namespace freebsd-csi \
+  --create-namespace \
+  --set agent.endpoint=http://<FREEBSD-STORAGE-IP>:50051
 ```
 
 ### 3. Create a PersistentVolumeClaim
@@ -101,6 +120,7 @@ spec:
 
 - [Installation Guide](docs/installation.md) - Detailed setup instructions
 - [Configuration Reference](docs/configuration.md) - All configuration options
+- [Helm Chart README](charts/freebsd-csi/README.md) - Helm chart documentation
 
 ## Features
 
@@ -108,7 +128,8 @@ spec:
 - Volume expansion (online)
 - Snapshots and clones
 - iSCSI and NVMeoF export protocols
-- UFS filesystem support
+- mTLS support for secure communication
+- Automatic recovery on restart
 - RBAC-secured Kubernetes integration
 
 ## CSI Driver Name
@@ -122,7 +143,7 @@ csi.freebsd.org
 | Name | Export Protocol | Description |
 |------|-----------------|-------------|
 | `freebsd-zfs-iscsi` | iSCSI | ZFS volumes exported via iSCSI |
-| `freebsd-zfs-nvmeof` | NVMeoF | ZFS volumes exported via NVMe over Fabrics |
+| `freebsd-zfs-nvmeof` | NVMeoF | ZFS volumes exported via NVMe over Fabrics (FreeBSD 15.0+) |
 
 ## Building from Source
 
