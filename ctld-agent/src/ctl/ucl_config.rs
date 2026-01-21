@@ -81,12 +81,12 @@ impl IscsiTargetUcl {
 
         let mut s = String::new();
         writeln!(s, "target \"{}\" {{", self.iqn).unwrap();
-        writeln!(s, "    auth-group = \"{}\"", self.auth_group).unwrap();
-        writeln!(s, "    portal-group = \"{}\"", self.portal_group).unwrap();
+        writeln!(s, "    auth-group {}", self.auth_group).unwrap();
+        writeln!(s, "    portal-group {}", self.portal_group).unwrap();
         for lun in &self.luns {
             writeln!(s, "    lun {} {{", lun.id).unwrap();
-            writeln!(s, "        path = \"{}\"", lun.path).unwrap();
-            writeln!(s, "        blocksize = {}", lun.blocksize).unwrap();
+            writeln!(s, "        path \"{}\"", lun.path).unwrap();
+            writeln!(s, "        blocksize {}", lun.blocksize).unwrap();
             writeln!(s, "    }}").unwrap();
         }
         writeln!(s, "}}").unwrap();
@@ -99,12 +99,10 @@ impl IscsiTargetUcl {
 /// FreeBSD 15.0+ ctld supports NVMeoF via `controller` blocks:
 /// ```ucl
 /// controller "nqn.2024-01.org.freebsd.csi:vol-name" {
-///     auth-group = "no-authentication"
-///     transport-group = "tg0"
-///     namespace {
-///         1 {
-///             path = "/dev/zvol/tank/csi/vol-name"
-///         }
+///     auth-group no-authentication
+///     transport-group tg0
+///     namespace 0 {
+///         path "/dev/zvol/tank/csi/vol-name"
 ///     }
 /// }
 /// ```
@@ -138,13 +136,11 @@ impl NvmeControllerUcl {
 
         let mut s = String::new();
         writeln!(s, "controller \"{}\" {{", self.nqn).unwrap();
-        writeln!(s, "    auth-group = \"{}\"", self.auth_group).unwrap();
-        writeln!(s, "    transport-group = \"{}\"", self.transport_group).unwrap();
+        writeln!(s, "    auth-group {}", self.auth_group).unwrap();
+        writeln!(s, "    transport-group {}", self.transport_group).unwrap();
         for ns in &self.namespaces {
-            writeln!(s, "    namespace {{").unwrap();
-            writeln!(s, "        {} {{", ns.id).unwrap();
-            writeln!(s, "            path = \"{}\"", ns.path).unwrap();
-            writeln!(s, "        }}").unwrap();
+            writeln!(s, "    namespace {} {{", ns.id).unwrap();
+            writeln!(s, "        path \"{}\"", ns.path).unwrap();
             writeln!(s, "    }}").unwrap();
         }
         writeln!(s, "}}").unwrap();
@@ -302,7 +298,7 @@ mod tests {
         assert!(ucl.contains("lun 1"));
         assert!(ucl.contains("vol2-data"));
         assert!(ucl.contains("vol2-log"));
-        assert!(ucl.contains("blocksize = 4096"));
+        assert!(ucl.contains("blocksize 4096"));
     }
 
     #[test]
@@ -319,10 +315,10 @@ mod tests {
 
         let ucl = controller.to_ucl_string().unwrap();
         assert!(ucl.contains("controller \"nqn.2024-01.org.freebsd.csi:vol1\""));
-        assert!(ucl.contains("auth-group = \"no-authentication\""));
-        assert!(ucl.contains("transport-group = \"tg0\""));
-        assert!(ucl.contains("namespace {"));
-        assert!(ucl.contains("path = \"/dev/zvol/tank/csi/vol1\""));
+        assert!(ucl.contains("auth-group no-authentication"));
+        assert!(ucl.contains("transport-group tg0"));
+        assert!(ucl.contains("namespace 1 {"));
+        assert!(ucl.contains("path \"/dev/zvol/tank/csi/vol1\""));
     }
 
     #[test]
