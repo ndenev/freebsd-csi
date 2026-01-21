@@ -232,7 +232,11 @@ impl ToUcl for Controller {
 // Top-level config
 // ============================================================================
 
-/// The complete ctld UCL configuration
+/// The complete ctld UCL configuration.
+///
+/// Note: Currently unused as ZFS user properties are the source of truth.
+/// Kept for potential debugging/recovery purposes.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Uclicious)]
 pub struct CtlConfig {
     /// iSCSI targets indexed by IQN
@@ -244,6 +248,7 @@ pub struct CtlConfig {
     pub controller: HashMap<String, Controller>,
 }
 
+#[allow(dead_code)]
 impl CtlConfig {
     /// Parse a UCL config file
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {

@@ -11,6 +11,7 @@ pub enum CtlError {
     #[error("ctld command failed: {0}")]
     CommandFailed(String),
 
+    #[allow(dead_code)]
     #[error("failed to parse ctld output: {0}")]
     ParseError(String),
 

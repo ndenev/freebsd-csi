@@ -98,7 +98,11 @@ impl CtlManager {
         Nqn::new(&self.base_nqn, volume_name)
     }
 
-    /// Load existing exports from UCL config file
+    /// Load existing exports from UCL config file.
+    ///
+    /// Note: This is currently unused as ZFS user properties are the source of truth.
+    /// Kept for potential debugging/recovery purposes.
+    #[allow(dead_code)]
     #[instrument(skip(self))]
     pub fn load_config(&mut self) -> Result<()> {
         let config_path = &self.ucl_manager.config_path;

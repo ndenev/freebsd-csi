@@ -323,8 +323,14 @@ impl StorageAgent for StorageService {
             zfs.get_device_path(&req.name)
         };
 
-        // Default LUN ID
-        let lun_id: i32 = 0;
+        // Default LUN/Namespace ID
+        // Note: iSCSI LUN IDs can start at 0, but NVMeoF namespace IDs must start at 1
+        // (NSID 0 is reserved per NVMe spec)
+        let lun_id: i32 = match export_type {
+            ExportType::Iscsi => 0,
+            ExportType::Nvmeof => 1,
+            _ => 0,
+        };
 
         // Export the volume via unified CTL manager
         let ctl_export_type = to_ctl_export_type(export_type).expect("already validated");

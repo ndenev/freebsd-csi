@@ -101,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let zfs = Arc::new(RwLock::new(zfs_manager));
 
     // Initialize unified CTL manager for iSCSI and NVMeoF exports
-    let mut ctl_manager = CtlManager::new(
+    let ctl_manager = CtlManager::new(
         args.base_iqn.clone(),
         args.base_nqn.clone(),
         args.portal_group_name.clone(),
@@ -110,11 +110,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.transport_group_name.clone(),
     )?;
 
-    // Load existing exports from UCL config (startup recovery)
-    if let Err(e) = ctl_manager.load_config() {
-        tracing::warn!("Failed to load existing exports from UCL config: {}", e);
-        // Continue anyway - service can still operate
-    }
+    // Note: We intentionally do NOT load from UCL config here.
+    // ZFS user properties are the source of truth for CSI-managed volumes.
+    // Loading from UCL config would cause duplication if user-managed targets
+    // happen to have our IQN/NQN prefix.
 
     let ctl = Arc::new(RwLock::new(ctl_manager));
 
