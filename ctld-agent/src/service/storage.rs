@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument, warn};
 
-use crate::ctl::{CtlManager, ExportType as CtlExportType};
+use crate::ctl::{CtlError, CtlManager, ExportType as CtlExportType};
 use crate::zfs::{VolumeMetadata as ZfsVolumeMetadata, ZfsManager};
 
 /// Generated protobuf types and service trait
@@ -399,6 +399,11 @@ impl StorageAgent for StorageService {
     }
 
     /// Delete a volume and unexport from iSCSI/NVMeoF
+    ///
+    /// This operation is idempotent per CSI spec:
+    /// - If volume doesn't exist in cache, still try to clean up ZFS
+    /// - If unexport fails with "not found", treat as already unexported
+    /// - If ZFS volume doesn't exist, treat as already deleted
     #[instrument(skip(self, request))]
     async fn delete_volume(
         &self,
@@ -411,49 +416,61 @@ impl StorageAgent for StorageService {
             return Err(Status::invalid_argument("volume_id cannot be empty"));
         }
 
-        // Get volume metadata
+        // Get volume metadata - if not in cache, we'll still try to clean up ZFS
         let metadata = {
             let volumes = self.volumes.read().await;
-            volumes
-                .get(&req.volume_id)
-                .cloned()
-                .ok_or_else(|| Status::not_found(format!("volume '{}' not found", req.volume_id)))?
+            volumes.get(&req.volume_id).cloned()
         };
 
-        // Unexport the volume via unified CTL manager
-        if metadata.export_type != ExportType::Unspecified {
+        // Try to unexport the volume via unified CTL manager
+        // This is idempotent - if already unexported, we continue
+        {
             let ctl = self.ctl.read().await;
-            ctl.unexport_volume(&metadata.name).map_err(|e| {
-                warn!("Failed to unexport volume: {}", e);
-                Status::internal(format!("failed to unexport volume: {}", e))
-            })?;
-
-            // Write UCL config with updated (removed) export entries
-            if let Err(e) = ctl.write_config() {
-                warn!("Failed to write CTL config: {}", e);
-                // Continue anyway - unexport is in cache, config will persist on next operation
+            match ctl.unexport_volume(&req.volume_id) {
+                Ok(()) => {
+                    // Write UCL config with updated (removed) export entries
+                    if let Err(e) = ctl.write_config() {
+                        warn!("Failed to write CTL config: {}", e);
+                        // Continue anyway - unexport is in cache, config will persist on next operation
+                    }
+                }
+                Err(CtlError::TargetNotFound(_)) => {
+                    // Already unexported - this is fine (idempotent)
+                    debug!("Volume {} already unexported (idempotent)", req.volume_id);
+                }
+                Err(e) => {
+                    warn!("Failed to unexport volume: {}", e);
+                    // Continue to try ZFS deletion - don't fail the whole operation
+                }
             }
-        } else {
-            debug!("Volume has no export type, skipping unexport");
         }
 
         // Clear ZFS metadata before deleting (for consistency)
+        // Use volume_id as the name since metadata might be None
+        let volume_name = metadata
+            .as_ref()
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| req.volume_id.clone());
+
         {
             let zfs = self.zfs.read().await;
-            if let Err(e) = zfs.clear_volume_metadata(&metadata.name) {
-                warn!("Failed to clear volume metadata from ZFS: {}", e);
+            if let Err(e) = zfs.clear_volume_metadata(&volume_name) {
+                debug!(
+                    "Failed to clear volume metadata from ZFS: {} (may already be cleared)",
+                    e
+                );
                 // Continue anyway - we're deleting the volume
             }
         }
 
-        // Delete ZFS volume
+        // Delete ZFS volume (this is now idempotent - returns Ok if doesn't exist)
         {
             let zfs = self.zfs.read().await;
-            zfs.delete_volume(&metadata.name)
+            zfs.delete_volume(&volume_name)
                 .map_err(|e| Status::internal(format!("failed to delete ZFS volume: {}", e)))?;
         }
 
-        // Remove metadata
+        // Remove metadata from cache
         {
             let mut volumes = self.volumes.write().await;
             volumes.remove(&req.volume_id);

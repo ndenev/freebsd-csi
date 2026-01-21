@@ -5,6 +5,7 @@ pub mod ucl_config;
 
 // Re-exports for module API
 pub use ctl_manager::CtlManager;
+pub use error::CtlError;
 pub use types::ExportType;
 
 // Re-export types that may be used externally

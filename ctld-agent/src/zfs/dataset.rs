@@ -131,6 +131,8 @@ impl ZfsManager {
     }
 
     /// Delete a ZFS volume
+    ///
+    /// This operation is idempotent: if the volume doesn't exist, returns Ok.
     #[instrument(skip(self))]
     pub fn delete_volume(&self, name: &str) -> Result<()> {
         // Validate name for command injection prevention
@@ -139,10 +141,10 @@ impl ZfsManager {
         let full_name = self.full_path(name);
         info!(volume = %full_name, "Deleting ZFS volume");
 
-        // Check if volume exists
+        // Check if volume exists - if not, deletion is already complete (idempotent)
         if !self.dataset_exists(&full_name)? {
-            warn!(volume = %full_name, "Volume not found for deletion");
-            return Err(ZfsError::DatasetNotFound(full_name));
+            info!(volume = %full_name, "Volume already deleted (idempotent)");
+            return Ok(());
         }
 
         let output = Command::new("zfs").args(["destroy", &full_name]).output()?;
