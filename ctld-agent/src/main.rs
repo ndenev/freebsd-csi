@@ -83,9 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => Level::INFO,
     };
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(level)
-        .finish();
+    let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
     info!("Starting ctld-agent on {}", args.listen);

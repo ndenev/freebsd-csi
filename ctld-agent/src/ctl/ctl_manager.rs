@@ -98,20 +98,20 @@ where
 fn extract_first_id_path(section: &serde_json::Value) -> Option<(u32, String)> {
     if let Some(obj) = section.as_object() {
         for (id_str, config) in obj {
-            if let Ok(id) = id_str.parse::<u32>() {
-                if let Some(path) = config.get("path").and_then(|v| v.as_str()) {
-                    return Some((id, path.to_string()));
-                }
+            if let Ok(id) = id_str.parse::<u32>()
+                && let Some(path) = config.get("path").and_then(|v| v.as_str())
+            {
+                return Some((id, path.to_string()));
             }
         }
     } else if let Some(arr) = section.as_array() {
         for wrapper in arr {
             if let Some(obj) = wrapper.as_object() {
                 for (id_str, config) in obj {
-                    if let Ok(id) = id_str.parse::<u32>() {
-                        if let Some(path) = config.get("path").and_then(|v| v.as_str()) {
-                            return Some((id, path.to_string()));
-                        }
+                    if let Ok(id) = id_str.parse::<u32>()
+                        && let Some(path) = config.get("path").and_then(|v| v.as_str())
+                    {
+                        return Some((id, path.to_string()));
                     }
                 }
             }
@@ -377,10 +377,7 @@ impl CtlManager {
             exports.insert(volume_name.to_string(), export.clone());
         }
 
-        info!(
-            "Exported {} as {:?} (cache only)",
-            volume_name, export_type
-        );
+        info!("Exported {} as {:?} (cache only)", volume_name, export_type);
         Ok(export)
     }
 

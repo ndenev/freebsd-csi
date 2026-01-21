@@ -218,13 +218,20 @@ impl StorageService {
             }
 
             let Some(ctl_export_type) = to_ctl_export_type(metadata.export_type) else {
-                debug!("Volume '{}' has no export type, skipping reconciliation", vol_name);
+                debug!(
+                    "Volume '{}' has no export type, skipping reconciliation",
+                    vol_name
+                );
                 continue;
             };
 
             let ctl = self.ctl.read().await;
-            match ctl.export_volume(vol_name, &device_path, ctl_export_type, metadata.lun_id as u32)
-            {
+            match ctl.export_volume(
+                vol_name,
+                &device_path,
+                ctl_export_type,
+                metadata.lun_id as u32,
+            ) {
                 Ok(_) => {
                     info!(
                         "Reconciled: re-exported {:?} target for '{}'",
@@ -235,10 +242,7 @@ impl StorageService {
                 Err(e) => {
                     // Ignore "already exists" errors (race with load_config)
                     if !e.to_string().contains("exists") {
-                        warn!(
-                            "Failed to reconcile export for '{}': {}",
-                            vol_name, e
-                        );
+                        warn!("Failed to reconcile export for '{}': {}", vol_name, e);
                     }
                 }
             }
@@ -276,7 +280,6 @@ impl StorageService {
             parameters: metadata.parameters.clone(),
         }
     }
-
 }
 
 #[tonic::async_trait]
@@ -533,7 +536,8 @@ impl StorageAgent for StorageService {
             }
         }
 
-        let (paginated_volumes, next_token) = paginate(volumes, req.max_entries, &req.starting_token);
+        let (paginated_volumes, next_token) =
+            paginate(volumes, req.max_entries, &req.starting_token);
 
         Ok(Response::new(ListVolumesResponse {
             volumes: paginated_volumes,
