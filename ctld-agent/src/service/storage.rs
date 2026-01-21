@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument, warn};
 
-use crate::ctl::{IscsiManager, NvmeofManager};
+use crate::ctl::{CtlManager, ExportType as CtlExportType};
 use crate::zfs::{VolumeMetadata as ZfsVolumeMetadata, ZfsManager};
 
 /// Generated protobuf types and service trait
@@ -62,10 +62,8 @@ struct SnapshotMetadata {
 pub struct StorageService {
     /// ZFS volume manager
     zfs: Arc<RwLock<ZfsManager>>,
-    /// iSCSI export manager
-    iscsi: Arc<RwLock<IscsiManager>>,
-    /// NVMeoF export manager
-    nvmeof: Arc<RwLock<NvmeofManager>>,
+    /// Unified CTL manager (handles both iSCSI and NVMeoF)
+    ctl: Arc<RwLock<CtlManager>>,
     /// Volume metadata tracking
     volumes: Arc<RwLock<HashMap<String, VolumeMetadata>>>,
     /// Snapshot metadata tracking
@@ -74,15 +72,10 @@ pub struct StorageService {
 
 impl StorageService {
     /// Create a new StorageService
-    pub fn new(
-        zfs: Arc<RwLock<ZfsManager>>,
-        iscsi: Arc<RwLock<IscsiManager>>,
-        nvmeof: Arc<RwLock<NvmeofManager>>,
-    ) -> Self {
+    pub fn new(zfs: Arc<RwLock<ZfsManager>>, ctl: Arc<RwLock<CtlManager>>) -> Self {
         Self {
             zfs,
-            iscsi,
-            nvmeof,
+            ctl,
             volumes: Arc::new(RwLock::new(HashMap::new())),
             snapshots: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -138,6 +131,78 @@ impl StorageService {
         Ok(restored_count)
     }
 
+    /// Reconcile exports: ensure all volumes in ZFS metadata are exported
+    ///
+    /// This should be called after restore_from_zfs and load_config to ensure
+    /// that CTL exports match the ZFS metadata (source of truth for what volumes exist).
+    /// After reconciliation, writes the unified UCL config.
+    pub async fn reconcile_exports(&self) -> Result<usize, String> {
+        info!("Reconciling CTL exports with ZFS metadata");
+
+        let volumes = self.volumes.read().await;
+        let mut reconciled_count = 0;
+
+        for (vol_name, metadata) in volumes.iter() {
+            // Get device path for this volume
+            let device_path = {
+                let zfs = self.zfs.read().await;
+                zfs.get_device_path(vol_name)
+            };
+
+            // Check if export exists in CtlManager
+            let needs_export = {
+                let ctl = self.ctl.read().await;
+                ctl.get_export(vol_name).is_none()
+            };
+
+            if !needs_export {
+                continue;
+            }
+
+            let ctl_export_type = match metadata.export_type {
+                ExportType::Iscsi => CtlExportType::Iscsi,
+                ExportType::Nvmeof => CtlExportType::Nvmeof,
+                ExportType::Unspecified => {
+                    debug!("Volume '{}' has no export type, skipping reconciliation", vol_name);
+                    continue;
+                }
+            };
+
+            let ctl = self.ctl.read().await;
+            match ctl.export_volume(vol_name, &device_path, ctl_export_type, metadata.lun_id as u32)
+            {
+                Ok(_) => {
+                    info!(
+                        "Reconciled: re-exported {:?} target for '{}'",
+                        ctl_export_type, vol_name
+                    );
+                    reconciled_count += 1;
+                }
+                Err(e) => {
+                    // Ignore "already exists" errors (race with load_config)
+                    if !e.to_string().contains("exists") {
+                        warn!(
+                            "Failed to reconcile export for '{}': {}",
+                            vol_name, e
+                        );
+                    }
+                }
+            }
+        }
+        drop(volumes);
+
+        // Write unified UCL config after reconciliation
+        if reconciled_count > 0 {
+            let ctl = self.ctl.read().await;
+            if let Err(e) = ctl.write_config() {
+                warn!("Failed to write CTL config after reconciliation: {}", e);
+            }
+        }
+
+        info!("Reconciled {} export(s)", reconciled_count);
+        Ok(reconciled_count)
+    }
+
     /// Convert ZFS dataset info to proto Volume
     fn dataset_to_volume(
         &self,
@@ -157,6 +222,7 @@ impl StorageService {
             parameters: metadata.parameters.clone(),
         }
     }
+
 }
 
 #[tonic::async_trait]
@@ -204,30 +270,32 @@ impl StorageAgent for StorageService {
         // Default LUN ID
         let lun_id: i32 = 0;
 
-        // Export the volume
-        let target_name = match export_type {
-            ExportType::Iscsi => {
-                let iscsi = self.iscsi.read().await;
-                let target = iscsi
-                    .export_volume(&req.name, &device_path, lun_id as u32)
-                    .map_err(|e| {
-                        warn!("Failed to export via iSCSI: {}", e);
-                        Status::internal(format!("failed to export via iSCSI: {}", e))
-                    })?;
-                target.iqn
-            }
-            ExportType::Nvmeof => {
-                let nvmeof = self.nvmeof.read().await;
-                let subsystem = nvmeof
-                    .export_volume(&req.name, &device_path, lun_id as u32)
-                    .map_err(|e| {
-                        warn!("Failed to export via NVMeoF: {}", e);
-                        Status::internal(format!("failed to export via NVMeoF: {}", e))
-                    })?;
-                subsystem.nqn
-            }
+        // Export the volume via unified CTL manager
+        let ctl_export_type = match export_type {
+            ExportType::Iscsi => CtlExportType::Iscsi,
+            ExportType::Nvmeof => CtlExportType::Nvmeof,
             ExportType::Unspecified => unreachable!(),
         };
+
+        let target_name = {
+            let ctl = self.ctl.read().await;
+            let export = ctl
+                .export_volume(&req.name, &device_path, ctl_export_type, lun_id as u32)
+                .map_err(|e| {
+                    warn!("Failed to export volume: {}", e);
+                    Status::internal(format!("failed to export volume: {}", e))
+                })?;
+            export.target_name
+        };
+
+        // Write UCL config and reload ctld
+        {
+            let ctl = self.ctl.read().await;
+            if let Err(e) = ctl.write_config() {
+                warn!("Failed to write CTL config: {}", e);
+                // Continue anyway - export is in cache, config will persist on next operation
+            }
+        }
 
         // Store metadata
         let metadata = VolumeMetadata {
@@ -302,25 +370,21 @@ impl StorageAgent for StorageService {
                 .ok_or_else(|| Status::not_found(format!("volume '{}' not found", req.volume_id)))?
         };
 
-        // Unexport the volume
-        match metadata.export_type {
-            ExportType::Iscsi => {
-                let iscsi = self.iscsi.read().await;
-                iscsi.unexport_volume(&metadata.name).map_err(|e| {
-                    warn!("Failed to unexport from iSCSI: {}", e);
-                    Status::internal(format!("failed to unexport from iSCSI: {}", e))
-                })?;
+        // Unexport the volume via unified CTL manager
+        if metadata.export_type != ExportType::Unspecified {
+            let ctl = self.ctl.read().await;
+            ctl.unexport_volume(&metadata.name).map_err(|e| {
+                warn!("Failed to unexport volume: {}", e);
+                Status::internal(format!("failed to unexport volume: {}", e))
+            })?;
+
+            // Write UCL config with updated (removed) export entries
+            if let Err(e) = ctl.write_config() {
+                warn!("Failed to write CTL config: {}", e);
+                // Continue anyway - unexport is in cache, config will persist on next operation
             }
-            ExportType::Nvmeof => {
-                let nvmeof = self.nvmeof.read().await;
-                nvmeof.unexport_volume(&metadata.target_name).map_err(|e| {
-                    warn!("Failed to unexport from NVMeoF: {}", e);
-                    Status::internal(format!("failed to unexport from NVMeoF: {}", e))
-                })?;
-            }
-            ExportType::Unspecified => {
-                debug!("Volume has no export type, skipping unexport");
-            }
+        } else {
+            debug!("Volume has no export type, skipping unexport");
         }
 
         // Clear ZFS metadata before deleting (for consistency)

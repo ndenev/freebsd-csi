@@ -11,7 +11,7 @@ mod ctl;
 mod service;
 mod zfs;
 
-use ctl::{IscsiManager, NvmeofManager, PortalGroup};
+use ctl::CtlManager;
 use service::StorageService;
 use service::proto::storage_agent_server::StorageAgentServer;
 use zfs::ZfsManager;
@@ -107,30 +107,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let zfs_manager = ZfsManager::new(args.zfs_parent.clone())?;
     let zfs = Arc::new(RwLock::new(zfs_manager));
 
-    // Initialize iSCSI manager with UCL config support
-    let portal_group = PortalGroup::new(args.portal_group, args.portal_group_name.clone());
-    let mut iscsi_manager = IscsiManager::new_with_ucl(
+    // Initialize unified CTL manager for iSCSI and NVMeoF exports
+    let mut ctl_manager = CtlManager::new(
         args.base_iqn.clone(),
-        portal_group,
+        args.base_nqn.clone(),
+        args.portal_group,
+        args.portal_group_name.clone(),
         args.ctl_config.to_string_lossy().to_string(),
         args.auth_group.clone(),
         args.transport_group_name.clone(),
     )?;
 
-    // Load existing targets from UCL config (startup recovery)
-    if let Err(e) = iscsi_manager.load_config() {
-        tracing::warn!("Failed to load existing targets from UCL config: {}", e);
+    // Load existing exports from UCL config (startup recovery)
+    if let Err(e) = ctl_manager.load_config() {
+        tracing::warn!("Failed to load existing exports from UCL config: {}", e);
         // Continue anyway - service can still operate
     }
 
-    let iscsi = Arc::new(RwLock::new(iscsi_manager));
-
-    // Initialize NVMeoF manager
-    let nvmeof_manager = NvmeofManager::new(args.base_nqn.clone());
-    let nvmeof = Arc::new(RwLock::new(nvmeof_manager));
+    let ctl = Arc::new(RwLock::new(ctl_manager));
 
     // Create the storage service
-    let storage_service = StorageService::new(zfs, iscsi, nvmeof);
+    let storage_service = StorageService::new(zfs, ctl);
 
     // Restore volume metadata from ZFS user properties
     match storage_service.restore_from_zfs().await {
@@ -144,6 +141,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(e) => {
             tracing::warn!("Failed to restore volume metadata from ZFS: {}", e);
+            // Continue anyway - service can still operate
+        }
+    }
+
+    // Reconcile exports: ensure all volumes in ZFS metadata are exported
+    match storage_service.reconcile_exports().await {
+        Ok(count) => {
+            if count > 0 {
+                info!(
+                    "Reconciled {} export(s) that were missing from CTL config",
+                    count
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to reconcile exports: {}", e);
             // Continue anyway - service can still operate
         }
     }

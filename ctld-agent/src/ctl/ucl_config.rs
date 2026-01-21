@@ -277,6 +277,7 @@ impl UclConfigManager {
     }
 
     /// Create an NvmeControllerUcl with the manager's default auth/transport groups
+    #[allow(dead_code)]
     pub fn create_nvme_controller(
         &self,
         nqn: &str,
