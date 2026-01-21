@@ -110,24 +110,52 @@ rbac:
   # Create ClusterRole and ClusterRoleBinding
   create: true
 
-# Optional: Create a StorageClass
-storageClass:
+# Storage Classes configuration
+# You can create both iSCSI and NVMeoF storage classes
+
+# iSCSI Storage Class
+storageClassIscsi:
+  # Set to true to create an iSCSI StorageClass
   create: false
-  name: freebsd-zfs
+  name: freebsd-zfs-iscsi
   # Set as default StorageClass
   default: false
   reclaimPolicy: Delete
   volumeBindingMode: Immediate
   allowVolumeExpansion: true
-  # StorageClass parameters
+  # iSCSI parameters (REQUIRED if create: true)
   parameters:
-    # Export type: "iscsi" or "nvmeof"
-    exportType: iscsi
-    # Filesystem type: ext4, xfs
     fsType: ext4
-    # For iSCSI: Portal address (REQUIRED)
+    # Portal address - IP:port of the iSCSI target (REQUIRED)
     portal: "192.168.1.100:3260"
-    # For NVMeoF: uncomment and set these instead of portal
-    # exportType: nvmeof
-    # transportAddr: "192.168.1.100"
-    # transportPort: "4420"
+
+# NVMeoF Storage Class (FreeBSD 15.0+)
+storageClassNvmeof:
+  # Set to true to create an NVMeoF StorageClass
+  create: false
+  name: freebsd-zfs-nvmeof
+  # Set as default StorageClass
+  default: false
+  reclaimPolicy: Delete
+  volumeBindingMode: Immediate
+  allowVolumeExpansion: true
+  # NVMeoF parameters (REQUIRED if create: true)
+  parameters:
+    fsType: ext4
+    # Transport address - IP of the NVMeoF target (REQUIRED)
+    transportAddr: "192.168.1.100"
+    # Transport port (default: 4420)
+    transportPort: "4420"
+
+# Legacy single StorageClass option (deprecated, use storageClassIscsi/storageClassNvmeof instead)
+storageClass:
+  create: false
+  name: freebsd-zfs
+  default: false
+  reclaimPolicy: Delete
+  volumeBindingMode: Immediate
+  allowVolumeExpansion: true
+  parameters:
+    exportType: iscsi
+    fsType: ext4
+    portal: "192.168.1.100:3260"
