@@ -251,8 +251,11 @@ impl CtlManager {
         for export in exports.values() {
             match export.export_type {
                 ExportType::Iscsi => {
+                    // Use no-authentication for CSI-managed iSCSI targets
+                    // The CSI driver doesn't currently support CHAP credential configuration
+                    // TODO: Add CHAP support when StorageClass parameters are implemented
                     let target = Target::new(
-                        self.auth_group.clone(),
+                        "no-authentication".to_string(),
                         self.portal_group_name.clone(),
                         export.lun_id,
                         export.device_path.as_str().to_string(),
