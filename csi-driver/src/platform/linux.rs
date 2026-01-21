@@ -268,6 +268,41 @@ pub fn connect_nvmeof(
     Ok(device)
 }
 
+/// Check if a device path is an NVMe namespace device (nvmeXnY) not just a controller (nvmeX).
+fn is_nvme_namespace_device(path: &str) -> bool {
+    // Extract device name from path (e.g., "/dev/nvme0n1" -> "nvme0n1")
+    let name = path.rsplit('/').next().unwrap_or(path);
+    // Pattern: nvme followed by digits, then 'n', then more digits
+    // e.g., nvme0n1, nvme1n2, etc.
+    let mut chars = name.chars().peekable();
+
+    // Must start with "nvme"
+    if !name.starts_with("nvme") {
+        return false;
+    }
+
+    // Skip "nvme"
+    for _ in 0..4 {
+        chars.next();
+    }
+
+    // Must have at least one digit for controller number
+    if !chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+        chars.next();
+    }
+
+    // Must have 'n' for namespace
+    if chars.next() != Some('n') {
+        return false;
+    }
+
+    // Must have at least one digit for namespace number
+    chars.peek().is_some_and(|c| c.is_ascii_digit())
+}
+
 /// Find the device associated with an NVMeoF target.
 pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
     // Use nvme list to find devices
@@ -295,14 +330,16 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
                     .get("SubsystemNQN")
                     .and_then(|n| n.as_str())
                     .unwrap_or("");
-                if subsys_nqn == target_nqn || subsys_nqn.contains(target_nqn) {
+                if (subsys_nqn == target_nqn || subsys_nqn.contains(target_nqn))
+                    && is_nvme_namespace_device(dev_path)
+                {
                     return Ok(dev_path.to_string());
                 }
             }
         }
     }
 
-    // Fallback: Check /sys/class/nvme-fabrics/
+    // Fallback: Check /sys/class/nvme-subsystem/
     let nvme_subsys = Path::new("/sys/class/nvme-subsystem");
     if nvme_subsys.exists()
         && let Ok(entries) = fs::read_dir(nvme_subsys)
@@ -317,7 +354,8 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
                     for ns_entry in ns_entries.flatten() {
                         let name = ns_entry.file_name();
                         let name_str = name.to_string_lossy();
-                        if name_str.starts_with("nvme") && name_str.contains("n") {
+                        // Only match namespace devices like nvme0n1, not controller devices like nvme0
+                        if is_nvme_namespace_device(&name_str) {
                             return Ok(format!("/dev/{}", name_str));
                         }
                     }
@@ -326,7 +364,7 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
         }
     }
 
-    // Last resort: find most recent nvme device
+    // Last resort: find most recent nvme device from nvme list text output
     let output = Command::new("nvme").arg("list").output().map_err(|e| {
         error!(error = %e, "Failed to execute nvme list");
         Status::internal(format!("Failed to list NVMe devices: {}", e))
@@ -336,6 +374,7 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
     for line in stdout.lines() {
         if line.starts_with("/dev/nvme")
             && let Some(device) = line.split_whitespace().next()
+            && is_nvme_namespace_device(device)
         {
             return Ok(device.to_string());
         }
@@ -607,5 +646,25 @@ mod tests {
     #[test]
     fn test_default_fs_type() {
         assert_eq!(default_fs_type(), "ext4");
+    }
+
+    #[test]
+    fn test_is_nvme_namespace_device() {
+        // Valid namespace devices
+        assert!(is_nvme_namespace_device("/dev/nvme0n1"));
+        assert!(is_nvme_namespace_device("/dev/nvme1n2"));
+        assert!(is_nvme_namespace_device("/dev/nvme10n15"));
+        assert!(is_nvme_namespace_device("nvme0n1")); // Without /dev/ prefix
+
+        // Invalid - controller devices (not namespaces)
+        assert!(!is_nvme_namespace_device("/dev/nvme0"));
+        assert!(!is_nvme_namespace_device("/dev/nvme1"));
+        assert!(!is_nvme_namespace_device("nvme0"));
+
+        // Invalid - other formats
+        assert!(!is_nvme_namespace_device("/dev/sda"));
+        assert!(!is_nvme_namespace_device("/dev/nvme"));
+        assert!(!is_nvme_namespace_device(""));
+        assert!(!is_nvme_namespace_device("/dev/nvme0n")); // Missing namespace number
     }
 }
