@@ -260,8 +260,10 @@ impl CtlManager {
                     iscsi_targets.push((export.target_name.to_string(), target));
                 }
                 ExportType::Nvmeof => {
+                    // NVMeoF uses different auth than iSCSI - use no-authentication for now
+                    // TODO: Add proper NVMe DH-HMAC-CHAP support if needed
                     let controller = Controller::new(
-                        self.auth_group.clone(),
+                        "no-authentication".to_string(),
                         self.transport_group.clone(),
                         export.lun_id,
                         export.device_path.as_str().to_string(),
