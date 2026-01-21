@@ -4,8 +4,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
 use crate::agent::{
     CreateSnapshotRequest, CreateVolumeRequest, DeleteSnapshotRequest, DeleteVolumeRequest,
@@ -35,12 +36,35 @@ impl AgentClient {
         Ok(Self { client })
     }
 
-    /// Connect to ctld-agent with optional mTLS
+    /// Connect to ctld-agent with optional mTLS and robust connection settings.
+    ///
+    /// Connection settings:
+    /// - 10 second connect timeout (fail fast if agent unreachable)
+    /// - 30 second request timeout
+    /// - TCP keepalive every 60 seconds
+    /// - HTTP/2 keepalive every 30 seconds with 10 second timeout
+    /// - Keepalive while idle to detect dead connections
     pub async fn connect_with_tls(
         endpoint: &str,
         tls: Option<TlsConfig>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let channel = if let Some(tls) = tls {
+        let mut endpoint_builder = Endpoint::from_shared(endpoint.to_string())?
+            // Connection establishment timeout
+            .connect_timeout(Duration::from_secs(10))
+            // Overall request timeout
+            .timeout(Duration::from_secs(30))
+            // TCP keepalive to detect dead connections at OS level
+            .tcp_keepalive(Some(Duration::from_secs(60)))
+            // Disable Nagle's algorithm for lower latency
+            .tcp_nodelay(true)
+            // HTTP/2 keepalive ping interval
+            .http2_keep_alive_interval(Duration::from_secs(30))
+            // How long to wait for keepalive response
+            .keep_alive_timeout(Duration::from_secs(10))
+            // Send keepalive even when no requests in flight
+            .keep_alive_while_idle(true);
+
+        if let Some(tls) = tls {
             let cert = tokio::fs::read(&tls.cert_path).await?;
             let key = tokio::fs::read(&tls.key_path).await?;
             let ca = tokio::fs::read(&tls.ca_path).await?;
@@ -50,16 +74,10 @@ impl AgentClient {
                 .ca_certificate(Certificate::from_pem(ca))
                 .domain_name(&tls.domain);
 
-            Channel::from_shared(endpoint.to_string())?
-                .tls_config(tls_config)?
-                .connect()
-                .await?
-        } else {
-            Channel::from_shared(endpoint.to_string())?
-                .connect()
-                .await?
-        };
+            endpoint_builder = endpoint_builder.tls_config(tls_config)?;
+        }
 
+        let channel = endpoint_builder.connect().await?;
         let client = StorageAgentClient::new(channel);
         Ok(Self { client })
     }

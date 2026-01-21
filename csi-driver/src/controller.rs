@@ -70,6 +70,26 @@ impl ControllerService {
         Ok(client)
     }
 
+    /// Clear the cached connection (call on transport errors).
+    async fn clear_client(&self) {
+        let mut guard = self.client.lock().await;
+        if guard.is_some() {
+            warn!("Clearing stale agent connection");
+            *guard = None;
+        }
+    }
+
+    /// Check if error indicates a transport failure that should clear the connection cache.
+    fn is_transport_error(status: &Status) -> bool {
+        matches!(
+            status.code(),
+            tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Internal
+        ) && (status.message().contains("transport")
+            || status.message().contains("connection")
+            || status.message().contains("broken pipe")
+            || status.message().contains("reset by peer"))
+    }
+
     /// Parse export type from storage class parameters.
     fn parse_export_type(parameters: &HashMap<String, String>) -> ExportType {
         parameters
@@ -202,13 +222,19 @@ impl csi::controller_server::Controller for ControllerService {
         );
 
         let mut client = self.get_client().await?;
-        let volume = client
+        let volume = match client
             .create_volume(name, size_bytes, export_type, req.parameters.clone())
             .await
-            .map_err(|e| {
+        {
+            Ok(v) => v,
+            Err(e) => {
                 error!(error = %e, "Failed to create volume via agent");
-                e
-            })?;
+                if Self::is_transport_error(&e) {
+                    self.clear_client().await;
+                }
+                return Err(e);
+            }
+        };
 
         info!(
             volume_id = %volume.id,
@@ -237,15 +263,18 @@ impl csi::controller_server::Controller for ControllerService {
         info!(volume_id = %volume_id, "DeleteVolume request");
 
         let mut client = self.get_client().await?;
-        client.delete_volume(volume_id).await.map_err(|e| {
+        if let Err(e) = client.delete_volume(volume_id).await {
             // NOT_FOUND is acceptable - volume may have already been deleted
             if e.code() == tonic::Code::NotFound {
                 warn!(volume_id = %volume_id, "Volume not found, treating as already deleted");
-                return Status::ok("");
+            } else {
+                error!(error = %e, "Failed to delete volume via agent");
+                if Self::is_transport_error(&e) {
+                    self.clear_client().await;
+                }
+                return Err(e);
             }
-            error!(error = %e, "Failed to delete volume via agent");
-            e
-        })?;
+        }
 
         info!(volume_id = %volume_id, "Volume deleted successfully");
 
@@ -287,13 +316,16 @@ impl csi::controller_server::Controller for ControllerService {
         );
 
         let mut client = self.get_client().await?;
-        let actual_size = client
-            .expand_volume(volume_id, new_size_bytes)
-            .await
-            .map_err(|e| {
+        let actual_size = match client.expand_volume(volume_id, new_size_bytes).await {
+            Ok(size) => size,
+            Err(e) => {
                 error!(error = %e, "Failed to expand volume via agent");
-                e
-            })?;
+                if Self::is_transport_error(&e) {
+                    self.clear_client().await;
+                }
+                return Err(e);
+            }
+        };
 
         info!(
             volume_id = %volume_id,
@@ -367,13 +399,16 @@ impl csi::controller_server::Controller for ControllerService {
         );
 
         let mut client = self.get_client().await?;
-        let snapshot = client
-            .create_snapshot(source_volume_id, name)
-            .await
-            .map_err(|e| {
+        let snapshot = match client.create_snapshot(source_volume_id, name).await {
+            Ok(s) => s,
+            Err(e) => {
                 error!(error = %e, "Failed to create snapshot via agent");
-                e
-            })?;
+                if Self::is_transport_error(&e) {
+                    self.clear_client().await;
+                }
+                return Err(e);
+            }
+        };
 
         info!(
             snapshot_id = %snapshot.id,
@@ -401,15 +436,18 @@ impl csi::controller_server::Controller for ControllerService {
         info!(snapshot_id = %snapshot_id, "DeleteSnapshot request");
 
         let mut client = self.get_client().await?;
-        client.delete_snapshot(snapshot_id).await.map_err(|e| {
+        if let Err(e) = client.delete_snapshot(snapshot_id).await {
             // NOT_FOUND is acceptable - snapshot may have already been deleted
             if e.code() == tonic::Code::NotFound {
                 warn!(snapshot_id = %snapshot_id, "Snapshot not found, treating as already deleted");
-                return Status::ok("");
+            } else {
+                error!(error = %e, "Failed to delete snapshot via agent");
+                if Self::is_transport_error(&e) {
+                    self.clear_client().await;
+                }
+                return Err(e);
             }
-            error!(error = %e, "Failed to delete snapshot via agent");
-            e
-        })?;
+        }
 
         info!(snapshot_id = %snapshot_id, "Snapshot deleted successfully");
 

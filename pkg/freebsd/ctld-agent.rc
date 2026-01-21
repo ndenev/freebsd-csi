@@ -24,6 +24,7 @@
 #   ctld_agent_tls_key="/path/to/key.pem"     # TLS key
 #   ctld_agent_tls_client_ca="/path/to/ca.pem" # Client CA for mTLS
 #   ctld_agent_log_level="info"           # Log level (trace, debug, info, warn, error)
+#   ctld_agent_restart_delay="5"          # Restart delay in seconds (default: 5)
 #   ctld_agent_flags=""                   # Additional flags
 #
 
@@ -44,8 +45,10 @@ load_rc_config $name
 : ${ctld_agent_portal_group_name:="pg0"}
 : ${ctld_agent_log_level:="info"}
 : ${ctld_agent_logfile:="/var/log/ctld-agent.log"}
+: ${ctld_agent_restart_delay:="5"}
 
 pidfile="/var/run/${name}.pid"
+child_pidfile="/var/run/${name}_child.pid"
 command="/usr/local/sbin/ctld-agent"
 
 start_precmd="${name}_prestart"
@@ -92,14 +95,22 @@ ctld_agent_prestart()
 ctld_agent_start()
 {
     echo "Starting ${name}."
-    /usr/sbin/daemon -c -f -p ${pidfile} -u ${ctld_agent_user} \
+    # -P: supervisor pidfile (for rc stop/status)
+    # -p: child pidfile (tracks actual ctld-agent process)
+    # -R: restart with delay on crash
+    # -H: reopen log on SIGHUP (for newsyslog rotation)
+    /usr/sbin/daemon -c -f -H \
+        -P ${pidfile} \
+        -p ${child_pidfile} \
+        -R ${ctld_agent_restart_delay} \
+        -u ${ctld_agent_user} \
         -o ${ctld_agent_logfile} \
         ${command} ${command_args}
 }
 
 ctld_agent_poststop()
 {
-    rm -f ${pidfile}
+    rm -f ${pidfile} ${child_pidfile}
 }
 
 run_rc_command "$1"
