@@ -28,6 +28,64 @@ use proto::{
     ListVolumesRequest, ListVolumesResponse, Snapshot, Volume,
 };
 
+/// Convert proto ExportType to CTL ExportType
+fn to_ctl_export_type(export_type: ExportType) -> Option<CtlExportType> {
+    match export_type {
+        ExportType::Iscsi => Some(CtlExportType::Iscsi),
+        ExportType::Nvmeof => Some(CtlExportType::Nvmeof),
+        ExportType::Unspecified => None,
+    }
+}
+
+/// Convert ExportType to string for ZFS metadata
+fn export_type_to_string(export_type: ExportType) -> &'static str {
+    match export_type {
+        ExportType::Iscsi => "ISCSI",
+        ExportType::Nvmeof => "NVMEOF",
+        ExportType::Unspecified => "UNSPECIFIED",
+    }
+}
+
+/// Get current Unix timestamp in seconds
+fn unix_timestamp_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Apply pagination to a list of items
+fn paginate<T>(items: Vec<T>, max_entries: i32, starting_token: &str) -> (Vec<T>, String) {
+    let max_entries = if max_entries > 0 {
+        max_entries as usize
+    } else {
+        items.len()
+    };
+
+    let start_idx = if !starting_token.is_empty() {
+        starting_token.parse::<usize>().unwrap_or(0)
+    } else {
+        0
+    };
+
+    let total_len = items.len();
+    let end_idx = std::cmp::min(start_idx + max_entries, total_len);
+
+    let paginated: Vec<T> = items
+        .into_iter()
+        .skip(start_idx)
+        .take(end_idx - start_idx)
+        .collect();
+
+    let next_token = if end_idx < total_len {
+        end_idx.to_string()
+    } else {
+        String::new()
+    };
+
+    (paginated, next_token)
+}
+
 /// Internal tracking of volume metadata
 #[derive(Debug, Clone)]
 struct VolumeMetadata {
@@ -159,13 +217,9 @@ impl StorageService {
                 continue;
             }
 
-            let ctl_export_type = match metadata.export_type {
-                ExportType::Iscsi => CtlExportType::Iscsi,
-                ExportType::Nvmeof => CtlExportType::Nvmeof,
-                ExportType::Unspecified => {
-                    debug!("Volume '{}' has no export type, skipping reconciliation", vol_name);
-                    continue;
-                }
+            let Some(ctl_export_type) = to_ctl_export_type(metadata.export_type) else {
+                debug!("Volume '{}' has no export type, skipping reconciliation", vol_name);
+                continue;
             };
 
             let ctl = self.ctl.read().await;
@@ -271,11 +325,7 @@ impl StorageAgent for StorageService {
         let lun_id: i32 = 0;
 
         // Export the volume via unified CTL manager
-        let ctl_export_type = match export_type {
-            ExportType::Iscsi => CtlExportType::Iscsi,
-            ExportType::Nvmeof => CtlExportType::Nvmeof,
-            ExportType::Unspecified => unreachable!(),
-        };
+        let ctl_export_type = to_ctl_export_type(export_type).expect("already validated");
 
         let target_name = {
             let ctl = self.ctl.read().await;
@@ -313,23 +363,13 @@ impl StorageAgent for StorageService {
         }
 
         // Persist metadata to ZFS user property
-        let export_type_str = match export_type {
-            ExportType::Iscsi => "ISCSI",
-            ExportType::Nvmeof => "NVMEOF",
-            ExportType::Unspecified => "UNSPECIFIED",
-        };
-        let created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-
         let zfs_metadata = ZfsVolumeMetadata {
-            export_type: export_type_str.to_string(),
+            export_type: export_type_to_string(export_type).to_string(),
             target_name: target_name.clone(),
             lun_id: Some(lun_id as u32),
             namespace_id: None,
             parameters: req.parameters.clone(),
-            created_at,
+            created_at: unix_timestamp_now(),
         };
 
         {
@@ -493,31 +533,7 @@ impl StorageAgent for StorageService {
             }
         }
 
-        // Handle pagination
-        let max_entries = if req.max_entries > 0 {
-            req.max_entries as usize
-        } else {
-            volumes.len()
-        };
-
-        let start_idx = if !req.starting_token.is_empty() {
-            req.starting_token.parse::<usize>().unwrap_or(0)
-        } else {
-            0
-        };
-
-        let end_idx = std::cmp::min(start_idx + max_entries, volumes.len());
-        let paginated_volumes: Vec<Volume> = volumes
-            .into_iter()
-            .skip(start_idx)
-            .take(end_idx - start_idx)
-            .collect();
-
-        let next_token = if end_idx < volumes_meta.len() {
-            end_idx.to_string()
-        } else {
-            String::new()
-        };
+        let (paginated_volumes, next_token) = paginate(volumes, req.max_entries, &req.starting_token);
 
         Ok(Response::new(ListVolumesResponse {
             volumes: paginated_volumes,
@@ -598,14 +614,9 @@ impl StorageAgent for StorageService {
                 .map_err(|e| Status::internal(format!("failed to create snapshot: {}", e)))?
         };
 
-        // Get creation time
-        let creation_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-
-        // Create snapshot ID
+        // Create snapshot ID and timestamp
         let snapshot_id = format!("{}@{}", req.source_volume_id, req.name);
+        let creation_time = unix_timestamp_now();
 
         // Store metadata
         let snap_metadata = SnapshotMetadata {
@@ -723,31 +734,7 @@ impl StorageAgent for StorageService {
             })
             .collect();
 
-        // Handle pagination
-        let max_entries = if req.max_entries > 0 {
-            req.max_entries as usize
-        } else {
-            snapshots.len()
-        };
-
-        let start_idx = if !req.starting_token.is_empty() {
-            req.starting_token.parse::<usize>().unwrap_or(0)
-        } else {
-            0
-        };
-
-        let end_idx = std::cmp::min(start_idx + max_entries, snapshots.len());
-        let paginated: Vec<Snapshot> = snapshots
-            .into_iter()
-            .skip(start_idx)
-            .take(end_idx - start_idx)
-            .collect();
-
-        let next_token = if end_idx < filtered.len() {
-            end_idx.to_string()
-        } else {
-            String::new()
-        };
+        let (paginated, next_token) = paginate(snapshots, req.max_entries, &req.starting_token);
 
         Ok(Response::new(ListSnapshotsResponse {
             snapshots: paginated,

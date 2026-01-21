@@ -30,17 +30,8 @@ fn validate_name(name: &str) -> Result<()> {
 pub struct Dataset {
     /// Full dataset name (e.g., "tank/csi/vol1")
     pub name: String,
-    /// Used space in bytes
-    #[allow(dead_code)] // Dataset property for future use
-    pub used: u64,
-    /// Available space in bytes
-    #[allow(dead_code)] // Dataset property for future use
-    pub available: u64,
     /// Referenced space in bytes
     pub referenced: u64,
-    /// Mountpoint (None if not mounted or for volumes)
-    #[allow(dead_code)] // Dataset property for future use
-    pub mountpoint: Option<String>,
     /// Volume size in bytes (only for zvols)
     pub volsize: Option<u64>,
 }
@@ -261,7 +252,7 @@ impl ZfsManager {
                 "volume",
                 "-r",
                 "-o",
-                "name,used,avail,refer,mountpoint",
+                "name,refer,volsize",
                 &self.parent_dataset,
             ])
             .output()?;
@@ -325,32 +316,6 @@ impl ZfsManager {
 
         debug!(volume = %full_name, "Volume metadata saved");
         Ok(())
-    }
-
-    /// Get volume metadata from ZFS user property
-    #[allow(dead_code)] // API method for future use
-    #[instrument(skip(self))]
-    pub fn get_volume_metadata(&self, name: &str) -> Result<Option<VolumeMetadata>> {
-        validate_name(name)?;
-        let full_name = self.full_path(name);
-
-        let output = Command::new("zfs")
-            .args(["get", "-H", "-o", "value", METADATA_PROPERTY, &full_name])
-            .output()?;
-
-        if !output.status.success() {
-            return Ok(None);
-        }
-
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if value.is_empty() || value == "-" {
-            return Ok(None);
-        }
-
-        let metadata: VolumeMetadata = serde_json::from_str(&value)
-            .map_err(|e| ZfsError::ParseError(format!("failed to parse metadata: {}", e)))?;
-
-        Ok(Some(metadata))
     }
 
     /// Clear volume metadata (on deletion)
@@ -459,7 +424,7 @@ impl ZfsManager {
                 "-H",
                 "-p", // Machine-parseable output (bytes)
                 "-o",
-                "name,used,avail,refer,mountpoint,volsize",
+                "name,refer,volsize",
                 full_name,
             ])
             .output()?;
@@ -481,39 +446,29 @@ impl ZfsManager {
         self.parse_dataset_line(line)
     }
 
-    /// Parse a line of ZFS output into a Dataset
+    /// Parse a line of ZFS output into a Dataset (expects: name, refer, volsize)
     fn parse_dataset_line(&self, line: &str) -> Result<Dataset> {
         let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() < 6 {
+        if fields.len() < 3 {
             return Err(ZfsError::ParseError(format!(
-                "expected 6 fields, got {}: {}",
+                "expected 3 fields, got {}: {}",
                 fields.len(),
                 line
             )));
         }
 
         let name = fields[0].to_string();
-        let used = Self::parse_size(fields[1])?;
-        let available = Self::parse_size(fields[2])?;
-        let referenced = Self::parse_size(fields[3])?;
-        let mountpoint = if fields[4] == "-" || fields[4] == "none" {
-            None
-        } else {
-            Some(fields[4].to_string())
-        };
+        let referenced = Self::parse_size(fields[1])?;
         // volsize is only present for zvols, "-" for filesystems
-        let volsize = if fields[5] == "-" || fields[5] == "none" {
+        let volsize = if fields[2] == "-" || fields[2] == "none" {
             None
         } else {
-            Some(Self::parse_size(fields[5])?)
+            Some(Self::parse_size(fields[2])?)
         };
 
         Ok(Dataset {
             name,
-            used,
-            available,
             referenced,
-            mountpoint,
             volsize,
         })
     }

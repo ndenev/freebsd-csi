@@ -10,10 +10,6 @@ use std::path::Path;
 
 use super::error::{CtlError, Result};
 
-/// Default config file path
-#[allow(dead_code)] // Useful constant for external users
-pub const DEFAULT_CONFIG_PATH: &str = "/etc/ctl.ucl";
-
 /// Validate a string for safe use in UCL configuration.
 /// Rejects characters that could corrupt UCL syntax: ", {, }, \
 /// Also validates reasonable length.
@@ -160,23 +156,16 @@ impl NvmeControllerUcl {
 pub struct UclConfigManager {
     pub config_path: String,
     pub auth_group: String,
-    pub portal_group: String,
     /// Transport group for NVMeoF (FreeBSD 15.0+)
     pub transport_group: String,
 }
 
 impl UclConfigManager {
     /// Create a new UclConfigManager
-    pub fn new(
-        config_path: String,
-        auth_group: String,
-        portal_group: String,
-        transport_group: String,
-    ) -> Self {
+    pub fn new(config_path: String, auth_group: String, transport_group: String) -> Self {
         Self {
             config_path,
             auth_group,
-            portal_group,
             transport_group,
         }
     }
@@ -260,40 +249,6 @@ impl UclConfigManager {
 
         Ok(())
     }
-
-    /// Create an IscsiTargetUcl with the manager's default auth/portal groups
-    #[allow(dead_code)] // Helper method for future use
-    pub fn create_iscsi_target(&self, iqn: &str, device_path: &str, lun_id: u32) -> IscsiTargetUcl {
-        IscsiTargetUcl {
-            iqn: iqn.to_string(),
-            auth_group: self.auth_group.clone(),
-            portal_group: self.portal_group.clone(),
-            luns: vec![LunUcl {
-                id: lun_id,
-                path: device_path.to_string(),
-                blocksize: 512,
-            }],
-        }
-    }
-
-    /// Create an NvmeControllerUcl with the manager's default auth/transport groups
-    #[allow(dead_code)]
-    pub fn create_nvme_controller(
-        &self,
-        nqn: &str,
-        device_path: &str,
-        namespace_id: u32,
-    ) -> NvmeControllerUcl {
-        NvmeControllerUcl {
-            nqn: nqn.to_string(),
-            auth_group: self.auth_group.clone(),
-            transport_group: self.transport_group.clone(),
-            namespaces: vec![NvmeNamespaceUcl {
-                id: namespace_id,
-                path: device_path.to_string(),
-            }],
-        }
-    }
 }
 
 #[cfg(test)]
@@ -348,48 +303,6 @@ mod tests {
         assert!(ucl.contains("vol2-data"));
         assert!(ucl.contains("vol2-log"));
         assert!(ucl.contains("blocksize = 4096"));
-    }
-
-    #[test]
-    fn test_ucl_config_manager_create_iscsi_target() {
-        let manager = UclConfigManager::new(
-            "/etc/ctl.ucl".to_string(),
-            "ag0".to_string(),
-            "pg0".to_string(),
-            "tg0".to_string(),
-        );
-
-        let target = manager
-            .create_iscsi_target("iqn.2024-01.org.freebsd.csi:test", "/dev/zvol/tank/test", 0);
-
-        assert_eq!(target.iqn, "iqn.2024-01.org.freebsd.csi:test");
-        assert_eq!(target.auth_group, "ag0");
-        assert_eq!(target.portal_group, "pg0");
-        assert_eq!(target.luns.len(), 1);
-        assert_eq!(target.luns[0].path, "/dev/zvol/tank/test");
-    }
-
-    #[test]
-    fn test_ucl_config_manager_create_nvme_controller() {
-        let manager = UclConfigManager::new(
-            "/etc/ctl.ucl".to_string(),
-            "no-authentication".to_string(),
-            "pg0".to_string(),
-            "tg0".to_string(),
-        );
-
-        let controller = manager.create_nvme_controller(
-            "nqn.2024-01.org.freebsd.csi:test",
-            "/dev/zvol/tank/test",
-            1,
-        );
-
-        assert_eq!(controller.nqn, "nqn.2024-01.org.freebsd.csi:test");
-        assert_eq!(controller.auth_group, "no-authentication");
-        assert_eq!(controller.transport_group, "tg0");
-        assert_eq!(controller.namespaces.len(), 1);
-        assert_eq!(controller.namespaces[0].id, 1);
-        assert_eq!(controller.namespaces[0].path, "/dev/zvol/tank/test");
     }
 
     #[test]

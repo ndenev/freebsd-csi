@@ -72,6 +72,54 @@ fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Iterate over a UCL section that may be an array or object.
+/// UCL represents multiple entries as arrays, single entries as objects.
+fn for_each_ucl_entry<F>(section: &serde_json::Value, mut f: F)
+where
+    F: FnMut(&str, &serde_json::Value),
+{
+    if let Some(arr) = section.as_array() {
+        for wrapper in arr {
+            if let Some(obj) = wrapper.as_object() {
+                for (key, config) in obj {
+                    f(key, config);
+                }
+            }
+        }
+    } else if let Some(obj) = section.as_object() {
+        for (key, config) in obj {
+            f(key, config);
+        }
+    }
+}
+
+/// Extract the first ID and path from a UCL LUN/namespace section.
+/// Handles both object and array formats.
+fn extract_first_id_path(section: &serde_json::Value) -> Option<(u32, String)> {
+    if let Some(obj) = section.as_object() {
+        for (id_str, config) in obj {
+            if let Ok(id) = id_str.parse::<u32>() {
+                if let Some(path) = config.get("path").and_then(|v| v.as_str()) {
+                    return Some((id, path.to_string()));
+                }
+            }
+        }
+    } else if let Some(arr) = section.as_array() {
+        for wrapper in arr {
+            if let Some(obj) = wrapper.as_object() {
+                for (id_str, config) in obj {
+                    if let Ok(id) = id_str.parse::<u32>() {
+                        if let Some(path) = config.get("path").and_then(|v| v.as_str()) {
+                            return Some((id, path.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Validate a device path is a valid zvol path
 fn validate_device_path(path: &str) -> Result<()> {
     if path.is_empty() {
@@ -112,8 +160,6 @@ pub struct CtlManager {
     base_iqn: String,
     /// Base NQN prefix for NVMeoF controllers
     base_nqn: String,
-    /// Portal group tag for iSCSI
-    portal_group_tag: u32,
     /// Portal group name for iSCSI (used in UCL)
     portal_group_name: String,
     /// In-memory cache of all exports, keyed by volume name
@@ -128,7 +174,6 @@ impl CtlManager {
     /// # Arguments
     /// * `base_iqn` - Base IQN prefix for iSCSI targets
     /// * `base_nqn` - Base NQN prefix for NVMeoF controllers
-    /// * `portal_group_tag` - Portal group tag for iSCSI
     /// * `portal_group_name` - Portal group name for UCL config
     /// * `config_path` - Path to the UCL config file
     /// * `auth_group` - Auth group name for UCL config
@@ -136,7 +181,6 @@ impl CtlManager {
     pub fn new(
         base_iqn: String,
         base_nqn: String,
-        portal_group_tag: u32,
         portal_group_name: String,
         config_path: String,
         auth_group: String,
@@ -145,12 +189,7 @@ impl CtlManager {
         validate_name(&base_iqn)?;
         validate_name(&base_nqn)?;
 
-        let ucl_manager = UclConfigManager::new(
-            config_path,
-            auth_group,
-            portal_group_name.clone(),
-            transport_group,
-        );
+        let ucl_manager = UclConfigManager::new(config_path, auth_group, transport_group);
 
         info!(
             "Initializing CtlManager with base_iqn={}, base_nqn={}, portal_group={}",
@@ -160,7 +199,6 @@ impl CtlManager {
         Ok(Self {
             base_iqn,
             base_nqn,
-            portal_group_tag,
             portal_group_name,
             exports: RwLock::new(HashMap::new()),
             ucl_manager,
@@ -228,64 +266,33 @@ impl CtlManager {
         target_section: &serde_json::Value,
         count: &mut usize,
     ) {
-        let process_target = |iqn: &str, config: &serde_json::Value| -> Option<Export> {
+        for_each_ucl_entry(target_section, |iqn, config| {
             if !iqn.starts_with(&self.base_iqn) {
-                return None;
+                return;
             }
 
-            let volume_name = iqn.rsplit(':').next()?.to_string();
-
-            // Parse LUN to get device path
-            let (lun_id, device_path) = if let Some(lun_section) = config.get("lun") {
-                if let Some(lun_obj) = lun_section.as_object() {
-                    let mut found = None;
-                    for (lun_id_str, lun_config) in lun_obj {
-                        if let Ok(id) = lun_id_str.parse::<u32>() {
-                            if let Some(path) = lun_config.get("path").and_then(|v| v.as_str()) {
-                                found = Some((id, path.to_string()));
-                                break;
-                            }
-                        }
-                    }
-                    found?
-                } else {
-                    return None;
-                }
-            } else {
-                return None;
+            let Some(volume_name) = iqn.rsplit(':').next() else {
+                return;
             };
 
-            Some(Export {
-                volume_name,
+            let Some(lun_section) = config.get("lun") else {
+                return;
+            };
+
+            let Some((lun_id, device_path)) = extract_first_id_path(lun_section) else {
+                return;
+            };
+
+            let export = Export {
+                volume_name: volume_name.to_string(),
                 device_path,
                 export_type: ExportType::Iscsi,
                 target_name: iqn.to_string(),
                 lun_id,
-            })
-        };
-
-        // Handle array of targets
-        if let Some(arr) = target_section.as_array() {
-            for wrapper in arr {
-                if let Some(obj) = wrapper.as_object() {
-                    for (iqn, config) in obj {
-                        if let Some(export) = process_target(iqn, config) {
-                            exports.insert(export.volume_name.clone(), export);
-                            *count += 1;
-                        }
-                    }
-                }
-            }
-        }
-        // Handle single target
-        else if let Some(obj) = target_section.as_object() {
-            for (iqn, config) in obj {
-                if let Some(export) = process_target(iqn, config) {
-                    exports.insert(export.volume_name.clone(), export);
-                    *count += 1;
-                }
-            }
-        }
+            };
+            exports.insert(export.volume_name.clone(), export);
+            *count += 1;
+        });
     }
 
     /// Load NVMeoF controllers from JSON
@@ -295,84 +302,33 @@ impl CtlManager {
         controller_section: &serde_json::Value,
         count: &mut usize,
     ) {
-        let process_controller = |nqn: &str, config: &serde_json::Value| -> Option<Export> {
+        for_each_ucl_entry(controller_section, |nqn, config| {
             if !nqn.starts_with(&self.base_nqn) {
-                return None;
+                return;
             }
 
-            let volume_name = nqn.rsplit(':').next()?.to_string();
-
-            // Parse namespace to get device path
-            let (ns_id, device_path) = if let Some(ns_section) = config.get("namespace") {
-                if let Some(ns_obj) = ns_section.as_object() {
-                    let mut found = None;
-                    for (ns_id_str, ns_config) in ns_obj {
-                        if let Ok(id) = ns_id_str.parse::<u32>() {
-                            if let Some(path) = ns_config.get("path").and_then(|v| v.as_str()) {
-                                found = Some((id, path.to_string()));
-                                break;
-                            }
-                        }
-                    }
-                    found?
-                } else if let Some(ns_arr) = ns_section.as_array() {
-                    let mut found = None;
-                    for ns_wrapper in ns_arr {
-                        if let Some(ns_obj) = ns_wrapper.as_object() {
-                            for (ns_id_str, ns_config) in ns_obj {
-                                if let Ok(id) = ns_id_str.parse::<u32>() {
-                                    if let Some(path) =
-                                        ns_config.get("path").and_then(|v| v.as_str())
-                                    {
-                                        found = Some((id, path.to_string()));
-                                        break;
-                                    }
-                                }
-                            }
-                            if found.is_some() {
-                                break;
-                            }
-                        }
-                    }
-                    found?
-                } else {
-                    return None;
-                }
-            } else {
-                return None;
+            let Some(volume_name) = nqn.rsplit(':').next() else {
+                return;
             };
 
-            Some(Export {
-                volume_name,
+            let Some(ns_section) = config.get("namespace") else {
+                return;
+            };
+
+            let Some((ns_id, device_path)) = extract_first_id_path(ns_section) else {
+                return;
+            };
+
+            let export = Export {
+                volume_name: volume_name.to_string(),
                 device_path,
                 export_type: ExportType::Nvmeof,
                 target_name: nqn.to_string(),
                 lun_id: ns_id,
-            })
-        };
-
-        // Handle array of controllers
-        if let Some(arr) = controller_section.as_array() {
-            for wrapper in arr {
-                if let Some(obj) = wrapper.as_object() {
-                    for (nqn, config) in obj {
-                        if let Some(export) = process_controller(nqn, config) {
-                            exports.insert(export.volume_name.clone(), export);
-                            *count += 1;
-                        }
-                    }
-                }
-            }
-        }
-        // Handle single controller
-        else if let Some(obj) = controller_section.as_object() {
-            for (nqn, config) in obj {
-                if let Some(export) = process_controller(nqn, config) {
-                    exports.insert(export.volume_name.clone(), export);
-                    *count += 1;
-                }
-            }
-        }
+            };
+            exports.insert(export.volume_name.clone(), export);
+            *count += 1;
+        });
     }
 
     /// Export a volume via iSCSI or NVMeoF
@@ -454,13 +410,6 @@ impl CtlManager {
         exports.get(volume_name).cloned()
     }
 
-    /// List all exports
-    #[allow(dead_code)]
-    pub fn list_exports(&self) -> Vec<Export> {
-        let exports = self.exports.read().unwrap();
-        exports.values().cloned().collect()
-    }
-
     /// Write UCL config and reload ctld
     #[instrument(skip(self))]
     pub fn write_config(&self) -> Result<()> {
@@ -532,24 +481,6 @@ impl CtlManager {
 
         info!("Successfully reloaded ctld configuration");
         Ok(())
-    }
-
-    /// Get base IQN
-    #[allow(dead_code)]
-    pub fn base_iqn(&self) -> &str {
-        &self.base_iqn
-    }
-
-    /// Get base NQN
-    #[allow(dead_code)]
-    pub fn base_nqn(&self) -> &str {
-        &self.base_nqn
-    }
-
-    /// Get portal group tag
-    #[allow(dead_code)]
-    pub fn portal_group_tag(&self) -> u32 {
-        self.portal_group_tag
     }
 }
 

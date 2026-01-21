@@ -126,8 +126,8 @@ storageClassIscsi:
   # iSCSI parameters (REQUIRED if create: true)
   parameters:
     fsType: ext4
-    # Portal address - IP:port of the iSCSI target (REQUIRED)
-    portal: "192.168.1.100:3260"
+    # Portal address - IP:port of the iSCSI target (REQUIRED when create: true)
+    portal: ""
 
 # NVMeoF Storage Class (FreeBSD 15.0+)
 storageClassNvmeof:
@@ -142,20 +142,7 @@ storageClassNvmeof:
   # NVMeoF parameters (REQUIRED if create: true)
   parameters:
     fsType: ext4
-    # Transport address - IP of the NVMeoF target (REQUIRED)
-    transportAddr: "192.168.1.100"
+    # Transport address - IP of the NVMeoF target (REQUIRED when create: true)
+    transportAddr: ""
     # Transport port (default: 4420)
     transportPort: "4420"
-
-# Legacy single StorageClass option (deprecated, use storageClassIscsi/storageClassNvmeof instead)
-storageClass:
-  create: false
-  name: freebsd-zfs
-  default: false
-  reclaimPolicy: Delete
-  volumeBindingMode: Immediate
-  allowVolumeExpansion: true
-  parameters:
-    exportType: iscsi
-    fsType: ext4
-    portal: "192.168.1.100:3260"

@@ -53,6 +53,16 @@ spec:
                   fieldPath: spec.nodeName
             - name: AGENT_ENDPOINT
               value: {{ .Values.agent.endpoint | quote }}
+            {{- if .Values.tls.enabled }}
+            - name: TLS_CERT_PATH
+              value: "/etc/csi-tls/tls.crt"
+            - name: TLS_KEY_PATH
+              value: "/etc/csi-tls/tls.key"
+            - name: TLS_CA_PATH
+              value: "/etc/csi-tls/ca.crt"
+            - name: TLS_DOMAIN
+              value: {{ .Values.tls.domain | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.node.resources | nindent 12 }}
           securityContext:
@@ -71,6 +81,11 @@ spec:
             - name: host-sys
               mountPath: /sys
               readOnly: true
+            {{- if .Values.tls.enabled }}
+            - name: tls-certs
+              mountPath: /etc/csi-tls
+              readOnly: true
+            {{- end }}
 
       volumes:
         - name: socket-dir
@@ -97,6 +112,11 @@ spec:
           hostPath:
             path: /sys
             type: Directory
+        {{- if .Values.tls.enabled }}
+        - name: tls-certs
+          secret:
+            secretName: {{ include "freebsd-csi.tlsSecretName" . }}
+        {{- end }}
 
       {{- with .Values.node.nodeSelector }}
       nodeSelector:

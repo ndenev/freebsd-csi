@@ -8,10 +8,6 @@ pub enum CtlError {
     #[error("target '{0}' already exists")]
     TargetExists(String),
 
-    #[allow(dead_code)] // Error variant for future use
-    #[error("LUN {0} already in use")]
-    LunInUse(u32),
-
     #[error("ctld command failed: {0}")]
     CommandFailed(String),
 

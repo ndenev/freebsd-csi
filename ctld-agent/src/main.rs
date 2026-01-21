@@ -36,10 +36,6 @@ struct Args {
     #[arg(long, default_value = "nqn.2024-01.org.freebsd.csi")]
     base_nqn: String,
 
-    /// Portal group tag for iSCSI
-    #[arg(long, default_value = "1")]
-    portal_group: u32,
-
     /// Path to ctld UCL config file
     #[arg(long, env = "CTL_CONFIG_PATH", default_value = "/etc/ctl.ucl")]
     ctl_config: PathBuf,
@@ -97,7 +93,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("ZFS parent dataset: {}", args.zfs_parent);
     info!("Base IQN: {}", args.base_iqn);
     info!("Base NQN: {}", args.base_nqn);
-    info!("Portal group: {}", args.portal_group);
     info!("CTL config path: {}", args.ctl_config.display());
     info!("Auth group: {}", args.auth_group);
     info!("Portal group name: {}", args.portal_group_name);
@@ -111,7 +106,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ctl_manager = CtlManager::new(
         args.base_iqn.clone(),
         args.base_nqn.clone(),
-        args.portal_group,
         args.portal_group_name.clone(),
         args.ctl_config.to_string_lossy().to_string(),
         args.auth_group.clone(),
