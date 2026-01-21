@@ -50,6 +50,8 @@ load_rc_config $name
 pidfile="/var/run/${name}.pid"
 child_pidfile="/var/run/${name}_child.pid"
 command="/usr/local/sbin/ctld-agent"
+# procname must match the supervisor process for status/restart to work
+procname="/usr/sbin/daemon"
 
 start_precmd="${name}_prestart"
 start_cmd="${name}_start"
