@@ -4,17 +4,12 @@
 //! simplifying the architecture and reducing code duplication.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::process::Command;
 use std::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 
-use libucl::Parser;
-
 use super::error::{CtlError, Result};
-use super::ucl_config::{
-    IscsiTargetUcl, LunUcl, NvmeControllerUcl, NvmeNamespaceUcl, UclConfigManager,
-};
+use super::ucl_config::{Controller, CtlConfig, Target, UclConfigManager};
 
 /// Export type for CTL volumes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,54 +67,6 @@ fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Iterate over a UCL section that may be an array or object.
-/// UCL represents multiple entries as arrays, single entries as objects.
-fn for_each_ucl_entry<F>(section: &serde_json::Value, mut f: F)
-where
-    F: FnMut(&str, &serde_json::Value),
-{
-    if let Some(arr) = section.as_array() {
-        for wrapper in arr {
-            if let Some(obj) = wrapper.as_object() {
-                for (key, config) in obj {
-                    f(key, config);
-                }
-            }
-        }
-    } else if let Some(obj) = section.as_object() {
-        for (key, config) in obj {
-            f(key, config);
-        }
-    }
-}
-
-/// Extract the first ID and path from a UCL LUN/namespace section.
-/// Handles both object and array formats.
-fn extract_first_id_path(section: &serde_json::Value) -> Option<(u32, String)> {
-    if let Some(obj) = section.as_object() {
-        for (id_str, config) in obj {
-            if let Ok(id) = id_str.parse::<u32>()
-                && let Some(path) = config.get("path").and_then(|v| v.as_str())
-            {
-                return Some((id, path.to_string()));
-            }
-        }
-    } else if let Some(arr) = section.as_array() {
-        for wrapper in arr {
-            if let Some(obj) = wrapper.as_object() {
-                for (id_str, config) in obj {
-                    if let Ok(id) = id_str.parse::<u32>()
-                        && let Some(path) = config.get("path").and_then(|v| v.as_str())
-                    {
-                        return Some((id, path.to_string()));
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
 /// Validate a device path is a valid zvol path
 fn validate_device_path(path: &str) -> Result<()> {
     if path.is_empty() {
@@ -160,8 +107,12 @@ pub struct CtlManager {
     base_iqn: String,
     /// Base NQN prefix for NVMeoF controllers
     base_nqn: String,
-    /// Portal group name for iSCSI (used in UCL)
+    /// Auth group name for UCL config
+    auth_group: String,
+    /// Portal group name for iSCSI
     portal_group_name: String,
+    /// Transport group name for NVMeoF
+    transport_group: String,
     /// In-memory cache of all exports, keyed by volume name
     exports: RwLock<HashMap<String, Export>>,
     /// UCL config manager for persistent configuration
@@ -189,7 +140,7 @@ impl CtlManager {
         validate_name(&base_iqn)?;
         validate_name(&base_nqn)?;
 
-        let ucl_manager = UclConfigManager::new(config_path, auth_group, transport_group);
+        let ucl_manager = UclConfigManager::new(config_path);
 
         info!(
             "Initializing CtlManager with base_iqn={}, base_nqn={}, portal_group={}",
@@ -199,7 +150,9 @@ impl CtlManager {
         Ok(Self {
             base_iqn,
             base_nqn,
+            auth_group,
             portal_group_name,
+            transport_group,
             exports: RwLock::new(HashMap::new()),
             ucl_manager,
         })
@@ -219,37 +172,58 @@ impl CtlManager {
     #[instrument(skip(self))]
     pub fn load_config(&mut self) -> Result<()> {
         let config_path = &self.ucl_manager.config_path;
-        let path = Path::new(config_path);
 
-        if !path.exists() {
-            debug!("Config file {} does not exist, starting fresh", config_path);
-            return Ok(());
-        }
-
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| CtlError::ConfigError(format!("Failed to read {}: {}", config_path, e)))?;
-
-        let parser = Parser::new();
-        let doc = parser.parse(&content).map_err(|e| {
-            CtlError::ParseError(format!("Failed to parse {}: {:?}", config_path, e))
-        })?;
-
-        let json_str = doc.dump();
-        let json: serde_json::Value = serde_json::from_str(&json_str)
-            .map_err(|e| CtlError::ParseError(format!("Failed to parse JSON output: {}", e)))?;
+        // Parse the UCL config using uclicious
+        let config = CtlConfig::from_file(config_path)?;
 
         let mut exports = self.exports.write().unwrap();
         let mut loaded_iscsi = 0;
         let mut loaded_nvmeof = 0;
 
-        // Load iSCSI targets
-        if let Some(target_section) = json.get("target") {
-            self.load_iscsi_targets(&mut exports, target_section, &mut loaded_iscsi);
+        // Load iSCSI targets matching our base IQN
+        for (iqn, target) in config.targets_with_prefix(&self.base_iqn) {
+            let Some(volume_name) = iqn.rsplit(':').next() else {
+                continue;
+            };
+
+            // Get first LUN
+            let Some((lun_id_str, lun)) = target.lun.iter().next() else {
+                continue;
+            };
+            let lun_id = lun_id_str.parse::<u32>().unwrap_or(0);
+
+            let export = Export {
+                volume_name: volume_name.to_string(),
+                device_path: lun.path.clone(),
+                export_type: ExportType::Iscsi,
+                target_name: iqn.clone(),
+                lun_id,
+            };
+            exports.insert(export.volume_name.clone(), export);
+            loaded_iscsi += 1;
         }
 
-        // Load NVMeoF controllers
-        if let Some(controller_section) = json.get("controller") {
-            self.load_nvmeof_controllers(&mut exports, controller_section, &mut loaded_nvmeof);
+        // Load NVMeoF controllers matching our base NQN
+        for (nqn, controller) in config.controllers_with_prefix(&self.base_nqn) {
+            let Some(volume_name) = nqn.rsplit(':').next() else {
+                continue;
+            };
+
+            // Get first namespace
+            let Some((ns_id_str, ns)) = controller.namespace.iter().next() else {
+                continue;
+            };
+            let ns_id = ns_id_str.parse::<u32>().unwrap_or(0);
+
+            let export = Export {
+                volume_name: volume_name.to_string(),
+                device_path: ns.path.clone(),
+                export_type: ExportType::Nvmeof,
+                target_name: nqn.clone(),
+                lun_id: ns_id,
+            };
+            exports.insert(export.volume_name.clone(), export);
+            loaded_nvmeof += 1;
         }
 
         info!(
@@ -257,78 +231,6 @@ impl CtlManager {
             loaded_iscsi, loaded_nvmeof
         );
         Ok(())
-    }
-
-    /// Load iSCSI targets from JSON
-    fn load_iscsi_targets(
-        &self,
-        exports: &mut HashMap<String, Export>,
-        target_section: &serde_json::Value,
-        count: &mut usize,
-    ) {
-        for_each_ucl_entry(target_section, |iqn, config| {
-            if !iqn.starts_with(&self.base_iqn) {
-                return;
-            }
-
-            let Some(volume_name) = iqn.rsplit(':').next() else {
-                return;
-            };
-
-            let Some(lun_section) = config.get("lun") else {
-                return;
-            };
-
-            let Some((lun_id, device_path)) = extract_first_id_path(lun_section) else {
-                return;
-            };
-
-            let export = Export {
-                volume_name: volume_name.to_string(),
-                device_path,
-                export_type: ExportType::Iscsi,
-                target_name: iqn.to_string(),
-                lun_id,
-            };
-            exports.insert(export.volume_name.clone(), export);
-            *count += 1;
-        });
-    }
-
-    /// Load NVMeoF controllers from JSON
-    fn load_nvmeof_controllers(
-        &self,
-        exports: &mut HashMap<String, Export>,
-        controller_section: &serde_json::Value,
-        count: &mut usize,
-    ) {
-        for_each_ucl_entry(controller_section, |nqn, config| {
-            if !nqn.starts_with(&self.base_nqn) {
-                return;
-            }
-
-            let Some(volume_name) = nqn.rsplit(':').next() else {
-                return;
-            };
-
-            let Some(ns_section) = config.get("namespace") else {
-                return;
-            };
-
-            let Some((ns_id, device_path)) = extract_first_id_path(ns_section) else {
-                return;
-            };
-
-            let export = Export {
-                volume_name: volume_name.to_string(),
-                device_path,
-                export_type: ExportType::Nvmeof,
-                target_name: nqn.to_string(),
-                lun_id: ns_id,
-            };
-            exports.insert(export.volume_name.clone(), export);
-            *count += 1;
-        });
     }
 
     /// Export a volume via iSCSI or NVMeoF
@@ -407,43 +309,39 @@ impl CtlManager {
         exports.get(volume_name).cloned()
     }
 
-    /// Write UCL config and reload ctld
+    /// Write UCL config and reload ctld.
+    ///
+    /// Preserves user-managed targets while updating CSI-managed targets.
     #[instrument(skip(self))]
     pub fn write_config(&self) -> Result<()> {
-        // Read user content (non-CSI entries)
-        let user_content = self.ucl_manager.read_user_config()?;
-
-        // Convert exports to UCL format
         let exports = self.exports.read().unwrap();
 
-        let iscsi_targets: Vec<IscsiTargetUcl> = exports
-            .values()
-            .filter(|e| e.export_type == ExportType::Iscsi)
-            .map(|e| IscsiTargetUcl {
-                iqn: e.target_name.clone(),
-                auth_group: self.ucl_manager.auth_group.clone(),
-                portal_group: self.portal_group_name.clone(),
-                luns: vec![LunUcl {
-                    id: e.lun_id,
-                    path: e.device_path.clone(),
-                    blocksize: 512,
-                }],
-            })
-            .collect();
+        // Convert exports to Target/Controller types
+        let mut iscsi_targets: Vec<(String, Target)> = Vec::new();
+        let mut nvme_controllers: Vec<(String, Controller)> = Vec::new();
 
-        let nvme_controllers: Vec<NvmeControllerUcl> = exports
-            .values()
-            .filter(|e| e.export_type == ExportType::Nvmeof)
-            .map(|e| NvmeControllerUcl {
-                nqn: e.target_name.clone(),
-                auth_group: self.ucl_manager.auth_group.clone(),
-                transport_group: self.ucl_manager.transport_group.clone(),
-                namespaces: vec![NvmeNamespaceUcl {
-                    id: e.lun_id,
-                    path: e.device_path.clone(),
-                }],
-            })
-            .collect();
+        for export in exports.values() {
+            match export.export_type {
+                ExportType::Iscsi => {
+                    let target = Target::new(
+                        self.auth_group.clone(),
+                        self.portal_group_name.clone(),
+                        export.lun_id,
+                        export.device_path.clone(),
+                    );
+                    iscsi_targets.push((export.target_name.clone(), target));
+                }
+                ExportType::Nvmeof => {
+                    let controller = Controller::new(
+                        self.auth_group.clone(),
+                        self.transport_group.clone(),
+                        export.lun_id,
+                        export.device_path.clone(),
+                    );
+                    nvme_controllers.push((export.target_name.clone(), controller));
+                }
+            }
+        }
 
         drop(exports);
 
@@ -453,8 +351,14 @@ impl CtlManager {
             nvme_controllers.len()
         );
 
+        // Read user content (non-CSI targets)
+        let user_content = self.ucl_manager.read_user_content()?;
+
+        // Write config with CSI targets
         self.ucl_manager
             .write_config(&user_content, &iscsi_targets, &nvme_controllers)?;
+
+        info!("UCL config updated successfully");
 
         self.reload_ctld()?;
 
