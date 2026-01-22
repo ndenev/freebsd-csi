@@ -77,7 +77,7 @@ spec:
               mountPath: /dev
             - name: host-iscsi
               mountPath: /etc/iscsi
-              readOnly: true
+              # iSCSI discovery needs to write to /etc/iscsi/send_targets/
             - name: host-sys
               mountPath: /sys
               readOnly: true
