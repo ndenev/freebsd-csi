@@ -259,6 +259,7 @@ impl CtlManager {
                         self.portal_group_name.clone(),
                         export.lun_id,
                         export.device_path.as_str().to_string(),
+                        &export.volume_name,
                     );
                     iscsi_targets.push((export.target_name.to_string(), target));
                 }
@@ -270,6 +271,7 @@ impl CtlManager {
                         self.transport_group.clone(),
                         export.lun_id,
                         export.device_path.as_str().to_string(),
+                        &export.volume_name,
                     );
                     nvme_controllers.push((export.target_name.to_string(), controller));
                 }

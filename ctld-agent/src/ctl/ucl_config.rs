@@ -52,24 +52,62 @@ pub struct Lun {
     /// Block size (optional, defaults to 512)
     #[ucl(default)]
     pub blocksize: Option<u32>,
+    /// Serial number for unique device identification
+    #[ucl(default)]
+    pub serial: Option<String>,
+    /// Device ID for unique device identification (T10 vendor format)
+    #[ucl(path = "device-id", default)]
+    pub device_id: Option<String>,
 }
 
 impl Lun {
-    /// Create a new LUN
-    pub fn new(path: String) -> Self {
+    /// Create a new LUN with a unique serial based on volume name
+    pub fn new(path: String, volume_name: &str) -> Self {
+        // Generate unique identifiers from volume name
+        // Serial: Use first 16 chars of volume name (SCSI serial limit)
+        // Device-ID: Use T10 vendor format for unique identification
+        let serial = Self::generate_serial(volume_name);
+        let device_id = Self::generate_device_id(volume_name);
+
         Self {
             path,
             blocksize: None,
+            serial: Some(serial),
+            device_id: Some(device_id),
         }
     }
 
     /// Create a new LUN with explicit blocksize
     #[allow(dead_code)]
-    pub fn with_blocksize(path: String, blocksize: u32) -> Self {
+    pub fn with_blocksize(path: String, volume_name: &str, blocksize: u32) -> Self {
+        let serial = Self::generate_serial(volume_name);
+        let device_id = Self::generate_device_id(volume_name);
+
         Self {
             path,
             blocksize: Some(blocksize),
+            serial: Some(serial),
+            device_id: Some(device_id),
         }
+    }
+
+    /// Generate a unique serial number from volume name.
+    /// SCSI serial numbers are limited to 16 characters.
+    /// Uses SHA-256 hash to ensure uniqueness across the full volume name.
+    fn generate_serial(volume_name: &str) -> String {
+        use sha2::{Sha256, Digest};
+
+        let mut hasher = Sha256::new();
+        hasher.update(volume_name.as_bytes());
+        let hash = hasher.finalize();
+        // Take first 8 bytes (16 hex chars) of SHA-256 hash
+        hex::encode(&hash[..8])
+    }
+
+    /// Generate a device ID using T10 vendor format
+    fn generate_device_id(volume_name: &str) -> String {
+        // T10 vendor format: "FreeBSD <volume_name>"
+        format!("FreeBSD {}", volume_name)
     }
 }
 
@@ -81,6 +119,12 @@ impl ToUcl for Lun {
         if let Some(bs) = self.blocksize {
             writeln!(s, "{}blocksize = {};", ind, bs).unwrap();
         }
+        if let Some(ref serial) = self.serial {
+            writeln!(s, "{}serial = {};", ind, ucl_quote(serial)).unwrap();
+        }
+        if let Some(ref device_id) = self.device_id {
+            writeln!(s, "{}device-id = {};", ind, ucl_quote(device_id)).unwrap();
+        }
         s
     }
 }
@@ -90,18 +134,39 @@ impl ToUcl for Lun {
 pub struct Namespace {
     /// Path to the backing device
     pub path: String,
+    /// Device ID for unique namespace identification
+    #[ucl(path = "device-id", default)]
+    pub device_id: Option<String>,
 }
 
 impl Namespace {
-    pub fn new(path: String) -> Self {
-        Self { path }
+    /// Create a new namespace with a unique device ID based on volume name
+    pub fn new(path: String, volume_name: &str) -> Self {
+        let device_id = Self::generate_device_id(volume_name);
+        Self {
+            path,
+            device_id: Some(device_id),
+        }
+    }
+
+    /// Generate a device ID for NVMe namespace
+    /// NVMe uses NGUID/EUI64 for unique identification
+    fn generate_device_id(volume_name: &str) -> String {
+        // Use the volume name as a unique identifier
+        // CTL will use this for the namespace's device-id
+        format!("FreeBSD {}", volume_name)
     }
 }
 
 impl ToUcl for Namespace {
     fn to_ucl(&self, level: usize) -> String {
+        let mut s = String::new();
         let ind = indent(level);
-        format!("{}path = {};\n", ind, ucl_quote(&self.path))
+        writeln!(s, "{}path = {};", ind, ucl_quote(&self.path)).unwrap();
+        if let Some(ref device_id) = self.device_id {
+            writeln!(s, "{}device-id = {};", ind, ucl_quote(device_id)).unwrap();
+        }
+        s
     }
 }
 
@@ -125,9 +190,15 @@ pub struct Target {
 
 impl Target {
     /// Create a new target with a single LUN
-    pub fn new(auth_group: String, portal_group: String, lun_id: u32, device_path: String) -> Self {
+    pub fn new(
+        auth_group: String,
+        portal_group: String,
+        lun_id: u32,
+        device_path: String,
+        volume_name: &str,
+    ) -> Self {
         let mut lun = HashMap::new();
-        lun.insert(lun_id.to_string(), Lun::new(device_path));
+        lun.insert(lun_id.to_string(), Lun::new(device_path, volume_name));
         Self {
             auth_group,
             portal_group,
@@ -187,9 +258,10 @@ impl Controller {
         transport_group: String,
         ns_id: u32,
         device_path: String,
+        volume_name: &str,
     ) -> Self {
         let mut namespace = HashMap::new();
-        namespace.insert(ns_id.to_string(), Namespace::new(device_path));
+        namespace.insert(ns_id.to_string(), Namespace::new(device_path, volume_name));
         Self {
             auth_group,
             transport_group,
@@ -438,14 +510,48 @@ mod tests {
 
     #[test]
     fn test_lun_to_ucl() {
-        let lun = Lun::new("/dev/zvol/tank/csi/vol1".to_string());
+        let lun = Lun::new(
+            "/dev/zvol/tank/csi/vol1".to_string(),
+            "pvc-c2e56d00-9afa-42ec-9404-22e317aadd8f",
+        );
         let ucl = lun.to_ucl(0);
         assert!(ucl.contains("path = \"/dev/zvol/tank/csi/vol1\";"));
         assert!(!ucl.contains("blocksize"));
+        // Check for serial (SHA-256 hash, 16 hex chars)
+        assert!(ucl.contains("serial = \""), "UCL should contain serial field");
+        // Check for device-id
+        assert!(ucl.contains("device-id = \"FreeBSD pvc-c2e56d00-9afa-42ec-9404-22e317aadd8f\";"));
 
-        let lun_with_bs = Lun::with_blocksize("/dev/zvol/tank/csi/vol1".to_string(), 4096);
+        let lun_with_bs = Lun::with_blocksize(
+            "/dev/zvol/tank/csi/vol1".to_string(),
+            "pvc-test",
+            4096,
+        );
         let ucl = lun_with_bs.to_ucl(0);
         assert!(ucl.contains("blocksize = 4096;"));
+    }
+
+    #[test]
+    fn test_lun_serial_generation() {
+        // Test PVC name with UUID - SHA-256 hash produces consistent output
+        let serial = Lun::generate_serial("pvc-c2e56d00-9afa-42ec-9404-22e317aadd8f");
+        assert_eq!(serial.len(), 16, "Serial must be 16 chars (SCSI limit)");
+        assert!(serial.chars().all(|c| c.is_ascii_hexdigit()), "Serial must be hex");
+
+        // Test another PVC - must produce different serial
+        let serial2 = Lun::generate_serial("pvc-5c1830ef-0beb-412d-8015-5a6a941b7390");
+        assert_eq!(serial2.len(), 16);
+        assert_ne!(serial, serial2, "Different volumes must have different serials");
+
+        // Test non-PVC name - still works with hash
+        let serial3 = Lun::generate_serial("my-volume");
+        assert_eq!(serial3.len(), 16);
+        assert_ne!(serial, serial3);
+        assert_ne!(serial2, serial3);
+
+        // Same input always produces same output (deterministic)
+        let serial_repeat = Lun::generate_serial("pvc-c2e56d00-9afa-42ec-9404-22e317aadd8f");
+        assert_eq!(serial, serial_repeat, "Same input must produce same serial");
     }
 
     #[test]
@@ -455,13 +561,19 @@ mod tests {
             "pg0".to_string(),
             0,
             "/dev/zvol/tank/csi/vol1".to_string(),
+            "pvc-test-volume",
         );
         let ucl = target.to_ucl(0);
+
+        // Print actual output for debugging
+        println!("=== UCL OUTPUT ===\n{}\n==================", ucl);
 
         assert!(ucl.contains("auth-group = \"ag0\";"));
         assert!(ucl.contains("portal-group = \"pg0\";"));
         assert!(ucl.contains("lun 0 {"));
         assert!(ucl.contains("path = \"/dev/zvol/tank/csi/vol1\";"));
+        assert!(ucl.contains("serial ="), "Missing serial in:\n{}", ucl);
+        assert!(ucl.contains("device-id ="), "Missing device-id in:\n{}", ucl);
     }
 
     #[test]
@@ -471,6 +583,7 @@ mod tests {
             "tg0".to_string(),
             1,
             "/dev/zvol/tank/csi/vol1".to_string(),
+            "pvc-test-volume",
         );
         let ucl = controller.to_ucl(0);
 
@@ -478,6 +591,7 @@ mod tests {
         assert!(ucl.contains("transport-group = \"tg0\";"));
         assert!(ucl.contains("namespace 1 {"));
         assert!(ucl.contains("path = \"/dev/zvol/tank/csi/vol1\";"));
+        assert!(ucl.contains("device-id = \"FreeBSD pvc-test-volume\";"));
     }
 
     #[test]
