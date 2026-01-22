@@ -19,10 +19,85 @@ use super::PlatformResult;
 #[allow(dead_code)] // Platform constant for future use
 pub const DEFAULT_FS_TYPE: &str = "ext4";
 
+/// Check if a device is claimed by multipath and return the multipath device path.
+///
+/// This checks if the raw device (e.g., /dev/sda, /dev/nvme0n1) is a slave
+/// of a device-mapper multipath device and returns the dm device path instead.
+///
+/// Returns the original device if not multipathed, or the dm device path if it is.
+fn resolve_multipath_device(device: &str) -> String {
+    // Extract device name from path (e.g., "/dev/sda" -> "sda")
+    let dev_name = device.rsplit('/').next().unwrap_or(device);
+
+    // Check /sys/block/<device>/holders/ for dm-* entries
+    let holders_path = format!("/sys/block/{}/holders", dev_name);
+    if let Ok(entries) = fs::read_dir(&holders_path) {
+        for entry in entries.flatten() {
+            let holder_name = entry.file_name();
+            let holder_str = holder_name.to_string_lossy();
+            if holder_str.starts_with("dm-") {
+                // Found a dm device holding this device
+                // Try to find the friendly name in /dev/mapper/
+                let dm_device = format!("/dev/{}", holder_str);
+
+                // Check if there's a symlink in /dev/mapper pointing to this dm device
+                if let Ok(mapper_entries) = fs::read_dir("/dev/mapper") {
+                    for mapper_entry in mapper_entries.flatten() {
+                        if let Ok(link_target) = fs::read_link(mapper_entry.path()) {
+                            let link_target_str = link_target.to_string_lossy();
+                            if link_target_str.ends_with(&*holder_str)
+                                || link_target_str.contains(&*holder_str)
+                            {
+                                let mapper_path = mapper_entry.path();
+                                info!(
+                                    original = %device,
+                                    multipath = %mapper_path.display(),
+                                    "Device is multipathed, using dm device"
+                                );
+                                return mapper_path.to_string_lossy().to_string();
+                            }
+                        }
+                    }
+                }
+
+                // Fall back to dm device if no mapper name found
+                info!(
+                    original = %device,
+                    multipath = %dm_device,
+                    "Device is multipathed, using dm device"
+                );
+                return dm_device;
+            }
+        }
+    }
+
+    // Not multipathed, return original device
+    device.to_string()
+}
+
+/// Check if NVMe native multipath is enabled.
+///
+/// Returns true if the kernel's nvme_core module has multipath enabled,
+/// which means NVMe devices are handled by kernel multipath instead of dm-multipath.
+fn is_nvme_native_multipath_enabled() -> bool {
+    let multipath_path = "/sys/module/nvme_core/parameters/multipath";
+    if let Ok(value) = fs::read_to_string(multipath_path) {
+        let v = value.trim();
+        v == "Y" || v == "1"
+    } else {
+        false
+    }
+}
+
 /// Connect to an iSCSI target using iscsiadm.
 ///
 /// On Linux, we need the portal address. If not provided, we try to discover
 /// the target first using sendtargets.
+///
+/// The connection flow follows the standard iSCSI discovery pattern:
+/// 1. Run sendtargets discovery to populate node database
+/// 2. Login to the target
+/// 3. Find the resulting device (checking for multipath)
 pub fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<String> {
     info!(target_iqn = %target_iqn, portal = ?portal, "Connecting to iSCSI target");
 
@@ -32,17 +107,10 @@ pub fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<S
         )
     })?;
 
-    // First, discover the target if not already known
+    // Step 1: Run sendtargets discovery to populate node database
+    // This is the standard approach that creates node entries automatically
     let discover_output = Command::new("iscsiadm")
-        .args([
-            "-m",
-            "discoverydb",
-            "-t",
-            "sendtargets",
-            "-p",
-            portal,
-            "--discover",
-        ])
+        .args(["-m", "discovery", "-t", "sendtargets", "-p", portal])
         .output()
         .map_err(|e| {
             error!(error = %e, "Failed to execute iscsiadm discovery");
@@ -51,17 +119,16 @@ pub fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<S
 
     if !discover_output.status.success() {
         let stderr = String::from_utf8_lossy(&discover_output.stderr);
+        let stdout = String::from_utf8_lossy(&discover_output.stdout);
         // Discovery failure is not always fatal - target may already be known
-        warn!(stderr = %stderr, "iscsiadm discovery returned error (may be expected if target already known)");
+        warn!(stderr = %stderr, stdout = %stdout, "iscsiadm discovery returned error (may be expected if target already known)");
+    } else {
+        let stdout = String::from_utf8_lossy(&discover_output.stdout);
+        info!(output = %stdout, "iSCSI discovery successful");
     }
 
-    // Create a node entry for the target
-    let _node_output = Command::new("iscsiadm")
-        .args(["-m", "node", "-T", target_iqn, "-p", portal, "-o", "new"])
-        .output();
-    // Ignore error - node may already exist
-
-    // Log in to the target
+    // Step 2: Log in to the target
+    // After discovery, node entries should exist and login should work
     let login_output = Command::new("iscsiadm")
         .args(["-m", "node", "-T", target_iqn, "-p", portal, "--login"])
         .output()
@@ -84,10 +151,10 @@ pub fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<S
         }
     }
 
-    // Wait a moment for the device to appear
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Wait for the device to appear and settle
+    std::thread::sleep(std::time::Duration::from_millis(1000));
 
-    // Find the device
+    // Step 3: Find the device (with multipath awareness)
     let device = find_iscsi_device(target_iqn)?;
     info!(device = %device, "iSCSI target connected");
 
@@ -97,6 +164,8 @@ pub fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<S
 /// Find the device associated with an iSCSI target.
 ///
 /// Linux provides stable device paths in /dev/disk/by-path/ for iSCSI devices.
+/// This function also checks if the device is claimed by multipath and returns
+/// the dm device path in that case.
 pub fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
     // Try to find device via /dev/disk/by-path/ which has stable iSCSI paths
     let by_path = Path::new("/dev/disk/by-path");
@@ -111,7 +180,9 @@ pub fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
                 && name_str.contains(target_iqn)
                 && let Ok(link_target) = fs::canonicalize(entry.path())
             {
-                return Ok(link_target.to_string_lossy().to_string());
+                let raw_device = link_target.to_string_lossy().to_string();
+                // Check if device is multipathed and return dm device if so
+                return Ok(resolve_multipath_device(&raw_device));
             }
         }
     }
@@ -139,7 +210,8 @@ pub fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
             && device.starts_with("sd")
         {
             // Format: "Attached scsi disk sda ..."
-            return Ok(format!("/dev/{}", device));
+            let raw_device = format!("/dev/{}", device);
+            return Ok(resolve_multipath_device(&raw_device));
         }
     }
 
@@ -175,7 +247,8 @@ pub fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
                                     && let Some(block_entry) = block_entries.flatten().next()
                                 {
                                     let dev_name = block_entry.file_name();
-                                    return Ok(format!("/dev/{}", dev_name.to_string_lossy()));
+                                    let raw_device = format!("/dev/{}", dev_name.to_string_lossy());
+                                    return Ok(resolve_multipath_device(&raw_device));
                                 }
                             }
                         }
@@ -304,7 +377,19 @@ fn is_nvme_namespace_device(path: &str) -> bool {
 }
 
 /// Find the device associated with an NVMeoF target.
+///
+/// This function handles both NVMe native multipath and dm-multipath:
+/// - If NVMe native multipath is enabled (nvme_core.multipath=Y), the kernel
+///   handles multipath internally and we use the namespace device directly.
+/// - If dm-multipath is used, we need to find the dm device that owns the
+///   raw NVMe namespace device.
 pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
+    let native_multipath = is_nvme_native_multipath_enabled();
+    debug!(
+        native_multipath = native_multipath,
+        "Checking NVMe native multipath status"
+    );
+
     // Use nvme list to find devices
     let output = Command::new("nvme")
         .args(["list", "-o", "json"])
@@ -333,7 +418,12 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
                 if (subsys_nqn == target_nqn || subsys_nqn.contains(target_nqn))
                     && is_nvme_namespace_device(dev_path)
                 {
-                    return Ok(dev_path.to_string());
+                    // For native multipath, kernel handles it; for dm-multipath, resolve
+                    if native_multipath {
+                        return Ok(dev_path.to_string());
+                    } else {
+                        return Ok(resolve_multipath_device(dev_path));
+                    }
                 }
             }
         }
@@ -356,7 +446,12 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
                         let name_str = name.to_string_lossy();
                         // Only match namespace devices like nvme0n1, not controller devices like nvme0
                         if is_nvme_namespace_device(&name_str) {
-                            return Ok(format!("/dev/{}", name_str));
+                            let raw_device = format!("/dev/{}", name_str);
+                            if native_multipath {
+                                return Ok(raw_device);
+                            } else {
+                                return Ok(resolve_multipath_device(&raw_device));
+                            }
                         }
                     }
                 }
@@ -376,7 +471,11 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
             && let Some(device) = line.split_whitespace().next()
             && is_nvme_namespace_device(device)
         {
-            return Ok(device.to_string());
+            if native_multipath {
+                return Ok(device.to_string());
+            } else {
+                return Ok(resolve_multipath_device(device));
+            }
         }
     }
 
