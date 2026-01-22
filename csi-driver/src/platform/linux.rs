@@ -446,17 +446,11 @@ pub fn connect_nvmeof(
     let mut successful_connects = 0;
 
     // Connect to each transport address
-    for (idx, addr) in addresses.iter().enumerate() {
-        // Build nvme connect arguments
-        // Use --duplicate-connect (-D) for second+ connections to allow
-        // connecting to the same NQN via multiple transport addresses
-        let mut args = vec!["connect", "-t", "tcp", "-a", addr, "-s", port, "-n", target_nqn];
-        if idx > 0 {
-            args.push("--duplicate-connect");
-        }
-
+    for addr in &addresses {
         let output = Command::new("nvme")
-            .args(&args)
+            .args([
+                "connect", "-t", "tcp", "-a", addr, "-s", port, "-n", target_nqn,
+            ])
             .output()
             .map_err(|e| {
                 error!(error = %e, addr = %addr, "Failed to execute nvme connect");
