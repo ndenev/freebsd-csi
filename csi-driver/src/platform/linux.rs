@@ -486,10 +486,13 @@ fn is_nvme_namespace_device(path: &str) -> bool {
 /// Find the device associated with an NVMeoF target.
 ///
 /// This function handles both NVMe native multipath and dm-multipath:
-/// - If NVMe native multipath is enabled (nvme_core.multipath=Y), the kernel
-///   handles multipath internally and we use the namespace device directly.
-/// - If dm-multipath is used, we need to find the dm device that owns the
-///   raw NVMe namespace device.
+/// - Always checks if dm-multipath has claimed the device first
+/// - If dm-multipath owns the device, returns the dm device path
+/// - Otherwise returns the raw NVMe namespace device
+///
+/// Note: Even with native NVMe multipath enabled (nvme_core.multipath=Y),
+/// dm-multipath may still be configured to claim NVMe devices. We must
+/// always check for dm devices to avoid "device in use" errors.
 pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
     let native_multipath = is_nvme_native_multipath_enabled();
     debug!(
@@ -525,12 +528,8 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
                 if (subsys_nqn == target_nqn || subsys_nqn.contains(target_nqn))
                     && is_nvme_namespace_device(dev_path)
                 {
-                    // For native multipath, kernel handles it; for dm-multipath, resolve
-                    if native_multipath {
-                        return Ok(dev_path.to_string());
-                    } else {
-                        return Ok(resolve_multipath_device(dev_path));
-                    }
+                    // Always check for dm-multipath - it may claim devices even with native multipath
+                    return Ok(resolve_multipath_device(dev_path));
                 }
             }
         }
@@ -554,11 +553,8 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
                         // Only match namespace devices like nvme0n1, not controller devices like nvme0
                         if is_nvme_namespace_device(&name_str) {
                             let raw_device = format!("/dev/{}", name_str);
-                            if native_multipath {
-                                return Ok(raw_device);
-                            } else {
-                                return Ok(resolve_multipath_device(&raw_device));
-                            }
+                            // Always check for dm-multipath
+                            return Ok(resolve_multipath_device(&raw_device));
                         }
                     }
                 }
@@ -578,11 +574,8 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
             && let Some(device) = line.split_whitespace().next()
             && is_nvme_namespace_device(device)
         {
-            if native_multipath {
-                return Ok(device.to_string());
-            } else {
-                return Ok(resolve_multipath_device(device));
-            }
+            // Always check for dm-multipath
+            return Ok(resolve_multipath_device(device));
         }
     }
 
