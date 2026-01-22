@@ -16,6 +16,34 @@ use super::PlatformResult;
 /// Default filesystem type for FreeBSD
 pub const DEFAULT_FS_TYPE: &str = "ufs";
 
+/// Check if an iSCSI target is currently connected.
+pub fn is_iscsi_connected(target_iqn: &str) -> bool {
+    // Check iscsictl -L output for this target
+    let output = Command::new("iscsictl").arg("-L").output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout.contains(target_iqn)
+        }
+        _ => false,
+    }
+}
+
+/// Check if an NVMeoF target is currently connected.
+pub fn is_nvmeof_connected(target_nqn: &str) -> bool {
+    // Check nvmecontrol devlist output for this NQN
+    let output = Command::new("nvmecontrol").arg("devlist").output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout.contains(target_nqn)
+        }
+        _ => false,
+    }
+}
+
 /// Connect to an iSCSI target using iscsictl.
 ///
 /// On FreeBSD, the portal is typically configured in /etc/iscsi.conf
