@@ -127,6 +127,9 @@ storageClassIscsi:
   parameters:
     fsType: ext4
     # Portal address - IP:port of the iSCSI target (REQUIRED when create: true)
+    # For multipath: use comma-separated portals, e.g., "10.0.0.10:3260,10.0.0.11:3260"
+    # Each portal will be discovered and logged into separately.
+    # dm-multipath will combine the paths automatically.
     portal: ""
 
 # NVMeoF Storage Class (FreeBSD 15.0+)
@@ -143,6 +146,9 @@ storageClassNvmeof:
   parameters:
     fsType: ext4
     # Transport address - IP of the NVMeoF target (REQUIRED when create: true)
+    # For multipath: use comma-separated addresses, e.g., "10.0.0.10,10.0.0.11"
+    # Each address will be connected separately.
+    # Native NVMe multipath or dm-multipath will combine the paths.
     transportAddr: ""
     # Transport port (default: 4420)
     transportPort: "4420"

@@ -89,74 +89,125 @@ fn is_nvme_native_multipath_enabled() -> bool {
     }
 }
 
-/// Connect to an iSCSI target using iscsiadm.
+/// Connect to an iSCSI target using iscsiadm with support for multiple portals.
 ///
-/// On Linux, we need the portal address. If not provided, we try to discover
-/// the target first using sendtargets.
+/// When multiple portals are provided (comma-separated), this function will:
+/// 1. Run sendtargets discovery against each portal
+/// 2. Login to the target via each portal
+/// 3. Wait for dm-multipath to combine the paths
+/// 4. Return the multipath device (or single device if only one portal)
 ///
-/// The connection flow follows the standard iSCSI discovery pattern:
-/// 1. Run sendtargets discovery to populate node database
-/// 2. Login to the target
-/// 3. Find the resulting device (checking for multipath)
+/// # Arguments
+/// * `target_iqn` - The iSCSI Qualified Name of the target
+/// * `portal` - One or more portal addresses (comma-separated), e.g., "10.0.0.10:3260,10.0.0.11:3260"
 pub fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<String> {
-    info!(target_iqn = %target_iqn, portal = ?portal, "Connecting to iSCSI target");
-
-    let portal = portal.ok_or_else(|| {
+    let portal_str = portal.ok_or_else(|| {
         Status::invalid_argument(
             "Portal address is required for iSCSI on Linux (pass via volume_context)",
         )
     })?;
 
-    // Step 1: Run sendtargets discovery to populate node database
-    // This is the standard approach that creates node entries automatically
-    let discover_output = Command::new("iscsiadm")
-        .args(["-m", "discovery", "-t", "sendtargets", "-p", portal])
-        .output()
-        .map_err(|e| {
-            error!(error = %e, "Failed to execute iscsiadm discovery");
-            Status::internal(format!("Failed to execute iscsiadm discovery: {}", e))
-        })?;
+    // Parse comma-separated portals for multipath support
+    let portals: Vec<&str> = portal_str.split(',').map(|s| s.trim()).collect();
+    let multipath_mode = portals.len() > 1;
 
-    if !discover_output.status.success() {
-        let stderr = String::from_utf8_lossy(&discover_output.stderr);
-        let stdout = String::from_utf8_lossy(&discover_output.stdout);
-        // Discovery failure is not always fatal - target may already be known
-        warn!(stderr = %stderr, stdout = %stdout, "iscsiadm discovery returned error (may be expected if target already known)");
-    } else {
-        let stdout = String::from_utf8_lossy(&discover_output.stdout);
-        info!(output = %stdout, "iSCSI discovery successful");
-    }
+    info!(
+        target_iqn = %target_iqn,
+        portals = ?portals,
+        multipath = multipath_mode,
+        "Connecting to iSCSI target"
+    );
 
-    // Step 2: Log in to the target
-    // After discovery, node entries should exist and login should work
-    let login_output = Command::new("iscsiadm")
-        .args(["-m", "node", "-T", target_iqn, "-p", portal, "--login"])
-        .output()
-        .map_err(|e| {
-            error!(error = %e, "Failed to execute iscsiadm login");
-            Status::internal(format!("Failed to execute iscsiadm login: {}", e))
-        })?;
+    // Track successful logins for multipath
+    let mut successful_logins = 0;
 
-    if !login_output.status.success() {
-        let stderr = String::from_utf8_lossy(&login_output.stderr);
-        // Check if already logged in
-        if stderr.contains("already present") || stderr.contains("session already exists") {
-            info!(target_iqn = %target_iqn, "iSCSI session already exists");
+    // Step 1 & 2: Discover and login to each portal
+    for portal in &portals {
+        // Run sendtargets discovery to populate node database
+        let discover_output = Command::new("iscsiadm")
+            .args(["-m", "discovery", "-t", "sendtargets", "-p", portal])
+            .output()
+            .map_err(|e| {
+                error!(error = %e, portal = %portal, "Failed to execute iscsiadm discovery");
+                Status::internal(format!("Failed to execute iscsiadm discovery: {}", e))
+            })?;
+
+        if !discover_output.status.success() {
+            let stderr = String::from_utf8_lossy(&discover_output.stderr);
+            let stdout = String::from_utf8_lossy(&discover_output.stdout);
+            warn!(
+                stderr = %stderr,
+                stdout = %stdout,
+                portal = %portal,
+                "iscsiadm discovery returned error (may be expected if target already known)"
+            );
         } else {
-            error!(stderr = %stderr, "iscsiadm login failed");
-            return Err(Status::internal(format!(
-                "iscsiadm login failed: {}",
-                stderr
-            )));
+            let stdout = String::from_utf8_lossy(&discover_output.stdout);
+            info!(output = %stdout, portal = %portal, "iSCSI discovery successful");
+        }
+
+        // Login to the target via this portal
+        let login_output = Command::new("iscsiadm")
+            .args(["-m", "node", "-T", target_iqn, "-p", portal, "--login"])
+            .output()
+            .map_err(|e| {
+                error!(error = %e, portal = %portal, "Failed to execute iscsiadm login");
+                Status::internal(format!("Failed to execute iscsiadm login: {}", e))
+            })?;
+
+        if !login_output.status.success() {
+            let stderr = String::from_utf8_lossy(&login_output.stderr);
+            // Check if already logged in
+            if stderr.contains("already present") || stderr.contains("session already exists") {
+                info!(target_iqn = %target_iqn, portal = %portal, "iSCSI session already exists");
+                successful_logins += 1;
+            } else {
+                // In multipath mode, warn but continue; in single mode, fail
+                if multipath_mode {
+                    warn!(
+                        stderr = %stderr,
+                        portal = %portal,
+                        "iscsiadm login failed for portal (continuing with other portals)"
+                    );
+                } else {
+                    error!(stderr = %stderr, "iscsiadm login failed");
+                    return Err(Status::internal(format!(
+                        "iscsiadm login failed: {}",
+                        stderr
+                    )));
+                }
+            }
+        } else {
+            info!(target_iqn = %target_iqn, portal = %portal, "iSCSI login successful");
+            successful_logins += 1;
         }
     }
 
-    // Wait for the device to appear and settle
-    std::thread::sleep(std::time::Duration::from_millis(1000));
+    // Ensure at least one login succeeded
+    if successful_logins == 0 {
+        return Err(Status::internal(
+            "Failed to login to any iSCSI portal".to_string(),
+        ));
+    }
 
-    // Step 3: Find the device (with multipath awareness)
+    // Step 3: Wait for devices to appear and multipath to settle
+    // Longer wait for multipath to allow dm-multipath to combine paths
+    let settle_time = if multipath_mode { 3000 } else { 1000 };
+    info!(
+        settle_time_ms = settle_time,
+        successful_logins = successful_logins,
+        "Waiting for device(s) to settle"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(settle_time));
+
+    // Step 4: Find the device (with multipath awareness)
     let device = find_iscsi_device(target_iqn)?;
-    info!(device = %device, "iSCSI target connected");
+    info!(
+        device = %device,
+        multipath = multipath_mode,
+        paths = successful_logins,
+        "iSCSI target connected"
+    );
 
     Ok(device)
 }
@@ -293,50 +344,106 @@ pub fn disconnect_iscsi(target_iqn: &str) -> PlatformResult<()> {
     Ok(())
 }
 
-/// Connect to an NVMeoF target using nvme-cli.
+/// Connect to an NVMeoF target using nvme-cli with support for multiple transport addresses.
+///
+/// When multiple transport addresses are provided (comma-separated), this function will:
+/// 1. Connect to each transport address
+/// 2. Wait for multipath to combine the paths (native NVMe multipath or dm-multipath)
+/// 3. Return the multipath device (or single device if only one address)
+///
+/// # Arguments
+/// * `target_nqn` - The NVMe Qualified Name of the target
+/// * `transport_addr` - One or more transport addresses (comma-separated), e.g., "10.0.0.10,10.0.0.11"
+/// * `transport_port` - The transport port (default: 4420)
 pub fn connect_nvmeof(
     target_nqn: &str,
     transport_addr: Option<&str>,
     transport_port: Option<&str>,
 ) -> PlatformResult<String> {
-    info!(target_nqn = %target_nqn, transport_addr = ?transport_addr, "Connecting to NVMeoF target");
-
-    let addr = transport_addr.ok_or_else(|| {
+    let addr_str = transport_addr.ok_or_else(|| {
         Status::invalid_argument(
             "Transport address is required for NVMeoF on Linux (pass via volume_context)",
         )
     })?;
 
-    let port = transport_port.unwrap_or("4420"); // Default NVMe-oF port
+    // Parse comma-separated addresses for multipath support
+    let addresses: Vec<&str> = addr_str.split(',').map(|s| s.trim()).collect();
+    let multipath_mode = addresses.len() > 1;
+    let port = transport_port.unwrap_or("4420");
 
-    // Connect using nvme-cli
-    let output = Command::new("nvme")
-        .args([
-            "connect", "-t", "tcp", "-a", addr, "-s", port, "-n", target_nqn,
-        ])
-        .output()
-        .map_err(|e| {
-            error!(error = %e, "Failed to execute nvme connect");
-            Status::internal(format!("Failed to execute nvme connect: {}", e))
-        })?;
+    info!(
+        target_nqn = %target_nqn,
+        addresses = ?addresses,
+        port = %port,
+        multipath = multipath_mode,
+        "Connecting to NVMeoF target"
+    );
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // Check if already connected
-        if stderr.contains("already connected") {
-            info!(target_nqn = %target_nqn, "NVMeoF target already connected");
+    // Track successful connections
+    let mut successful_connects = 0;
+
+    // Connect to each transport address
+    for addr in &addresses {
+        let output = Command::new("nvme")
+            .args([
+                "connect", "-t", "tcp", "-a", addr, "-s", port, "-n", target_nqn,
+            ])
+            .output()
+            .map_err(|e| {
+                error!(error = %e, addr = %addr, "Failed to execute nvme connect");
+                Status::internal(format!("Failed to execute nvme connect: {}", e))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Check if already connected
+            if stderr.contains("already connected") {
+                info!(target_nqn = %target_nqn, addr = %addr, "NVMeoF target already connected");
+                successful_connects += 1;
+            } else {
+                // In multipath mode, warn but continue; in single mode, fail
+                if multipath_mode {
+                    warn!(
+                        stderr = %stderr,
+                        addr = %addr,
+                        "nvme connect failed for address (continuing with other addresses)"
+                    );
+                } else {
+                    error!(stderr = %stderr, "nvme connect failed");
+                    return Err(Status::internal(format!("nvme connect failed: {}", stderr)));
+                }
+            }
         } else {
-            error!(stderr = %stderr, "nvme connect failed");
-            return Err(Status::internal(format!("nvme connect failed: {}", stderr)));
+            info!(target_nqn = %target_nqn, addr = %addr, "NVMeoF connect successful");
+            successful_connects += 1;
         }
     }
 
-    // Wait a moment for the device to appear
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Ensure at least one connection succeeded
+    if successful_connects == 0 {
+        return Err(Status::internal(
+            "Failed to connect to any NVMeoF transport address".to_string(),
+        ));
+    }
 
-    // Find the device
+    // Wait for devices to appear and multipath to settle
+    // Longer wait for multipath to allow kernel/dm to combine paths
+    let settle_time = if multipath_mode { 3000 } else { 1000 };
+    info!(
+        settle_time_ms = settle_time,
+        successful_connects = successful_connects,
+        "Waiting for device(s) to settle"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(settle_time));
+
+    // Find the device (with multipath awareness)
     let device = find_nvmeof_device(target_nqn)?;
-    info!(device = %device, "NVMeoF target connected");
+    info!(
+        device = %device,
+        multipath = multipath_mode,
+        paths = successful_connects,
+        "NVMeoF target connected"
+    );
 
     Ok(device)
 }
