@@ -19,6 +19,41 @@ use super::PlatformResult;
 #[allow(dead_code)] // Platform constant for future use
 pub const DEFAULT_FS_TYPE: &str = "ext4";
 
+/// Check if an iSCSI target is currently connected.
+pub fn is_iscsi_connected(target_iqn: &str) -> bool {
+    // Check iscsiadm session list for this target
+    let output = Command::new("iscsiadm").args(["-m", "session"]).output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout.contains(target_iqn)
+        }
+        _ => false,
+    }
+}
+
+/// Check if an NVMeoF target is currently connected.
+pub fn is_nvmeof_connected(target_nqn: &str) -> bool {
+    // Check /sys/class/nvme-subsystem/ for this NQN
+    let nvme_subsys = Path::new("/sys/class/nvme-subsystem");
+    if !nvme_subsys.exists() {
+        return false;
+    }
+
+    if let Ok(entries) = fs::read_dir(nvme_subsys) {
+        for entry in entries.flatten() {
+            let nqn_path = entry.path().join("subsysnqn");
+            if let Ok(nqn) = fs::read_to_string(&nqn_path) {
+                if nqn.trim() == target_nqn {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Check if a device is claimed by multipath and return the multipath device path.
 ///
 /// This checks if the raw device (e.g., /dev/sda, /dev/nvme0n1) is a slave
