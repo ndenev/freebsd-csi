@@ -314,11 +314,11 @@ pub fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
     ))
 }
 
-/// Disconnect from an iSCSI target.
-#[allow(dead_code)] // Platform API for future use
+/// Disconnect from an iSCSI target and clean up node database entries.
 pub fn disconnect_iscsi(target_iqn: &str) -> PlatformResult<()> {
     info!(target_iqn = %target_iqn, "Disconnecting from iSCSI target");
 
+    // Step 1: Logout from the target
     let output = Command::new("iscsiadm")
         .args(["-m", "node", "-T", target_iqn, "--logout"])
         .output()
@@ -329,16 +329,44 @@ pub fn disconnect_iscsi(target_iqn: &str) -> PlatformResult<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // Treat "not logged in" as success
-        if stderr.contains("No matching sessions") || stderr.contains("not logged in") {
-            warn!(target_iqn = %target_iqn, "iSCSI target was not logged in");
-            return Ok(());
+        // Treat "not logged in" as success - continue to cleanup
+        if !stderr.contains("No matching sessions") && !stderr.contains("not logged in") {
+            error!(stderr = %stderr, "iscsiadm logout failed");
+            return Err(Status::internal(format!(
+                "iscsiadm logout failed: {}",
+                stderr
+            )));
         }
-        error!(stderr = %stderr, "iscsiadm logout failed");
-        return Err(Status::internal(format!(
-            "iscsiadm logout failed: {}",
-            stderr
-        )));
+        debug!(target_iqn = %target_iqn, "iSCSI target was not logged in, continuing to cleanup");
+    }
+
+    // Step 2: Delete the node database entry to clean up /etc/iscsi/nodes/
+    let delete_output = Command::new("iscsiadm")
+        .args(["-m", "node", "-T", target_iqn, "-o", "delete"])
+        .output();
+
+    match delete_output {
+        Ok(output) if !output.status.success() => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Ignore "no records found" - target may not exist in database
+            if !stderr.contains("no records found") && !stderr.contains("No records found") {
+                warn!(
+                    stderr = %stderr,
+                    target_iqn = %target_iqn,
+                    "Failed to delete iSCSI node entry (non-fatal)"
+                );
+            }
+        }
+        Ok(_) => {
+            info!(target_iqn = %target_iqn, "Deleted iSCSI node database entry");
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                target_iqn = %target_iqn,
+                "Failed to execute iscsiadm delete (non-fatal)"
+            );
+        }
     }
 
     Ok(())
@@ -585,7 +613,6 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
 }
 
 /// Disconnect from an NVMeoF target.
-#[allow(dead_code)] // Platform API for future use
 pub fn disconnect_nvmeof(target_nqn: &str) -> PlatformResult<()> {
     info!(target_nqn = %target_nqn, "Disconnecting from NVMeoF target");
 

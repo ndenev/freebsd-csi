@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use tonic::{Request, Response, Status};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::csi;
 use crate::platform;
@@ -250,9 +250,23 @@ impl csi::node_server::Node for NodeService {
         // Unmount from staging path
         platform::unmount(staging_target_path)?;
 
-        // Note: We don't disconnect from iSCSI/NVMeoF here because
-        // the target information is not available in the unstage request.
-        // The disconnect should be handled by the controller when the volume is deleted.
+        // Disconnect from iSCSI/NVMeoF targets
+        // We derive the target names from the volume_id using the CSI naming convention.
+        // Since we don't know which protocol was used, we try both (they handle "not connected" gracefully).
+        let target_iqn = format!("iqn.2024-01.org.freebsd.csi:{}", volume_id);
+        let target_nqn = format!("nqn.2024-01.org.freebsd.csi:{}", volume_id);
+
+        // Try iSCSI disconnect (logs out and cleans up /etc/iscsi/nodes/)
+        if let Err(e) = platform::disconnect_iscsi(&target_iqn) {
+            // Log but don't fail - the volume may have been NVMeoF, not iSCSI
+            debug!(error = %e, target_iqn = %target_iqn, "iSCSI disconnect failed (may be NVMeoF volume)");
+        }
+
+        // Try NVMeoF disconnect
+        if let Err(e) = platform::disconnect_nvmeof(&target_nqn) {
+            // Log but don't fail - the volume may have been iSCSI, not NVMeoF
+            debug!(error = %e, target_nqn = %target_nqn, "NVMeoF disconnect failed (may be iSCSI volume)");
+        }
 
         info!(
             volume_id = %volume_id,
