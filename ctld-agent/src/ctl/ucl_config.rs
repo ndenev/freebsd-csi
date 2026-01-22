@@ -95,7 +95,7 @@ impl Lun {
     /// SCSI serial numbers are limited to 16 characters.
     /// Uses SHA-256 hash to ensure uniqueness across the full volume name.
     fn generate_serial(volume_name: &str) -> String {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
 
         let mut hasher = Sha256::new();
         hasher.update(volume_name.as_bytes());
@@ -518,15 +518,15 @@ mod tests {
         assert!(ucl.contains("path = \"/dev/zvol/tank/csi/vol1\";"));
         assert!(!ucl.contains("blocksize"));
         // Check for serial (SHA-256 hash, 16 hex chars)
-        assert!(ucl.contains("serial = \""), "UCL should contain serial field");
+        assert!(
+            ucl.contains("serial = \""),
+            "UCL should contain serial field"
+        );
         // Check for device-id
         assert!(ucl.contains("device-id = \"FreeBSD pvc-c2e56d00-9afa-42ec-9404-22e317aadd8f\";"));
 
-        let lun_with_bs = Lun::with_blocksize(
-            "/dev/zvol/tank/csi/vol1".to_string(),
-            "pvc-test",
-            4096,
-        );
+        let lun_with_bs =
+            Lun::with_blocksize("/dev/zvol/tank/csi/vol1".to_string(), "pvc-test", 4096);
         let ucl = lun_with_bs.to_ucl(0);
         assert!(ucl.contains("blocksize = 4096;"));
     }
@@ -536,12 +536,18 @@ mod tests {
         // Test PVC name with UUID - SHA-256 hash produces consistent output
         let serial = Lun::generate_serial("pvc-c2e56d00-9afa-42ec-9404-22e317aadd8f");
         assert_eq!(serial.len(), 16, "Serial must be 16 chars (SCSI limit)");
-        assert!(serial.chars().all(|c| c.is_ascii_hexdigit()), "Serial must be hex");
+        assert!(
+            serial.chars().all(|c| c.is_ascii_hexdigit()),
+            "Serial must be hex"
+        );
 
         // Test another PVC - must produce different serial
         let serial2 = Lun::generate_serial("pvc-5c1830ef-0beb-412d-8015-5a6a941b7390");
         assert_eq!(serial2.len(), 16);
-        assert_ne!(serial, serial2, "Different volumes must have different serials");
+        assert_ne!(
+            serial, serial2,
+            "Different volumes must have different serials"
+        );
 
         // Test non-PVC name - still works with hash
         let serial3 = Lun::generate_serial("my-volume");
@@ -573,7 +579,11 @@ mod tests {
         assert!(ucl.contains("lun 0 {"));
         assert!(ucl.contains("path = \"/dev/zvol/tank/csi/vol1\";"));
         assert!(ucl.contains("serial ="), "Missing serial in:\n{}", ucl);
-        assert!(ucl.contains("device-id ="), "Missing device-id in:\n{}", ucl);
+        assert!(
+            ucl.contains("device-id ="),
+            "Missing device-id in:\n{}",
+            ucl
+        );
     }
 
     #[test]
