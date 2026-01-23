@@ -688,21 +688,26 @@ impl csi::controller_server::Controller for ControllerService {
                 use csi::volume_capability::access_mode::Mode;
                 match Mode::try_from(access_mode.mode) {
                     Ok(Mode::SingleNodeWriter) => {
-                        // ReadWriteOnce - fully supported
+                        // ReadWriteOnce (RWO) - fully supported
                     }
                     Ok(Mode::SingleNodeReaderOnly) => {
                         // ReadOnlyOnce - supported
                     }
                     Ok(Mode::MultiNodeReaderOnly) => {
-                        // ReadOnlyMany - supported (iSCSI/NVMeoF allows multiple readers)
+                        // ReadOnlyMany (ROX) - supported (iSCSI/NVMeoF allows multiple readers)
                     }
                     Ok(Mode::MultiNodeSingleWriter) => {
-                        // ReadWriteOncePod - not supported (requires coordination)
-                        unsupported_reasons
-                            .push("MULTI_NODE_SINGLE_WRITER not supported".to_string());
+                        // Multiple nodes attached, single writer - useful for active-passive failover.
+                        // Supported for block volumes (application/SCSI PR handles coordination).
+                        if !is_block {
+                            unsupported_reasons.push(
+                                "MULTI_NODE_SINGLE_WRITER not supported for mount volumes"
+                                    .to_string(),
+                            );
+                        }
                     }
                     Ok(Mode::MultiNodeMultiWriter) => {
-                        // ReadWriteMany - supported for block volumes (application handles coordination),
+                        // ReadWriteMany (RWX) - supported for block volumes (application handles coordination),
                         // but not for mount volumes (standard filesystems can't handle concurrent writers)
                         if !is_block {
                             unsupported_reasons.push(
@@ -711,8 +716,12 @@ impl csi::controller_server::Controller for ControllerService {
                             );
                         }
                     }
-                    Ok(Mode::SingleNodeSingleWriter) | Ok(Mode::SingleNodeMultiWriter) => {
-                        // Alpha modes - treat as single node writer
+                    Ok(Mode::SingleNodeSingleWriter) => {
+                        // ReadWriteOncePod (RWOP) - GA in Kubernetes 1.29+
+                        // Kubernetes enforces single-pod constraint, driver just allows it
+                    }
+                    Ok(Mode::SingleNodeMultiWriter) => {
+                        // Single node, multiple writers - supported (same as RWO semantically)
                     }
                     Ok(Mode::Unknown) | Err(_) => {
                         unsupported_reasons
