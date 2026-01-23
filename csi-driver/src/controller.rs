@@ -321,9 +321,14 @@ impl ControllerService {
     ///
     /// `parameters` contains the original StorageClass parameters which may include
     /// portal addresses and filesystem type needed by the node service.
+    ///
+    /// `content_source` is the original request's volume_content_source, which must
+    /// be echoed back in the response when creating a volume from a snapshot or clone.
+    /// The CSI external-provisioner requires this field to properly bind the PV.
     fn agent_volume_to_csi(
         volume: &crate::agent::Volume,
         parameters: &HashMap<String, String>,
+        content_source: Option<csi::VolumeContentSource>,
     ) -> csi::Volume {
         let mut volume_context = HashMap::new();
         volume_context.insert("target_name".to_string(), volume.target_name.clone());
@@ -373,7 +378,7 @@ impl ControllerService {
             capacity_bytes: volume.size_bytes,
             volume_id: volume.id.clone(),
             volume_context,
-            content_source: None,
+            content_source,
             accessible_topology: vec![],
         }
     }
@@ -463,7 +468,11 @@ impl csi::controller_server::Controller for ControllerService {
 
         timer.success();
         Ok(Response::new(csi::CreateVolumeResponse {
-            volume: Some(Self::agent_volume_to_csi(&volume, &req.parameters)),
+            volume: Some(Self::agent_volume_to_csi(
+                &volume,
+                &req.parameters,
+                req.volume_content_source,
+            )),
         }))
     }
 
@@ -898,7 +907,8 @@ impl csi::controller_server::Controller for ControllerService {
         let entries: Vec<csi::list_volumes_response::Entry> = volumes
             .iter()
             .map(|v| {
-                let volume = Self::agent_volume_to_csi(v, &HashMap::new());
+                // ListVolumes doesn't have content_source info - pass None
+                let volume = Self::agent_volume_to_csi(v, &HashMap::new(), None);
                 csi::list_volumes_response::Entry {
                     volume: Some(volume),
                     status: None, // We don't track published nodes currently
