@@ -133,7 +133,7 @@ spec:
 - Snapshots and clones
 - iSCSI and NVMeoF export protocols
 - **CHAP authentication** for iSCSI (one-way and mutual)
-- **DH-HMAC-CHAP authentication** for NVMeoF (FreeBSD 15.0+)
+- Raw block volume support with ReadWriteMany
 - mTLS support for secure communication
 - Automatic recovery on restart
 - Prometheus metrics and Grafana dashboards
@@ -208,7 +208,7 @@ spec:
       storage: 10Gi
 ```
 
-For detailed configuration options including mutual CHAP and NVMeoF DH-HMAC-CHAP, see the [CHAP Authentication Setup Guide](docs/chap-setup.md).
+For detailed configuration options including mutual CHAP, see the [CHAP Authentication Setup Guide](docs/chap-setup.md).
 
 ## Monitoring
 

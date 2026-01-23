@@ -121,6 +121,121 @@ fn test_volume_access_modes() {
     assert_eq!(multi_multi_writer, 5);
 }
 
+// ============================================================================
+// Access Mode Validation Tests
+// ============================================================================
+
+/// Helper to check if an access mode is supported for a given access type
+fn is_access_mode_supported(mode: i32, is_block: bool) -> Result<(), String> {
+    use csi::volume_capability::access_mode::Mode;
+
+    match Mode::try_from(mode) {
+        Ok(Mode::SingleNodeWriter) => Ok(()), // RWO - always supported
+        Ok(Mode::SingleNodeReaderOnly) => Ok(()), // ROO - always supported
+        Ok(Mode::MultiNodeReaderOnly) => Ok(()), // ROX - always supported
+        Ok(Mode::MultiNodeSingleWriter) => {
+            // Active-passive failover - block only
+            if is_block {
+                Ok(())
+            } else {
+                Err("MULTI_NODE_SINGLE_WRITER not supported for mount volumes".to_string())
+            }
+        }
+        Ok(Mode::MultiNodeMultiWriter) => {
+            // RWX - block only (app handles coordination)
+            if is_block {
+                Ok(())
+            } else {
+                Err("MULTI_NODE_MULTI_WRITER not supported for mount volumes".to_string())
+            }
+        }
+        Ok(Mode::SingleNodeSingleWriter) => Ok(()), // RWOP - always supported
+        Ok(Mode::SingleNodeMultiWriter) => Ok(()), // Single node multi-writer - supported
+        Ok(Mode::Unknown) | Err(_) => Err(format!("Unknown access mode: {}", mode)),
+    }
+}
+
+/// Test: All access modes supported for block volumes
+#[test]
+fn test_block_volume_all_access_modes_supported() {
+    use csi::volume_capability::access_mode::Mode;
+
+    let is_block = true;
+
+    // All modes should be supported for block volumes
+    assert!(is_access_mode_supported(Mode::SingleNodeWriter as i32, is_block).is_ok());
+    assert!(is_access_mode_supported(Mode::SingleNodeReaderOnly as i32, is_block).is_ok());
+    assert!(is_access_mode_supported(Mode::MultiNodeReaderOnly as i32, is_block).is_ok());
+    assert!(is_access_mode_supported(Mode::MultiNodeSingleWriter as i32, is_block).is_ok());
+    assert!(is_access_mode_supported(Mode::MultiNodeMultiWriter as i32, is_block).is_ok());
+    assert!(is_access_mode_supported(Mode::SingleNodeSingleWriter as i32, is_block).is_ok());
+    assert!(is_access_mode_supported(Mode::SingleNodeMultiWriter as i32, is_block).is_ok());
+}
+
+/// Test: Mount volumes reject multi-node write modes
+#[test]
+fn test_mount_volume_rejects_multi_node_write_modes() {
+    use csi::volume_capability::access_mode::Mode;
+
+    let is_block = false; // mount volume
+
+    // These should be rejected for mount volumes
+    let rwx_result = is_access_mode_supported(Mode::MultiNodeMultiWriter as i32, is_block);
+    assert!(rwx_result.is_err());
+    assert!(rwx_result.unwrap_err().contains("MULTI_NODE_MULTI_WRITER"));
+
+    let mnsw_result = is_access_mode_supported(Mode::MultiNodeSingleWriter as i32, is_block);
+    assert!(mnsw_result.is_err());
+    assert!(mnsw_result.unwrap_err().contains("MULTI_NODE_SINGLE_WRITER"));
+}
+
+/// Test: Mount volumes support single-node and read-only modes
+#[test]
+fn test_mount_volume_supports_single_node_modes() {
+    use csi::volume_capability::access_mode::Mode;
+
+    let is_block = false; // mount volume
+
+    // These should be supported for mount volumes
+    assert!(is_access_mode_supported(Mode::SingleNodeWriter as i32, is_block).is_ok()); // RWO
+    assert!(is_access_mode_supported(Mode::SingleNodeReaderOnly as i32, is_block).is_ok()); // ROO
+    assert!(is_access_mode_supported(Mode::MultiNodeReaderOnly as i32, is_block).is_ok()); // ROX
+    assert!(is_access_mode_supported(Mode::SingleNodeSingleWriter as i32, is_block).is_ok()); // RWOP
+    assert!(is_access_mode_supported(Mode::SingleNodeMultiWriter as i32, is_block).is_ok());
+}
+
+/// Test: ReadWriteOncePod (RWOP) is supported for both block and mount
+#[test]
+fn test_rwop_supported_both_types() {
+    use csi::volume_capability::access_mode::Mode;
+
+    // RWOP (SINGLE_NODE_SINGLE_WRITER) should work for both
+    assert!(is_access_mode_supported(Mode::SingleNodeSingleWriter as i32, true).is_ok());
+    assert!(is_access_mode_supported(Mode::SingleNodeSingleWriter as i32, false).is_ok());
+}
+
+/// Test: ReadWriteMany (RWX) only supported for block volumes
+#[test]
+fn test_rwx_block_only() {
+    use csi::volume_capability::access_mode::Mode;
+
+    // RWX for block - OK (application handles coordination)
+    assert!(is_access_mode_supported(Mode::MultiNodeMultiWriter as i32, true).is_ok());
+
+    // RWX for mount - rejected (filesystem would corrupt)
+    let result = is_access_mode_supported(Mode::MultiNodeMultiWriter as i32, false);
+    assert!(result.is_err());
+}
+
+/// Test: Unknown access mode is rejected
+#[test]
+fn test_unknown_access_mode_rejected() {
+    // Mode 99 doesn't exist
+    let result = is_access_mode_supported(99, true);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("Unknown"));
+}
+
 /// Test volume size calculation with required bytes
 #[test]
 fn test_volume_size_required_bytes() {

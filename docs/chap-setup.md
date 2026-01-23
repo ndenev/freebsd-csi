@@ -9,9 +9,9 @@ This guide explains how to configure CHAP (Challenge-Handshake Authentication Pr
 - [Basic CHAP Setup](#basic-chap-setup)
 - [Mutual CHAP Setup](#mutual-chap-setup)
 - [Per-Volume Authentication](#per-volume-authentication)
-- [NVMeoF DH-HMAC-CHAP](#nvmeof-dh-hmac-chap)
 - [Security Best Practices](#security-best-practices)
 - [Troubleshooting](#troubleshooting)
+- [NVMeoF Authentication (Not Yet Supported)](#nvmeof-authentication-not-yet-supported)
 
 ---
 
@@ -219,43 +219,45 @@ csi.storage.k8s.io/node-stage-secret-namespace: app-a
 
 ---
 
-## NVMeoF DH-HMAC-CHAP
+## NVMeoF Authentication (Not Yet Supported)
 
-For NVMeoF (NVMe over Fabrics), FreeBSD 15.0+ supports DH-HMAC-CHAP authentication.
+> **⚠️ Important:** FreeBSD's ctld(8) does not currently support DH-HMAC-CHAP
+> authentication for NVMeoF. This section documents the planned feature for
+> when support is added.
 
-### Create NVMeoF Authentication Secret
+NVMeoF (NVMe over Fabrics) uses DH-HMAC-CHAP for authentication, which is
+different from iSCSI CHAP. As of FreeBSD 15.0, the ctld daemon does not
+implement this authentication mechanism for NVMeoF controllers.
+
+### Current Status
+
+- **iSCSI CHAP**: ✅ Fully supported
+- **NVMeoF DH-HMAC-CHAP**: ❌ Not supported by FreeBSD ctld
+
+### Workarounds
+
+For NVMeoF deployments requiring security:
+
+1. **Network isolation**: Use dedicated VLANs for storage traffic
+2. **Firewall rules**: Restrict NVMeoF port (4420) to known initiator IPs
+3. **mTLS**: Use the CSI driver's mTLS support for agent communication
+
+### Future Support
+
+When FreeBSD adds DH-HMAC-CHAP support to ctld, the CSI driver has
+placeholder code ready to enable it. The secret format will be:
 
 ```yaml
 apiVersion: v1
 kind: Secret
 metadata:
   name: nvme-auth-secret
-  namespace: default
 type: Opaque
 stringData:
-  # Host NQN (the initiator's NQN)
   nvme.host.nqn: "nqn.2024-01.org.kubernetes:node01"
-  # Pre-shared key (32+ characters recommended)
-  nvme.host.secret: "VeryLongSecretKeyForDHHMACCHAP32chars!"
-  # Hash function: sha256, sha384, or sha512
+  nvme.host.secret: "pre-shared-key"
   nvme.host.hash: "sha256"
-  # DH group (optional): ffdhe2048, ffdhe3072, ffdhe4096, ffdhe6144, ffdhe8192
   nvme.host.dhgroup: "ffdhe2048"
-```
-
-### StorageClass for Authenticated NVMeoF
-
-```yaml
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: freebsd-zfs-nvmeof-auth
-provisioner: csi.freebsd.org
-parameters:
-  exportType: nvmeof
-  portal: "192.168.1.100:4420"
-csi.storage.k8s.io/provisioner-secret-name: nvme-auth-secret
-csi.storage.k8s.io/provisioner-secret-namespace: default
 ```
 
 ---
@@ -411,13 +413,22 @@ kubectl -n freebsd-csi logs deploy/freebsd-csi-controller -c freebsd-csi-driver 
 
 ## Reference: CSI Secret Keys
 
+### iSCSI CHAP (Supported)
+
 | Key | Required | Description |
 |-----|----------|-------------|
 | `node.session.auth.username` | Yes | CHAP username for initiator |
 | `node.session.auth.password` | Yes | CHAP password for initiator |
 | `node.session.auth.username_in` | No | Mutual CHAP username for target |
 | `node.session.auth.password_in` | No | Mutual CHAP password for target |
-| `nvme.host.nqn` | NVMeoF only | Host NQN for NVMeoF auth |
-| `nvme.host.secret` | NVMeoF only | Pre-shared key for DH-HMAC-CHAP |
-| `nvme.host.hash` | NVMeoF only | Hash function (sha256/sha384/sha512) |
-| `nvme.host.dhgroup` | No | DH group for key exchange |
+
+### NVMeoF DH-HMAC-CHAP (Not Yet Supported)
+
+These keys are reserved for future use when FreeBSD ctld adds DH-HMAC-CHAP support:
+
+| Key | Description |
+|-----|-------------|
+| `nvme.host.nqn` | Host NQN for NVMeoF auth |
+| `nvme.host.secret` | Pre-shared key for DH-HMAC-CHAP |
+| `nvme.host.hash` | Hash function (sha256/sha384/sha512) |
+| `nvme.host.dhgroup` | DH group for key exchange |
