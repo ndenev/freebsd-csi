@@ -118,8 +118,12 @@ spec:
 
 ## Documentation
 
+- [Architecture Overview](docs/architecture.md) - System design and data flows
 - [Installation Guide](docs/installation.md) - Detailed setup instructions
 - [Configuration Reference](docs/configuration.md) - All configuration options
+- [CHAP Authentication Setup](docs/chap-setup.md) - iSCSI/NVMeoF authentication guide
+- [Metrics Reference](docs/metrics.md) - Prometheus metrics and Grafana dashboards
+- [Operations Runbook](docs/runbook.md) - Troubleshooting and recovery procedures
 - [Helm Chart README](charts/freebsd-csi/README.md) - Helm chart documentation
 
 ## Features
@@ -128,8 +132,11 @@ spec:
 - Volume expansion (online)
 - Snapshots and clones
 - iSCSI and NVMeoF export protocols
+- **CHAP authentication** for iSCSI (one-way and mutual)
+- **DH-HMAC-CHAP authentication** for NVMeoF (FreeBSD 15.0+)
 - mTLS support for secure communication
 - Automatic recovery on restart
+- Prometheus metrics and Grafana dashboards
 - RBAC-secured Kubernetes integration
 
 ## CSI Driver Name
@@ -144,6 +151,82 @@ csi.freebsd.org
 |------|-----------------|-------------|
 | `freebsd-zfs-iscsi` | iSCSI | ZFS volumes exported via iSCSI |
 | `freebsd-zfs-nvmeof` | NVMeoF | ZFS volumes exported via NVMe over Fabrics (FreeBSD 15.0+) |
+
+## Authentication
+
+The CSI driver supports CHAP authentication for iSCSI to secure access to storage volumes. Credentials are passed via Kubernetes Secrets using the standard CSI secrets mechanism.
+
+### Quick CHAP Setup
+
+1. **Create a Secret with CHAP credentials:**
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: iscsi-chap-secret
+  namespace: default
+type: Opaque
+stringData:
+  node.session.auth.username: "csi-initiator"
+  node.session.auth.password: "MySecurePassword123!"
+  # Optional: Mutual CHAP (target authenticates to initiator)
+  node.session.auth.username_in: "csi-target"
+  node.session.auth.password_in: "TargetPassword456!"
+```
+
+2. **Create a StorageClass referencing the secret:**
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: freebsd-zfs-iscsi-chap
+provisioner: csi.freebsd.org
+parameters:
+  exportType: iscsi
+  portal: "192.168.1.100:3260"
+csi.storage.k8s.io/provisioner-secret-name: iscsi-chap-secret
+csi.storage.k8s.io/provisioner-secret-namespace: default
+csi.storage.k8s.io/node-stage-secret-name: iscsi-chap-secret
+csi.storage.k8s.io/node-stage-secret-namespace: default
+```
+
+3. **Create a PVC using the authenticated StorageClass:**
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: secure-volume
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: freebsd-zfs-iscsi-chap
+  resources:
+    requests:
+      storage: 10Gi
+```
+
+For detailed configuration options including mutual CHAP and NVMeoF DH-HMAC-CHAP, see the [CHAP Authentication Setup Guide](docs/chap-setup.md).
+
+## Monitoring
+
+Enable Prometheus metrics by setting `metrics.enabled=true` in the Helm chart:
+
+```bash
+helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
+  --set metrics.enabled=true \
+  --set metrics.port=9090
+```
+
+Key metrics include:
+- `csi_operations_total{operation, status}` - CSI operation counts
+- `csi_operation_duration_seconds{operation}` - Operation latency histogram
+- `csi_agent_connected` - Agent connection status
+- `ctld_volumes_total` - Number of managed volumes
+
+For the complete metrics reference and Grafana dashboard examples, see [Metrics Reference](docs/metrics.md).
 
 ## Building from Source
 

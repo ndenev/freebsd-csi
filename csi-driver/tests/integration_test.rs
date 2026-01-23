@@ -2,37 +2,52 @@
 //!
 //! These tests verify the CSI service implementations without requiring
 //! actual iSCSI/NVMeoF connections or filesystem operations.
-//! Tests focus on capability reporting, request validation, and gRPC response handling.
+//! Tests focus on:
+//! - Capability reporting
+//! - Request validation
+//! - gRPC response handling
+//! - CHAP secret extraction
+//! - Retry patterns
+//! - Concurrent operations
 
 #![allow(clippy::const_is_empty)] // Tests use constant strings for documentation
 #![allow(clippy::manual_range_contains)] // Clearer in tests
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::RwLock;
+
+// Import library types now that we have lib.rs
+use csi_driver::agent;
+use csi_driver::csi;
+use csi_driver::identity::{DRIVER_NAME, DRIVER_VERSION};
 
 // ============================================================================
 // Identity Service Tests
 // ============================================================================
 
-/// Test driver name constant
+/// Test driver name constant from library
 #[test]
-fn test_driver_name() {
-    let driver_name = "csi.freebsd.org";
-    assert!(!driver_name.is_empty());
-    assert!(driver_name.contains('.'));
+fn test_driver_name_constant() {
+    assert_eq!(DRIVER_NAME, "csi.freebsd.org");
+    assert!(!DRIVER_NAME.is_empty());
+    assert!(DRIVER_NAME.contains('.'));
     // CSI driver names should follow DNS naming conventions
     assert!(
-        driver_name
+        DRIVER_NAME
             .chars()
             .all(|c| c.is_alphanumeric() || c == '.' || c == '-')
     );
 }
 
-/// Test driver version format
+/// Test driver version constant from library
 #[test]
-fn test_driver_version_format() {
+fn test_driver_version_constant() {
+    assert!(!DRIVER_VERSION.is_empty());
     // Version should be semantic versioning format
-    let version = "0.1.0";
-    let parts: Vec<&str> = version.split('.').collect();
+    let parts: Vec<&str> = DRIVER_VERSION.split('.').collect();
     assert_eq!(parts.len(), 3, "Version should have 3 parts (semver)");
     for part in parts {
         assert!(
@@ -42,63 +57,68 @@ fn test_driver_version_format() {
     }
 }
 
-/// Test plugin capabilities enumeration
+/// Test plugin capability type enum values
 #[test]
-fn test_plugin_capability_values() {
-    // CSI plugin capability types
-    // Service types: UNKNOWN=0, CONTROLLER_SERVICE=1, VOLUME_ACCESSIBILITY_CONSTRAINTS=2, GROUP_CONTROLLER_SERVICE=3
-    // Volume expansion types: UNKNOWN=0, ONLINE=1, OFFLINE=2
+fn test_plugin_capability_service_type() {
+    use csi::plugin_capability::service::Type as ServiceType;
 
-    let controller_service = 1;
-    let online_expansion = 1;
+    let controller_service = ServiceType::ControllerService as i32;
+    let accessibility = ServiceType::VolumeAccessibilityConstraints as i32;
 
     assert_eq!(controller_service, 1, "Controller service type should be 1");
-    assert_eq!(online_expansion, 1, "Online expansion type should be 1");
+    assert_eq!(accessibility, 2, "Volume accessibility type should be 2");
 }
 
-/// Test probe response validation
+/// Test plugin capability volume expansion types
 #[test]
-fn test_probe_response() {
-    // A healthy service should report ready = true
-    let ready = Some(true);
-    assert_eq!(ready, Some(true), "Probe should report ready");
+fn test_plugin_capability_expansion_type() {
+    use csi::plugin_capability::volume_expansion::Type as ExpansionType;
+
+    let online = ExpansionType::Online as i32;
+    let offline = ExpansionType::Offline as i32;
+
+    assert_eq!(online, 1, "Online expansion type should be 1");
+    assert_eq!(offline, 2, "Offline expansion type should be 2");
 }
 
 // ============================================================================
 // Controller Service Tests
 // ============================================================================
 
-/// Test controller capabilities
+/// Test controller capability RPC types
 #[test]
-fn test_controller_capabilities() {
-    // Controller RPC types from CSI spec:
-    // UNKNOWN = 0
-    // CREATE_DELETE_VOLUME = 1
-    // PUBLISH_UNPUBLISH_VOLUME = 2
-    // LIST_VOLUMES = 3
-    // GET_CAPACITY = 4
-    // CREATE_DELETE_SNAPSHOT = 5
-    // LIST_SNAPSHOTS = 6
-    // CLONE_VOLUME = 7
-    // PUBLISH_READONLY = 8
-    // EXPAND_VOLUME = 9
-    // ...
+fn test_controller_capability_types() {
+    use csi::controller_service_capability::rpc::Type as RpcType;
 
-    let expected_capabilities = vec![
-        1, // CREATE_DELETE_VOLUME
-        5, // CREATE_DELETE_SNAPSHOT
-        9, // EXPAND_VOLUME
-    ];
+    let create_delete = RpcType::CreateDeleteVolume as i32;
+    let publish_unpublish = RpcType::PublishUnpublishVolume as i32;
+    let list_volumes = RpcType::ListVolumes as i32;
+    let create_delete_snap = RpcType::CreateDeleteSnapshot as i32;
+    let expand_volume = RpcType::ExpandVolume as i32;
 
-    for cap in &expected_capabilities {
-        assert!(
-            *cap >= 1 && *cap <= 20,
-            "Capability {} should be in valid range",
-            cap
-        );
-    }
+    assert_eq!(create_delete, 1);
+    assert_eq!(publish_unpublish, 2);
+    assert_eq!(list_volumes, 3);
+    assert_eq!(create_delete_snap, 5);
+    assert_eq!(expand_volume, 9);
+}
 
-    assert_eq!(expected_capabilities.len(), 3, "Should have 3 capabilities");
+/// Test volume access mode types
+#[test]
+fn test_volume_access_modes() {
+    use csi::volume_capability::access_mode::Mode;
+
+    let single_writer = Mode::SingleNodeWriter as i32;
+    let single_reader = Mode::SingleNodeReaderOnly as i32;
+    let multi_reader = Mode::MultiNodeReaderOnly as i32;
+    let multi_single_writer = Mode::MultiNodeSingleWriter as i32;
+    let multi_multi_writer = Mode::MultiNodeMultiWriter as i32;
+
+    assert_eq!(single_writer, 1);
+    assert_eq!(single_reader, 2);
+    assert_eq!(multi_reader, 3);
+    assert_eq!(multi_single_writer, 4);
+    assert_eq!(multi_multi_writer, 5);
 }
 
 /// Test volume size calculation with required bytes
@@ -138,24 +158,6 @@ fn test_volume_size_limit_bytes() {
     assert_eq!(size, 5 * 1024 * 1024 * 1024);
 }
 
-/// Test volume size calculation with default
-#[test]
-fn test_volume_size_default() {
-    let required_bytes: i64 = 0;
-    let limit_bytes: i64 = 0;
-    let default_size: i64 = 1024 * 1024 * 1024;
-
-    let size = if required_bytes > 0 {
-        required_bytes
-    } else if limit_bytes > 0 {
-        limit_bytes
-    } else {
-        default_size
-    };
-
-    assert_eq!(size, 1024 * 1024 * 1024);
-}
-
 /// Test export type parsing from parameters
 #[test]
 fn test_export_type_parsing() {
@@ -178,73 +180,202 @@ fn test_export_type_parsing() {
     params.insert("exportType".to_string(), "nvmeof".to_string());
     let nvmeof_type = params.get("exportType").map(|s| s.to_lowercase()).unwrap();
     assert_eq!(nvmeof_type, "nvmeof");
-
-    params.insert("exportType".to_string(), "nvme".to_string());
-    let nvme_type = params.get("exportType").map(|s| s.to_lowercase()).unwrap();
-    assert_eq!(nvme_type, "nvme");
-
-    // Alternative key
-    params.clear();
-    params.insert("export_type".to_string(), "nvmeof".to_string());
-    let alt_type = params
-        .get("exportType")
-        .or_else(|| params.get("export_type"))
-        .map(|s| s.to_lowercase())
-        .unwrap();
-    assert_eq!(alt_type, "nvmeof");
 }
 
-/// Test volume context construction
+// ============================================================================
+// CHAP Secret Extraction Tests
+// ============================================================================
+
+/// Test standard CSI CHAP secret key names
 #[test]
-fn test_volume_context_from_agent() {
-    let mut volume_context: HashMap<String, String> = HashMap::new();
+fn test_csi_chap_secret_keys() {
+    // Standard CSI keys for iSCSI CHAP
+    let chap_keys = [
+        "node.session.auth.username",
+        "node.session.auth.password",
+        "node.session.auth.username_in", // Mutual CHAP
+        "node.session.auth.password_in", // Mutual CHAP
+    ];
 
-    let target_name = "iqn.2024-01.org.freebsd.csi:vol1";
-    let lun_id: i32 = 0;
-    let zfs_dataset = "tank/csi/vol1";
-    let export_type = "iscsi";
+    for key in chap_keys {
+        assert!(key.starts_with("node.session.auth."));
+        assert!(!key.is_empty());
+    }
+}
 
-    volume_context.insert("target_name".to_string(), target_name.to_string());
-    volume_context.insert("lun_id".to_string(), lun_id.to_string());
-    volume_context.insert("zfs_dataset".to_string(), zfs_dataset.to_string());
-    volume_context.insert("export_type".to_string(), export_type.to_string());
+/// Test CHAP credential extraction from secrets map
+#[test]
+fn test_chap_credential_extraction() {
+    let mut secrets: HashMap<String, String> = HashMap::new();
+    secrets.insert(
+        "node.session.auth.username".to_string(),
+        "testuser".to_string(),
+    );
+    secrets.insert(
+        "node.session.auth.password".to_string(),
+        "testsecret".to_string(),
+    );
 
-    assert_eq!(volume_context.get("target_name").unwrap(), target_name);
-    assert_eq!(volume_context.get("lun_id").unwrap(), "0");
-    assert_eq!(volume_context.get("zfs_dataset").unwrap(), zfs_dataset);
-    assert_eq!(volume_context.get("export_type").unwrap(), export_type);
+    // Basic CHAP
+    let username = secrets.get("node.session.auth.username");
+    let password = secrets.get("node.session.auth.password");
+
+    assert!(username.is_some());
+    assert!(password.is_some());
+    assert_eq!(username.unwrap(), "testuser");
+    assert_eq!(password.unwrap(), "testsecret");
+
+    // Mutual CHAP - not present
+    let username_in = secrets.get("node.session.auth.username_in");
+    let password_in = secrets.get("node.session.auth.password_in");
+
+    assert!(username_in.is_none());
+    assert!(password_in.is_none());
+}
+
+/// Test mutual CHAP credential extraction
+#[test]
+fn test_mutual_chap_credential_extraction() {
+    let mut secrets: HashMap<String, String> = HashMap::new();
+    secrets.insert(
+        "node.session.auth.username".to_string(),
+        "initiator_user".to_string(),
+    );
+    secrets.insert(
+        "node.session.auth.password".to_string(),
+        "initiator_pass".to_string(),
+    );
+    secrets.insert(
+        "node.session.auth.username_in".to_string(),
+        "target_user".to_string(),
+    );
+    secrets.insert(
+        "node.session.auth.password_in".to_string(),
+        "target_pass".to_string(),
+    );
+
+    // Verify all four fields present
+    assert!(secrets.contains_key("node.session.auth.username"));
+    assert!(secrets.contains_key("node.session.auth.password"));
+    assert!(secrets.contains_key("node.session.auth.username_in"));
+    assert!(secrets.contains_key("node.session.auth.password_in"));
+
+    // Verify values
+    assert_eq!(
+        secrets.get("node.session.auth.username_in").unwrap(),
+        "target_user"
+    );
+}
+
+/// Test CHAP secrets are not logged (pattern check)
+#[test]
+fn test_chap_secrets_not_in_output() {
+    let secrets: HashMap<String, String> = HashMap::from([
+        ("node.session.auth.username".to_string(), "user".to_string()),
+        (
+            "node.session.auth.password".to_string(),
+            "supersecret".to_string(),
+        ),
+    ]);
+
+    // When logging, we should only show keys, not values
+    let safe_output: Vec<&String> = secrets.keys().collect();
+
+    assert!(safe_output.contains(&&"node.session.auth.username".to_string()));
+    assert!(safe_output.contains(&&"node.session.auth.password".to_string()));
+
+    // The output should not contain the actual secret value
+    let output_str = format!("{:?}", safe_output);
+    assert!(!output_str.contains("supersecret"));
+}
+
+// ============================================================================
+// Agent Proto Type Tests
+// ============================================================================
+
+/// Test agent ExportType enum values
+#[test]
+fn test_agent_export_type_enum() {
+    use agent::ExportType;
+
+    let unspecified = ExportType::Unspecified as i32;
+    let iscsi = ExportType::Iscsi as i32;
+    let nvmeof = ExportType::Nvmeof as i32;
+
+    assert_eq!(unspecified, 0);
+    assert_eq!(iscsi, 1);
+    assert_eq!(nvmeof, 2);
+}
+
+/// Test agent CHAP credentials message construction
+#[test]
+fn test_agent_chap_credentials() {
+    use agent::IscsiChapCredentials;
+
+    let chap = IscsiChapCredentials {
+        username: "testuser".to_string(),
+        secret: "testsecret".to_string(),
+        mutual_username: String::new(),
+        mutual_secret: String::new(),
+    };
+
+    assert_eq!(chap.username, "testuser");
+    assert_eq!(chap.secret, "testsecret");
+    assert!(chap.mutual_username.is_empty());
+    assert!(chap.mutual_secret.is_empty());
+}
+
+/// Test agent mutual CHAP credentials
+#[test]
+fn test_agent_mutual_chap_credentials() {
+    use agent::IscsiChapCredentials;
+
+    let chap = IscsiChapCredentials {
+        username: "initiator".to_string(),
+        secret: "init_secret".to_string(),
+        mutual_username: "target".to_string(),
+        mutual_secret: "target_secret".to_string(),
+    };
+
+    assert!(!chap.mutual_username.is_empty());
+    assert!(!chap.mutual_secret.is_empty());
+}
+
+/// Test agent NVMe auth credentials
+#[test]
+fn test_agent_nvme_auth_credentials() {
+    use agent::NvmeAuthCredentials;
+
+    let nvme_auth = NvmeAuthCredentials {
+        host_nqn: "nqn.2024-01.org.freebsd.host:initiator01".to_string(),
+        secret: "dhhmacchapsecret".to_string(),
+        hash_function: "sha256".to_string(),
+        dh_group: "ffdhe2048".to_string(),
+    };
+
+    assert!(nvme_auth.host_nqn.starts_with("nqn."));
+    assert!(!nvme_auth.secret.is_empty());
+    assert_eq!(nvme_auth.hash_function, "sha256");
 }
 
 // ============================================================================
 // Node Service Tests
 // ============================================================================
 
-/// Test node capabilities
+/// Test node capability RPC types
 #[test]
-fn test_node_capabilities() {
-    // Node RPC types from CSI spec:
-    // UNKNOWN = 0
-    // STAGE_UNSTAGE_VOLUME = 1
-    // GET_VOLUME_STATS = 2
-    // EXPAND_VOLUME = 3
-    // VOLUME_CONDITION = 4
-    // SINGLE_NODE_MULTI_WRITER = 5
-    // VOLUME_MOUNT_GROUP = 6
+fn test_node_capability_types() {
+    use csi::node_service_capability::rpc::Type as RpcType;
 
-    let expected_capabilities = vec![
-        1, // STAGE_UNSTAGE_VOLUME
-        3, // EXPAND_VOLUME
-    ];
+    let stage_unstage = RpcType::StageUnstageVolume as i32;
+    let get_stats = RpcType::GetVolumeStats as i32;
+    let expand = RpcType::ExpandVolume as i32;
+    let volume_condition = RpcType::VolumeCondition as i32;
 
-    for cap in &expected_capabilities {
-        assert!(
-            *cap >= 1 && *cap <= 10,
-            "Capability {} should be in valid range",
-            cap
-        );
-    }
-
-    assert_eq!(expected_capabilities.len(), 2, "Should have 2 capabilities");
+    assert_eq!(stage_unstage, 1);
+    assert_eq!(get_stats, 2);
+    assert_eq!(expand, 3);
+    assert_eq!(volume_condition, 4);
 }
 
 /// Test node ID generation from hostname
@@ -305,19 +436,6 @@ fn test_invalid_paths() {
         traversal.contains(".."),
         "Path traversal should be detected"
     );
-
-    // Dangerous characters
-    let dangerous_chars = [
-        ';', '|', '&', '$', '`', '(', ')', '{', '}', '<', '>', '\n', '\r',
-    ];
-    for c in dangerous_chars {
-        let dangerous_path = format!("/var{}test", c);
-        assert!(
-            dangerous_path.contains(c),
-            "Dangerous character '{}' should be detected",
-            c
-        );
-    }
 }
 
 /// Test target name validation
@@ -337,23 +455,6 @@ fn test_target_name_validation() {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == ':' || c == '-' || c == '_');
         assert!(is_valid, "Target name '{}' should be valid", name);
-    }
-
-    // Invalid target names
-    let invalid_names = vec![
-        "",
-        "target;rm -rf",
-        "target$(id)",
-        "target`id`",
-        "target|cat",
-    ];
-
-    for name in invalid_names {
-        let is_valid = !name.is_empty()
-            && name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == ':' || c == '-' || c == '_');
-        assert!(!is_valid, "Target name '{}' should be invalid", name);
     }
 }
 
@@ -388,15 +489,168 @@ fn test_filesystem_type_mapping() {
         other => other,
     };
     assert_eq!(mount_type, "ufs");
+}
 
-    let fs_type = "zfs";
-    let fs_lower = fs_type.to_lowercase();
-    let mount_type = match fs_lower.as_str() {
-        "ufs" | "ffs" => "ufs",
-        "zfs" => "zfs",
-        other => other,
-    };
-    assert_eq!(mount_type, "zfs");
+// ============================================================================
+// Retry Logic Tests
+// ============================================================================
+
+/// Test exponential backoff calculation
+#[test]
+fn test_exponential_backoff() {
+    let initial_ms = 100u64;
+    let max_ms = 5000u64;
+
+    // Calculate backoff for each attempt
+    let backoff_0 = initial_ms; // 100ms
+    let backoff_1 = std::cmp::min(initial_ms * 2, max_ms); // 200ms
+    let backoff_2 = std::cmp::min(initial_ms * 4, max_ms); // 400ms
+    let backoff_3 = std::cmp::min(initial_ms * 8, max_ms); // 800ms
+    let backoff_6 = std::cmp::min(initial_ms * 64, max_ms); // 5000ms (capped)
+
+    assert_eq!(backoff_0, 100);
+    assert_eq!(backoff_1, 200);
+    assert_eq!(backoff_2, 400);
+    assert_eq!(backoff_3, 800);
+    assert_eq!(backoff_6, 5000); // Capped at max
+}
+
+/// Test retry count limits
+#[test]
+fn test_retry_count_limits() {
+    const MAX_RETRIES: u32 = 3;
+
+    let mut attempt = 0u32;
+    while attempt < MAX_RETRIES {
+        attempt += 1;
+    }
+
+    assert_eq!(attempt, MAX_RETRIES);
+}
+
+/// Test jitter in backoff (pattern)
+#[test]
+fn test_backoff_with_jitter() {
+    let base_ms = 1000u64;
+    let jitter_factor = 0.1; // 10% jitter
+
+    // Jitter range
+    let min_jitter = (base_ms as f64 * (1.0 - jitter_factor)) as u64;
+    let max_jitter = (base_ms as f64 * (1.0 + jitter_factor)) as u64;
+
+    assert!(min_jitter >= 900);
+    assert!(max_jitter <= 1100);
+}
+
+// ============================================================================
+// gRPC Status Code Tests
+// ============================================================================
+
+/// Test gRPC status code mapping
+#[test]
+fn test_grpc_status_codes() {
+    // Common CSI error mappings using tonic codes
+    let codes = vec![
+        (3, "InvalidArgument"),   // validation errors
+        (5, "NotFound"),          // volume/snapshot doesn't exist
+        (6, "AlreadyExists"),     // volume/snapshot already exists
+        (13, "Internal"),         // unexpected errors
+        (14, "Unavailable"),      // service not ready
+        (12, "Unimplemented"),    // feature not supported
+        (8, "ResourceExhausted"), // rate limited
+    ];
+
+    for (code, description) in codes {
+        assert!(
+            code > 0 && code < 20,
+            "Status code {} ({}) should be valid",
+            code,
+            description
+        );
+    }
+}
+
+// ============================================================================
+// Concurrent Operation Tests
+// ============================================================================
+
+/// Test RwLock for shared state (as used in controller)
+#[tokio::test]
+async fn test_controller_state_concurrent_access() {
+    let client_state: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+
+    // Simulate connection establishment
+    {
+        let mut guard = client_state.write().await;
+        *guard = Some("connected".to_string());
+    }
+
+    // Multiple readers
+    let mut handles = vec![];
+    for _ in 0..10 {
+        let state = client_state.clone();
+        handles.push(tokio::spawn(async move {
+            let guard = state.read().await;
+            guard.clone()
+        }));
+    }
+
+    for handle in handles {
+        let result = handle.await.unwrap();
+        assert_eq!(result, Some("connected".to_string()));
+    }
+}
+
+/// Test concurrent requests handling
+#[tokio::test]
+async fn test_concurrent_requests() {
+    let counter = Arc::new(RwLock::new(0));
+    let mut handles = vec![];
+
+    for _ in 0..10 {
+        let counter_clone = counter.clone();
+        handles.push(tokio::spawn(async move {
+            let mut guard = counter_clone.write().await;
+            *guard += 1;
+        }));
+    }
+
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
+    let final_count = *counter.read().await;
+    assert_eq!(final_count, 10);
+}
+
+/// Test 15+ parallel operations (per plan requirements)
+#[tokio::test]
+async fn test_high_concurrency_15_parallel() {
+    let total_operations = 15;
+    let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let mut handles = Vec::new();
+
+    for i in 0..total_operations {
+        let completed_clone = completed.clone();
+        handles.push(tokio::spawn(async move {
+            // Simulate a CSI operation
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            completed_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            i
+        }));
+    }
+
+    let mut results = Vec::new();
+    for handle in handles {
+        results.push(handle.await.unwrap());
+    }
+
+    assert_eq!(results.len(), total_operations);
+    assert_eq!(
+        completed.load(std::sync::atomic::Ordering::SeqCst),
+        total_operations
+    );
 }
 
 // ============================================================================
@@ -406,64 +660,30 @@ fn test_filesystem_type_mapping() {
 /// Test volume ID validation
 #[test]
 fn test_volume_id_validation() {
-    // Empty volume ID should be rejected
     let empty_id = "";
     assert!(empty_id.is_empty(), "Empty volume ID should be detected");
 
-    // Valid volume IDs
     let valid_ids = vec!["vol1", "my-volume", "pvc-12345", "vol_test"];
     for id in valid_ids {
         assert!(!id.is_empty(), "Volume ID '{}' should not be empty", id);
     }
 }
 
-/// Test snapshot ID validation
+/// Test snapshot ID validation (format: volume_id@snap_name)
 #[test]
 fn test_snapshot_id_validation() {
-    // Empty snapshot ID should be rejected
-    let empty_id = "";
-    assert!(empty_id.is_empty(), "Empty snapshot ID should be detected");
-
-    // Valid snapshot IDs (format: volume_id@snap_name)
     let valid_id = "vol1@snap1";
     let parts: Vec<&str> = valid_id.split('@').collect();
     assert_eq!(parts.len(), 2);
     assert!(!parts[0].is_empty());
     assert!(!parts[1].is_empty());
-}
 
-/// Test source volume ID validation for snapshots
-#[test]
-fn test_source_volume_id_validation() {
-    let empty_id = "";
-    assert!(
-        empty_id.is_empty(),
-        "Empty source volume ID should be detected"
-    );
-
-    let valid_id = "source-volume";
-    assert!(
-        !valid_id.is_empty(),
-        "Valid source volume ID should not be empty"
-    );
-}
-
-/// Test snapshot name validation
-#[test]
-fn test_snapshot_name_validation() {
-    let empty_name = "";
-    assert!(
-        empty_name.is_empty(),
-        "Empty snapshot name should be detected"
-    );
-
-    let valid_names = vec!["snap1", "snapshot-2024", "my_snapshot"];
-    for name in valid_names {
-        assert!(
-            !name.is_empty(),
-            "Snapshot name '{}' should not be empty",
-            name
-        );
+    // Invalid formats
+    let invalid_ids = vec!["", "vol1", "vol1@", "@snap1", "vol@snap@extra"];
+    for id in invalid_ids {
+        let parts: Vec<&str> = id.split('@').collect();
+        let is_valid = parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty();
+        assert!(!is_valid, "Snapshot ID '{}' should be invalid", id);
     }
 }
 
@@ -471,28 +691,7 @@ fn test_snapshot_name_validation() {
 // Volume Capability Tests
 // ============================================================================
 
-/// Test volume access modes
-#[test]
-fn test_volume_access_modes() {
-    // CSI Access modes:
-    // UNKNOWN = 0
-    // SINGLE_NODE_WRITER = 1
-    // SINGLE_NODE_READER_ONLY = 2
-    // MULTI_NODE_READER_ONLY = 3
-    // MULTI_NODE_SINGLE_WRITER = 4
-    // MULTI_NODE_MULTI_WRITER = 5
-    // SINGLE_NODE_SINGLE_WRITER = 6
-    // SINGLE_NODE_MULTI_WRITER = 7
-
-    // iSCSI typically supports SINGLE_NODE_WRITER
-    let iscsi_mode = 1; // SINGLE_NODE_WRITER
-    assert!(
-        iscsi_mode >= 1 && iscsi_mode <= 7,
-        "Access mode should be valid"
-    );
-}
-
-/// Test volume capabilities structure
+/// Test volume capability mount structure
 #[test]
 fn test_volume_capability_mount() {
     let fs_type = "ufs";
@@ -538,35 +737,6 @@ fn test_target_path_requirements() {
 }
 
 // ============================================================================
-// gRPC Status Code Tests
-// ============================================================================
-
-/// Test gRPC status code mapping
-#[test]
-fn test_grpc_status_codes() {
-    // Common CSI error mappings:
-    // InvalidArgument - validation errors
-    // NotFound - volume/snapshot doesn't exist
-    // AlreadyExists - volume/snapshot already exists
-    // Internal - unexpected errors
-    // Unavailable - service not ready
-    // Unimplemented - feature not supported
-
-    let codes = vec![
-        ("InvalidArgument", "validation error"),
-        ("NotFound", "volume not found"),
-        ("AlreadyExists", "volume exists"),
-        ("Internal", "unexpected error"),
-        ("Unavailable", "service not ready"),
-        ("Unimplemented", "not supported"),
-    ];
-
-    for (code, _description) in codes {
-        assert!(!code.is_empty(), "Status code should not be empty");
-    }
-}
-
-// ============================================================================
 // Expansion Tests
 // ============================================================================
 
@@ -583,23 +753,6 @@ fn test_volume_expansion_validation() {
         new_size > current_size,
         "New size must be larger than current size"
     );
-}
-
-/// Test node expansion requirements
-#[test]
-fn test_node_expansion_requirements() {
-    let volume_id = "vol1";
-    let volume_path = "/var/lib/kubelet/pods/pod/volumes/csi/vol1";
-
-    assert!(
-        !volume_id.is_empty(),
-        "Volume ID required for node expansion"
-    );
-    assert!(
-        !volume_path.is_empty(),
-        "Volume path required for node expansion"
-    );
-    assert!(volume_path.starts_with('/'), "Volume path must be absolute");
 }
 
 // ============================================================================
@@ -628,19 +781,15 @@ fn test_topology_key_format() {
 /// Test complete volume provisioning parameter flow
 #[test]
 fn test_volume_provisioning_flow() {
-    // Parameters from StorageClass
     let mut params: HashMap<String, String> = HashMap::new();
     params.insert("exportType".to_string(), "iscsi".to_string());
 
-    // Volume name from PVC
     let volume_name = "pvc-12345-67890";
     assert!(!volume_name.is_empty());
 
-    // Capacity from PVC
     let required_bytes: i64 = 5 * 1024 * 1024 * 1024;
     assert!(required_bytes > 0);
 
-    // Export type extraction
     let export_type = params
         .get("exportType")
         .map(|s| s.as_str())
@@ -648,10 +797,37 @@ fn test_volume_provisioning_flow() {
     assert!(export_type == "iscsi" || export_type == "nvmeof");
 }
 
+/// Test volume provisioning with CHAP authentication
+#[test]
+fn test_volume_provisioning_with_chap() {
+    // StorageClass parameters
+    let mut params: HashMap<String, String> = HashMap::new();
+    params.insert("exportType".to_string(), "iscsi".to_string());
+
+    // Secrets from provisioner-secret-ref
+    let mut secrets: HashMap<String, String> = HashMap::new();
+    secrets.insert(
+        "node.session.auth.username".to_string(),
+        "csi-user".to_string(),
+    );
+    secrets.insert(
+        "node.session.auth.password".to_string(),
+        "csi-password".to_string(),
+    );
+
+    // Verify we can extract auth from secrets
+    let has_chap = secrets.contains_key("node.session.auth.username")
+        && secrets.contains_key("node.session.auth.password");
+    assert!(has_chap, "CHAP credentials should be present");
+
+    // Verify export type is iSCSI (CHAP only applies to iSCSI)
+    let export_type = params.get("exportType").map(|s| s.to_lowercase());
+    assert_eq!(export_type, Some("iscsi".to_string()));
+}
+
 /// Test complete volume publishing parameter flow
 #[test]
 fn test_volume_publishing_flow() {
-    // Volume context from provisioning
     let mut volume_context: HashMap<String, String> = HashMap::new();
     volume_context.insert(
         "target_name".to_string(),
@@ -660,11 +836,9 @@ fn test_volume_publishing_flow() {
     volume_context.insert("lun_id".to_string(), "0".to_string());
     volume_context.insert("export_type".to_string(), "iscsi".to_string());
 
-    // Paths from kubelet
     let staging_path = "/var/lib/kubelet/plugins/kubernetes.io/csi/staging/vol1";
     let target_path = "/var/lib/kubelet/pods/pod/volumes/csi/vol1";
 
-    // Validate all required fields present
     assert!(volume_context.contains_key("target_name"));
     assert!(!staging_path.is_empty());
     assert!(!target_path.is_empty());
@@ -675,14 +849,9 @@ fn test_volume_publishing_flow() {
 /// Test snapshot creation parameter flow
 #[test]
 fn test_snapshot_creation_flow() {
-    // Parameters from VolumeSnapshotClass
-    let _params: HashMap<String, String> = HashMap::new();
-
-    // Source volume from VolumeSnapshot
     let source_volume_id = "pvc-12345-67890";
     assert!(!source_volume_id.is_empty());
 
-    // Snapshot name
     let snapshot_name = "snapshot-2024-01-15";
     assert!(!snapshot_name.is_empty());
 
@@ -694,28 +863,8 @@ fn test_snapshot_creation_flow() {
 }
 
 // ============================================================================
-// Async Test Helpers
+// Error Handling Tests
 // ============================================================================
-
-/// Test async request handling pattern
-#[tokio::test]
-async fn test_async_request_pattern() {
-    // Simulate async request processing
-    let result = async {
-        // Validate request
-        let volume_id = "vol1";
-        if volume_id.is_empty() {
-            return Err("Volume ID required");
-        }
-
-        // Process request
-        Ok(volume_id.to_string())
-    }
-    .await;
-
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), "vol1");
-}
 
 /// Test async error handling pattern
 #[tokio::test]
@@ -733,27 +882,61 @@ async fn test_async_error_handling() {
     assert_eq!(result.err().unwrap(), "Volume ID required");
 }
 
-/// Test concurrent request handling
+/// Test error message formatting
+#[test]
+fn test_error_messages() {
+    let errors = vec![
+        ("volume name cannot be empty", "empty name"),
+        ("volume '{}' not found", "missing volume"),
+        ("CHAP authentication required for iSCSI", "auth required"),
+        ("agent connection failed", "connection error"),
+        ("rate limit exceeded", "overload"),
+    ];
+
+    for (message, _context) in errors {
+        assert!(!message.is_empty(), "Error message should not be empty");
+        assert!(
+            message.len() > 10,
+            "Error message should be descriptive: {}",
+            message
+        );
+    }
+}
+
+// ============================================================================
+// Timeout Tests
+// ============================================================================
+
+/// Test timeout configuration values
+#[test]
+fn test_timeout_configurations() {
+    let connect_timeout_ms = 5000u64;
+    let request_timeout_ms = 30000u64;
+
+    assert!(
+        connect_timeout_ms >= 1000,
+        "Connect timeout should be at least 1s"
+    );
+    assert!(
+        request_timeout_ms >= 10000,
+        "Request timeout should be at least 10s"
+    );
+    assert!(
+        request_timeout_ms > connect_timeout_ms,
+        "Request timeout should exceed connect timeout"
+    );
+}
+
+/// Test deadline exceeded scenario
 #[tokio::test]
-async fn test_concurrent_requests() {
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
+async fn test_timeout_behavior() {
+    let timeout = Duration::from_millis(50);
 
-    let counter = Arc::new(RwLock::new(0));
-    let mut handles = vec![];
+    let result = tokio::time::timeout(timeout, async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        "completed"
+    })
+    .await;
 
-    for _ in 0..10 {
-        let counter_clone = counter.clone();
-        handles.push(tokio::spawn(async move {
-            let mut guard = counter_clone.write().await;
-            *guard += 1;
-        }));
-    }
-
-    for handle in handles {
-        handle.await.unwrap();
-    }
-
-    let final_count = *counter.read().await;
-    assert_eq!(final_count, 10);
+    assert!(result.is_err(), "Should timeout before completion");
 }

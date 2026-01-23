@@ -58,6 +58,15 @@ pub struct Dataset {
     pub volsize: Option<u64>,
 }
 
+/// Capacity information for the ZFS storage pool/dataset
+#[derive(Debug, Clone)]
+pub struct Capacity {
+    /// Available space in bytes
+    pub available: u64,
+    /// Used space in bytes
+    pub used: u64,
+}
+
 /// Manager for ZFS operations under a parent dataset
 pub struct ZfsManager {
     /// Parent dataset under which all volumes are created
@@ -412,6 +421,63 @@ impl ZfsManager {
 
         info!(count = results.len(), "Volume scan complete");
         Ok(results)
+    }
+
+    /// Get capacity information for the parent dataset.
+    ///
+    /// Returns available and used space for the dataset that holds CSI volumes.
+    #[instrument(skip(self))]
+    pub fn get_capacity(&self) -> Result<Capacity> {
+        debug!(dataset = %self.parent_dataset, "Getting capacity");
+
+        let output = Command::new("zfs")
+            .args([
+                "list",
+                "-H",
+                "-p", // Machine-parseable output (bytes)
+                "-o",
+                "available,used",
+                &self.parent_dataset,
+            ])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("does not exist") || stderr.contains("not found") {
+                return Err(ZfsError::DatasetNotFound(self.parent_dataset.clone()));
+            }
+            return Err(ZfsError::CommandFailed(format!(
+                "failed to get capacity: {}",
+                stderr
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let line = stdout
+            .lines()
+            .next()
+            .ok_or_else(|| ZfsError::ParseError("empty output from zfs list".to_string()))?;
+
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 2 {
+            return Err(ZfsError::ParseError(format!(
+                "expected 2 fields for capacity, got {}: {}",
+                fields.len(),
+                line
+            )));
+        }
+
+        let available = Self::parse_size(fields[0])?;
+        let used = Self::parse_size(fields[1])?;
+
+        debug!(
+            dataset = %self.parent_dataset,
+            available_bytes = available,
+            used_bytes = used,
+            "Capacity retrieved"
+        );
+
+        Ok(Capacity { available, used })
     }
 
     /// Check if a dataset exists

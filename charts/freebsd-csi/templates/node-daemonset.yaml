@@ -63,6 +63,14 @@ spec:
             - name: TLS_DOMAIN
               value: {{ .Values.tls.domain | quote }}
             {{- end }}
+          {{- with .Values.node.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.node.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           resources:
             {{- toYaml .Values.node.resources | nindent 12 }}
           securityContext:

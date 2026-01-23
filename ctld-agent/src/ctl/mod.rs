@@ -10,4 +10,4 @@ pub use types::ExportType;
 
 // Re-export types that may be used externally
 #[allow(unused_imports)]
-pub use types::{DevicePath, Iqn, Nqn, TargetName};
+pub use types::{AuthConfig, DevicePath, Iqn, IscsiChapAuth, Nqn, NvmeAuth, TargetName};

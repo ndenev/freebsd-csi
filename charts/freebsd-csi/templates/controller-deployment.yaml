@@ -96,6 +96,24 @@ spec:
             - name: TLS_DOMAIN
               value: {{ .Values.tls.domain | quote }}
             {{- end }}
+            {{- if .Values.metrics.enabled }}
+            - name: METRICS_ADDR
+              value: "0.0.0.0:{{ .Values.metrics.port }}"
+            {{- end }}
+          {{- if .Values.metrics.enabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+          {{- end }}
+          {{- with .Values.controller.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.controller.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
           volumeMounts:

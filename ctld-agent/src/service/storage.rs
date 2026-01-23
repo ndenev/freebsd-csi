@@ -2,16 +2,25 @@
 //!
 //! This module provides the gRPC service layer that ties together ZFS volume management
 //! and iSCSI/NVMeoF export functionality.
+//!
+//! Rate limiting is implemented using a semaphore to prevent overload from concurrent
+//! storage operations.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument, warn};
 
-use crate::ctl::{CtlError, CtlManager, ExportType as CtlExportType};
+/// Default maximum number of concurrent storage operations
+const DEFAULT_MAX_CONCURRENT_OPS: usize = 10;
+
+use crate::ctl::{
+    AuthConfig, CtlError, CtlManager, ExportType as CtlExportType, IscsiChapAuth, NvmeAuth,
+};
+use crate::metrics::{self, OperationTimer};
 use crate::zfs::{VolumeMetadata as ZfsVolumeMetadata, ZfsManager};
 
 /// Generated protobuf types and service trait
@@ -21,9 +30,10 @@ pub mod proto {
 
 use proto::storage_agent_server::StorageAgent;
 use proto::{
-    CreateSnapshotRequest, CreateSnapshotResponse, CreateVolumeRequest, CreateVolumeResponse,
-    DeleteSnapshotRequest, DeleteSnapshotResponse, DeleteVolumeRequest, DeleteVolumeResponse,
-    ExpandVolumeRequest, ExpandVolumeResponse, ExportType, GetSnapshotRequest, GetSnapshotResponse,
+    AuthCredentials, CreateSnapshotRequest, CreateSnapshotResponse, CreateVolumeRequest,
+    CreateVolumeResponse, DeleteSnapshotRequest, DeleteSnapshotResponse, DeleteVolumeRequest,
+    DeleteVolumeResponse, ExpandVolumeRequest, ExpandVolumeResponse, ExportType,
+    GetCapacityRequest, GetCapacityResponse, GetSnapshotRequest, GetSnapshotResponse,
     GetVolumeRequest, GetVolumeResponse, ListSnapshotsRequest, ListSnapshotsResponse,
     ListVolumesRequest, ListVolumesResponse, Snapshot, Volume,
 };
@@ -51,6 +61,35 @@ fn ctl_to_proto_export_type(export_type: CtlExportType) -> ExportType {
     match export_type {
         CtlExportType::Iscsi => ExportType::Iscsi,
         CtlExportType::Nvmeof => ExportType::Nvmeof,
+    }
+}
+
+/// Convert proto AuthCredentials to CTL AuthConfig
+fn proto_to_ctl_auth(auth: Option<&AuthCredentials>) -> AuthConfig {
+    use proto::auth_credentials::Credentials;
+
+    match auth.and_then(|a| a.credentials.as_ref()) {
+        None => AuthConfig::None,
+        Some(Credentials::IscsiChap(chap)) => {
+            let has_mutual = !chap.mutual_username.is_empty() && !chap.mutual_secret.is_empty();
+            if has_mutual {
+                AuthConfig::IscsiChap(IscsiChapAuth::with_mutual(
+                    &chap.username,
+                    &chap.secret,
+                    &chap.mutual_username,
+                    &chap.mutual_secret,
+                ))
+            } else {
+                AuthConfig::IscsiChap(IscsiChapAuth::new(&chap.username, &chap.secret))
+            }
+        }
+        Some(Credentials::NvmeAuth(nvme)) => {
+            let mut auth = NvmeAuth::new(&nvme.host_nqn, &nvme.secret, &nvme.hash_function);
+            if !nvme.dh_group.is_empty() {
+                auth = auth.with_dh_group(&nvme.dh_group);
+            }
+            AuthConfig::NvmeAuth(auth)
+        }
     }
 }
 
@@ -125,6 +164,9 @@ struct SnapshotMetadata {
 }
 
 /// gRPC Storage Agent service
+///
+/// Uses a semaphore to limit concurrent operations and prevent overload.
+/// When the semaphore is exhausted, new requests will receive ResourceExhausted.
 pub struct StorageService {
     /// ZFS volume manager
     zfs: Arc<RwLock<ZfsManager>>,
@@ -134,16 +176,57 @@ pub struct StorageService {
     volumes: Arc<RwLock<HashMap<String, VolumeMetadata>>>,
     /// Snapshot metadata tracking
     snapshots: Arc<RwLock<HashMap<String, SnapshotMetadata>>>,
+    /// Semaphore for rate limiting concurrent operations
+    ops_semaphore: Arc<Semaphore>,
+    /// Maximum concurrent operations (for error messages)
+    max_concurrent_ops: usize,
 }
 
 impl StorageService {
-    /// Create a new StorageService
+    /// Create a new StorageService with default rate limiting (10 concurrent ops)
     pub fn new(zfs: Arc<RwLock<ZfsManager>>, ctl: Arc<RwLock<CtlManager>>) -> Self {
+        Self::with_concurrency_limit(zfs, ctl, DEFAULT_MAX_CONCURRENT_OPS)
+    }
+
+    /// Create a new StorageService with configurable concurrency limit
+    pub fn with_concurrency_limit(
+        zfs: Arc<RwLock<ZfsManager>>,
+        ctl: Arc<RwLock<CtlManager>>,
+        max_concurrent_ops: usize,
+    ) -> Self {
         Self {
             zfs,
             ctl,
             volumes: Arc::new(RwLock::new(HashMap::new())),
             snapshots: Arc::new(RwLock::new(HashMap::new())),
+            ops_semaphore: Arc::new(Semaphore::new(max_concurrent_ops)),
+            max_concurrent_ops,
+        }
+    }
+
+    /// Acquire rate limiting permit, returning ResourceExhausted if too many concurrent ops
+    async fn acquire_permit(
+        &self,
+        operation: &str,
+    ) -> Result<tokio::sync::SemaphorePermit<'_>, Status> {
+        match self.ops_semaphore.try_acquire() {
+            Ok(permit) => {
+                // Track current concurrent operations
+                let current_ops = self.max_concurrent_ops - self.ops_semaphore.available_permits();
+                metrics::set_concurrent_ops(current_ops);
+                Ok(permit)
+            }
+            Err(_) => {
+                warn!(
+                    "Rate limit exceeded: {} concurrent operations already in progress",
+                    self.max_concurrent_ops
+                );
+                metrics::record_rate_limited(operation);
+                Err(Status::resource_exhausted(format!(
+                    "Too many concurrent operations (max: {}). Please retry later.",
+                    self.max_concurrent_ops
+                )))
+            }
         }
     }
 
@@ -225,11 +308,15 @@ impl StorageService {
             };
 
             let ctl = self.ctl.read().await;
+            // Note: Auth credentials are not persisted, so reconciliation
+            // re-exports without authentication. This is acceptable as the
+            // CSI driver will need to recreate volumes if auth is required.
             match ctl.export_volume(
                 vol_name,
                 &device_path,
                 ctl_export_type,
                 metadata.lun_id as u32,
+                AuthConfig::None,
             ) {
                 Ok(_) => {
                     info!(
@@ -289,6 +376,11 @@ impl StorageAgent for StorageService {
         &self,
         request: Request<CreateVolumeRequest>,
     ) -> Result<Response<CreateVolumeResponse>, Status> {
+        let timer = OperationTimer::new("create_volume");
+
+        // Rate limiting: acquire permit before proceeding
+        let _permit = self.acquire_permit("create_volume").await?;
+
         let req = request.into_inner();
         info!(
             "CreateVolume request: name={}, size={}",
@@ -296,15 +388,18 @@ impl StorageAgent for StorageService {
         );
 
         if req.name.is_empty() {
+            timer.failure("invalid_argument");
             return Err(Status::invalid_argument("volume name cannot be empty"));
         }
         if req.size_bytes <= 0 {
+            timer.failure("invalid_argument");
             return Err(Status::invalid_argument("size_bytes must be positive"));
         }
 
         let export_type = ExportType::try_from(req.export_type).unwrap_or(ExportType::Unspecified);
 
         if export_type == ExportType::Unspecified {
+            timer.failure("invalid_argument");
             return Err(Status::invalid_argument(
                 "export_type must be ISCSI or NVMEOF",
             ));
@@ -313,8 +408,16 @@ impl StorageAgent for StorageService {
         // Create ZFS volume
         let dataset = {
             let zfs = self.zfs.read().await;
-            zfs.create_volume(&req.name, req.size_bytes as u64)
-                .map_err(|e| Status::internal(format!("failed to create ZFS volume: {}", e)))?
+            match zfs.create_volume(&req.name, req.size_bytes as u64) {
+                Ok(d) => d,
+                Err(e) => {
+                    timer.failure("zfs_error");
+                    return Err(Status::internal(format!(
+                        "failed to create ZFS volume: {}",
+                        e
+                    )));
+                }
+            }
         };
 
         // Get device path
@@ -335,16 +438,31 @@ impl StorageAgent for StorageService {
         // Export the volume via unified CTL manager
         let ctl_export_type = to_ctl_export_type(export_type).expect("already validated");
 
+        // Convert auth credentials from proto to CTL format
+        let auth_config = proto_to_ctl_auth(req.auth.as_ref());
+        let has_auth = auth_config.is_some();
+
         let target_name = {
             let ctl = self.ctl.read().await;
-            let export = ctl
-                .export_volume(&req.name, &device_path, ctl_export_type, lun_id as u32)
-                .map_err(|e| {
+            match ctl.export_volume(
+                &req.name,
+                &device_path,
+                ctl_export_type,
+                lun_id as u32,
+                auth_config,
+            ) {
+                Ok(export) => export.target_name.to_string(),
+                Err(e) => {
                     warn!("Failed to export volume: {}", e);
-                    Status::internal(format!("failed to export volume: {}", e))
-                })?;
-            export.target_name.to_string()
+                    timer.failure("export_error");
+                    return Err(Status::internal(format!("failed to export volume: {}", e)));
+                }
+            }
         };
+
+        if has_auth {
+            info!("Exported volume {} with authentication enabled", req.name);
+        }
 
         // Write UCL config and reload ctld
         {
@@ -393,6 +511,13 @@ impl StorageAgent for StorageService {
         let volume = self.dataset_to_volume(&dataset, &metadata);
         info!("Created volume: {}", req.name);
 
+        // Update volume count metric
+        {
+            let volumes = self.volumes.read().await;
+            metrics::set_volumes_count(volumes.len());
+        }
+
+        timer.success();
         Ok(Response::new(CreateVolumeResponse {
             volume: Some(volume),
         }))
@@ -409,10 +534,16 @@ impl StorageAgent for StorageService {
         &self,
         request: Request<DeleteVolumeRequest>,
     ) -> Result<Response<DeleteVolumeResponse>, Status> {
+        let timer = OperationTimer::new("delete_volume");
+
+        // Rate limiting: acquire permit before proceeding
+        let _permit = self.acquire_permit("delete_volume").await?;
+
         let req = request.into_inner();
         info!("DeleteVolume request: volume_id={}", req.volume_id);
 
         if req.volume_id.is_empty() {
+            timer.failure("invalid_argument");
             return Err(Status::invalid_argument("volume_id cannot be empty"));
         }
 
@@ -466,17 +597,24 @@ impl StorageAgent for StorageService {
         // Delete ZFS volume (this is now idempotent - returns Ok if doesn't exist)
         {
             let zfs = self.zfs.read().await;
-            zfs.delete_volume(&volume_name)
-                .map_err(|e| Status::internal(format!("failed to delete ZFS volume: {}", e)))?;
+            if let Err(e) = zfs.delete_volume(&volume_name) {
+                timer.failure("zfs_error");
+                return Err(Status::internal(format!(
+                    "failed to delete ZFS volume: {}",
+                    e
+                )));
+            }
         }
 
         // Remove metadata from cache
         {
             let mut volumes = self.volumes.write().await;
             volumes.remove(&req.volume_id);
+            metrics::set_volumes_count(volumes.len());
         }
 
         info!("Deleted volume: {}", req.volume_id);
+        timer.success();
         Ok(Response::new(DeleteVolumeResponse {}))
     }
 
@@ -486,6 +624,11 @@ impl StorageAgent for StorageService {
         &self,
         request: Request<ExpandVolumeRequest>,
     ) -> Result<Response<ExpandVolumeResponse>, Status> {
+        let timer = OperationTimer::new("expand_volume");
+
+        // Rate limiting: acquire permit before proceeding
+        let _permit = self.acquire_permit("expand_volume").await?;
+
         let req = request.into_inner();
         info!(
             "ExpandVolume request: volume_id={}, new_size={}",
@@ -493,26 +636,36 @@ impl StorageAgent for StorageService {
         );
 
         if req.volume_id.is_empty() {
+            timer.failure("invalid_argument");
             return Err(Status::invalid_argument("volume_id cannot be empty"));
         }
         if req.new_size_bytes <= 0 {
+            timer.failure("invalid_argument");
             return Err(Status::invalid_argument("new_size_bytes must be positive"));
         }
 
         // Verify volume exists
         let metadata = {
             let volumes = self.volumes.read().await;
-            volumes
-                .get(&req.volume_id)
-                .cloned()
-                .ok_or_else(|| Status::not_found(format!("volume '{}' not found", req.volume_id)))?
+            match volumes.get(&req.volume_id).cloned() {
+                Some(m) => m,
+                None => {
+                    timer.failure("not_found");
+                    return Err(Status::not_found(format!(
+                        "volume '{}' not found",
+                        req.volume_id
+                    )));
+                }
+            }
         };
 
         // Resize ZFS volume
         {
             let zfs = self.zfs.read().await;
-            zfs.resize_volume(&metadata.name, req.new_size_bytes as u64)
-                .map_err(|e| Status::internal(format!("failed to resize volume: {}", e)))?;
+            if let Err(e) = zfs.resize_volume(&metadata.name, req.new_size_bytes as u64) {
+                timer.failure("zfs_error");
+                return Err(Status::internal(format!("failed to resize volume: {}", e)));
+            }
         }
 
         info!(
@@ -520,6 +673,7 @@ impl StorageAgent for StorageService {
             req.volume_id, req.new_size_bytes
         );
 
+        timer.success();
         Ok(Response::new(ExpandVolumeResponse {
             size_bytes: req.new_size_bytes,
         }))
@@ -611,6 +765,11 @@ impl StorageAgent for StorageService {
         &self,
         request: Request<CreateSnapshotRequest>,
     ) -> Result<Response<CreateSnapshotResponse>, Status> {
+        let timer = OperationTimer::new("create_snapshot");
+
+        // Rate limiting: acquire permit before proceeding
+        let _permit = self.acquire_permit("create_snapshot").await?;
+
         let req = request.into_inner();
         info!(
             "CreateSnapshot request: source_volume_id={}, name={}",
@@ -618,28 +777,42 @@ impl StorageAgent for StorageService {
         );
 
         if req.source_volume_id.is_empty() {
+            timer.failure("invalid_argument");
             return Err(Status::invalid_argument("source_volume_id cannot be empty"));
         }
         if req.name.is_empty() {
+            timer.failure("invalid_argument");
             return Err(Status::invalid_argument("snapshot name cannot be empty"));
         }
 
         // Verify source volume exists
         let _metadata = {
             let volumes = self.volumes.read().await;
-            volumes.get(&req.source_volume_id).cloned().ok_or_else(|| {
-                Status::not_found(format!(
-                    "source volume '{}' not found",
-                    req.source_volume_id
-                ))
-            })?
+            match volumes.get(&req.source_volume_id).cloned() {
+                Some(m) => m,
+                None => {
+                    timer.failure("not_found");
+                    return Err(Status::not_found(format!(
+                        "source volume '{}' not found",
+                        req.source_volume_id
+                    )));
+                }
+            }
         };
 
         // Create ZFS snapshot
         let snapshot_name = {
             let zfs = self.zfs.read().await;
-            zfs.create_snapshot(&req.source_volume_id, &req.name)
-                .map_err(|e| Status::internal(format!("failed to create snapshot: {}", e)))?
+            match zfs.create_snapshot(&req.source_volume_id, &req.name) {
+                Ok(n) => n,
+                Err(e) => {
+                    timer.failure("zfs_error");
+                    return Err(Status::internal(format!(
+                        "failed to create snapshot: {}",
+                        e
+                    )));
+                }
+            }
         };
 
         // Create snapshot ID and timestamp
@@ -669,6 +842,7 @@ impl StorageAgent for StorageService {
 
         info!("Created snapshot: {}", snapshot.id);
 
+        timer.success();
         Ok(Response::new(CreateSnapshotResponse {
             snapshot: Some(snapshot),
         }))
@@ -680,16 +854,23 @@ impl StorageAgent for StorageService {
         &self,
         request: Request<DeleteSnapshotRequest>,
     ) -> Result<Response<DeleteSnapshotResponse>, Status> {
+        let timer = OperationTimer::new("delete_snapshot");
+
+        // Rate limiting: acquire permit before proceeding
+        let _permit = self.acquire_permit("delete_snapshot").await?;
+
         let req = request.into_inner();
         info!("DeleteSnapshot request: snapshot_id={}", req.snapshot_id);
 
         if req.snapshot_id.is_empty() {
+            timer.failure("invalid_argument");
             return Err(Status::invalid_argument("snapshot_id cannot be empty"));
         }
 
         // Parse snapshot ID (format: volume_id@snap_name)
         let parts: Vec<&str> = req.snapshot_id.split('@').collect();
         if parts.len() != 2 {
+            timer.failure("invalid_argument");
             return Err(Status::invalid_argument(
                 "invalid snapshot_id format, expected 'volume_id@snap_name'",
             ));
@@ -701,16 +882,24 @@ impl StorageAgent for StorageService {
         // Delete ZFS snapshot using ZfsManager (validates input to prevent command injection)
         {
             let zfs = self.zfs.read().await;
-            zfs.delete_snapshot(volume_name, snap_name).map_err(|e| {
+            if let Err(e) = zfs.delete_snapshot(volume_name, snap_name) {
                 use crate::zfs::ZfsError;
-                match e {
-                    ZfsError::DatasetNotFound(_) => {
-                        Status::not_found(format!("snapshot '{}' not found", req.snapshot_id))
+                let (status, error_type) = match e {
+                    ZfsError::DatasetNotFound(_) => (
+                        Status::not_found(format!("snapshot '{}' not found", req.snapshot_id)),
+                        "not_found",
+                    ),
+                    ZfsError::InvalidName(msg) => {
+                        (Status::invalid_argument(msg), "invalid_argument")
                     }
-                    ZfsError::InvalidName(msg) => Status::invalid_argument(msg),
-                    _ => Status::internal(format!("failed to delete snapshot: {}", e)),
-                }
-            })?;
+                    _ => (
+                        Status::internal(format!("failed to delete snapshot: {}", e)),
+                        "zfs_error",
+                    ),
+                };
+                timer.failure(error_type);
+                return Err(status);
+            }
         }
 
         // Remove metadata
@@ -723,6 +912,7 @@ impl StorageAgent for StorageService {
             "Deleted snapshot: {} (volume={}, snap={})",
             req.snapshot_id, volume_name, snap_name
         );
+        timer.success();
         Ok(Response::new(DeleteSnapshotResponse {}))
     }
 
@@ -801,6 +991,34 @@ impl StorageAgent for StorageService {
 
         Ok(Response::new(GetSnapshotResponse {
             snapshot: Some(snapshot),
+        }))
+    }
+
+    /// Get storage capacity information for the ZFS pool
+    #[instrument(skip(self, _request))]
+    async fn get_capacity(
+        &self,
+        _request: Request<GetCapacityRequest>,
+    ) -> Result<Response<GetCapacityResponse>, Status> {
+        debug!("GetCapacity request");
+
+        // Get capacity from ZFS parent dataset
+        let zfs = self.zfs.read().await;
+        let capacity = zfs
+            .get_capacity()
+            .map_err(|e| Status::internal(format!("failed to get capacity: {}", e)))?;
+
+        info!(
+            available = capacity.available,
+            used = capacity.used,
+            total = capacity.available + capacity.used,
+            "Retrieved storage capacity"
+        );
+
+        Ok(Response::new(GetCapacityResponse {
+            available_capacity: capacity.available as i64,
+            total_capacity: (capacity.available + capacity.used) as i64,
+            used_capacity: capacity.used as i64,
         }))
     }
 }

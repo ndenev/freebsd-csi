@@ -57,6 +57,28 @@ controller:
   affinity: {}
   # Priority class name for controller pods
   priorityClassName: ""
+  # Liveness probe configuration
+  livenessProbe:
+    exec:
+      command:
+        - /bin/sh
+        - -c
+        - test -S /csi/csi.sock
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 5
+  # Readiness probe configuration
+  readinessProbe:
+    exec:
+      command:
+        - /bin/sh
+        - -c
+        - test -S /csi/csi.sock
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
 
 # Node DaemonSet settings
 node:
@@ -74,6 +96,28 @@ node:
   affinity: {}
   # Priority class name for node pods
   priorityClassName: ""
+  # Liveness probe configuration
+  livenessProbe:
+    exec:
+      command:
+        - /bin/sh
+        - -c
+        - test -S /csi/csi.sock
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 5
+  # Readiness probe configuration
+  readinessProbe:
+    exec:
+      command:
+        - /bin/sh
+        - -c
+        - test -S /csi/csi.sock
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
 
 # CSI sidecar container images
 sidecars:
@@ -131,6 +175,17 @@ storageClassIscsi:
     # Each portal will be discovered and logged into separately.
     # dm-multipath will combine the paths automatically.
     portal: ""
+  # CHAP Authentication (optional)
+  # Create a secret with the following keys:
+  #   node.session.auth.username - CHAP username
+  #   node.session.auth.password - CHAP secret
+  #   node.session.auth.username_in - Mutual CHAP username (optional)
+  #   node.session.auth.password_in - Mutual CHAP secret (optional)
+  chapSecret:
+    # Name of the secret containing CHAP credentials
+    name: ""
+    # Namespace of the secret (defaults to release namespace)
+    namespace: ""
 
 # NVMeoF Storage Class (FreeBSD 15.0+)
 storageClassNvmeof:
@@ -152,3 +207,33 @@ storageClassNvmeof:
     transportAddr: ""
     # Transport port (default: 4420)
     transportPort: "4420"
+  # NVMeoF Access Control (optional, FreeBSD 15.0+)
+  # Note: FreeBSD 15's ctld only supports host-nqn based access control for NVMeoF.
+  #       DH-HMAC-CHAP is not yet implemented in ctld.
+  # Create a secret with the following keys:
+  #   nvme.auth.host_nqn - Host NQN allowed to connect (required)
+  #   nvme.auth.secret - Reserved for future DH-HMAC-CHAP support
+  #   nvme.auth.hash_function - Reserved for future DH-HMAC-CHAP support
+  #   nvme.auth.dh_group - Reserved for future DH-HMAC-CHAP support
+  authSecret:
+    # Name of the secret containing NVMeoF auth credentials
+    name: ""
+    # Namespace of the secret (defaults to release namespace)
+    namespace: ""
+
+# Prometheus metrics configuration
+metrics:
+  # Enable metrics endpoint
+  enabled: false
+  # Port for the metrics HTTP server
+  port: 9090
+  # Create a Prometheus ServiceMonitor resource
+  serviceMonitor:
+    # Create a ServiceMonitor for the Prometheus Operator
+    enabled: false
+    # Additional labels for the ServiceMonitor
+    labels: {}
+    # Scrape interval (defaults to Prometheus default)
+    interval: ""
+    # Scrape timeout (defaults to Prometheus default)
+    scrapeTimeout: ""

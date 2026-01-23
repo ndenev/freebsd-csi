@@ -2,19 +2,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use tokio::signal;
 use tokio::sync::RwLock;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tracing::{Level, info};
 use tracing_subscriber::FmtSubscriber;
 
-mod ctl;
-mod service;
-mod zfs;
-
-use ctl::CtlManager;
-use service::StorageService;
-use service::proto::storage_agent_server::StorageAgentServer;
-use zfs::ZfsManager;
+use ctld_agent::ctl::CtlManager;
+use ctld_agent::metrics;
+use ctld_agent::service::StorageService;
+use ctld_agent::service::proto::storage_agent_server::StorageAgentServer;
+use ctld_agent::zfs::ZfsManager;
 
 #[derive(Parser, Debug)]
 #[command(name = "ctld-agent")]
@@ -67,6 +65,15 @@ struct Args {
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, env = "LOG_LEVEL", default_value = "info")]
     log_level: String,
+
+    /// Maximum concurrent storage operations (rate limiting)
+    #[arg(long, env = "MAX_CONCURRENT_OPS", default_value = "10")]
+    max_concurrent_ops: usize,
+
+    /// Prometheus metrics HTTP address (e.g., 0.0.0.0:9091)
+    /// If not set, metrics endpoint is disabled
+    #[arg(long, env = "METRICS_ADDR")]
+    metrics_addr: Option<String>,
 }
 
 #[tokio::main]
@@ -86,6 +93,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
+    // Initialize Prometheus metrics endpoint if configured
+    if let Some(ref addr_str) = args.metrics_addr {
+        let addr = addr_str
+            .parse()
+            .map_err(|e| format!("Invalid metrics address '{}': {}", addr_str, e))?;
+        if let Err(e) = metrics::init_metrics(addr) {
+            return Err(format!("Failed to initialize metrics: {}", e).into());
+        }
+    }
+
     info!("Starting ctld-agent on {}", args.listen);
     info!("Log level: {}", args.log_level);
     info!("ZFS parent dataset: {}", args.zfs_parent);
@@ -95,6 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Auth group: {}", args.auth_group);
     info!("Portal group name: {}", args.portal_group_name);
     info!("Transport group name: {}", args.transport_group_name);
+    info!("Max concurrent operations: {}", args.max_concurrent_ops);
 
     // Initialize ZFS manager
     let zfs_manager = ZfsManager::new(args.zfs_parent.clone())?;
@@ -117,8 +135,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ctl = Arc::new(RwLock::new(ctl_manager));
 
-    // Create the storage service
-    let storage_service = StorageService::new(zfs, ctl);
+    // Create the storage service with rate limiting
+    let storage_service = StorageService::with_concurrency_limit(zfs, ctl, args.max_concurrent_ops);
 
     // Restore volume metadata from ZFS user properties
     match storage_service.restore_from_zfs().await {
@@ -131,8 +149,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Err(e) => {
-            tracing::warn!("Failed to restore volume metadata from ZFS: {}", e);
-            // Continue anyway - service can still operate
+            tracing::error!(
+                "Failed to restore volume metadata from ZFS: {} - service starting in degraded mode",
+                e
+            );
+            // Continue anyway - service can still operate on new volumes
         }
     }
 
@@ -147,8 +168,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Err(e) => {
-            tracing::warn!("Failed to reconcile exports: {}", e);
-            // Continue anyway - service can still operate
+            tracing::error!(
+                "Failed to reconcile exports: {} - some volumes may need to be re-created",
+                e
+            );
+            // Continue anyway - service can still operate on new volumes
         }
     }
 
@@ -182,11 +206,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("TLS disabled - running in plaintext mode");
     }
 
-    // Start the gRPC server
+    // Start the gRPC server with graceful shutdown
     builder
         .add_service(StorageAgentServer::new(storage_service))
-        .serve(addr)
+        .serve_with_shutdown(addr, async {
+            shutdown_signal().await;
+            info!("Shutdown signal received, draining connections...");
+        })
         .await?;
 
+    info!("ctld-agent shutdown complete");
     Ok(())
+}
+
+/// Wait for shutdown signal (SIGTERM or SIGINT)
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            info!("Received SIGINT");
+        }
+        _ = terminate => {
+            info!("Received SIGTERM");
+        }
+    }
 }

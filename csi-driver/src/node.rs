@@ -6,14 +6,34 @@
 //! Platform-specific operations (iSCSI, NVMe, filesystem, bind mounts)
 //! are delegated to the `platform` module which provides compile-time
 //! platform selection for FreeBSD and Linux.
+//!
+//! ## Target Naming Convention
+//!
+//! Target names are derived from volume IDs using a consistent pattern:
+//! - iSCSI: `iqn.2024-01.org.freebsd.csi:<volume_id>`
+//! - NVMeoF: `nqn.2024-01.org.freebsd.csi:<volume_id>`
+//!
+//! This allows NodeUnstageVolume to determine the target to disconnect
+//! without requiring local metadata storage.
 
+use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::Path;
 
+// Note: fs module used for symlink operations and directory creation only,
+// no local metadata storage - device paths are queried from active sessions.
+
 use tonic::{Request, Response, Status};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::csi;
 use crate::platform;
+
+/// Base IQN prefix for iSCSI targets (must match ctld-agent configuration)
+const BASE_IQN: &str = "iqn.2024-01.org.freebsd.csi";
+
+/// Base NQN prefix for NVMeoF targets (must match ctld-agent configuration)
+const BASE_NQN: &str = "nqn.2024-01.org.freebsd.csi";
 
 /// CSI Node Service
 ///
@@ -113,12 +133,274 @@ impl NodeService {
 
         Err(Status::internal("Could not parse volume capacity"))
     }
+
+    /// Detect the filesystem type of a mounted path.
+    fn detect_filesystem_type(path: &str) -> Result<String, Status> {
+        Self::validate_path(path)?;
+
+        // Use df -T on Linux, or mount on FreeBSD to get filesystem type
+        #[cfg(target_os = "linux")]
+        {
+            let output = std::process::Command::new("df")
+                .args(["-T", path])
+                .output()
+                .map_err(|e| {
+                    error!(error = %e, "Failed to execute df -T");
+                    Status::internal(format!("Failed to detect filesystem type: {}", e))
+                })?;
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // df -T output: Filesystem Type ... (second column is type)
+            if let Some(line) = stdout.lines().nth(1)
+                && let Some(fs_type) = line.split_whitespace().nth(1)
+            {
+                return Ok(fs_type.to_string());
+            }
+        }
+
+        #[cfg(target_os = "freebsd")]
+        {
+            let output = std::process::Command::new("mount").output().map_err(|e| {
+                error!(error = %e, "Failed to execute mount");
+                Status::internal(format!("Failed to detect filesystem type: {}", e))
+            })?;
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // mount output: /dev/xxx on /path (fstype, options)
+            for line in stdout.lines() {
+                if line.contains(&format!(" on {} ", path))
+                    || line.contains(&format!(" on {} (", path))
+                {
+                    // Extract filesystem type from parentheses
+                    if let Some(start) = line.rfind('(') {
+                        let rest = &line[start + 1..];
+                        if let Some(fs_type) = rest.split(',').next() {
+                            return Ok(fs_type.trim().to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Default to unknown
+        Ok("unknown".to_string())
+    }
+
+    /// Resize the filesystem to use all available space on the device.
+    /// Returns true if resize was performed, false if not needed.
+    ///
+    /// Note: The underlying storage is a ZFS zvol on the FreeBSD storage node,
+    /// but the FILESYSTEM on top (formatted by the initiator) is typically:
+    /// - Linux initiators: ext4 or xfs
+    /// - FreeBSD initiators: ufs
+    ///
+    /// ZFS filesystem on a remote iSCSI target is not a valid use case.
+    fn resize_filesystem(path: &str, fs_type: &str) -> Result<bool, Status> {
+        match fs_type {
+            "ext4" | "ext3" | "ext2" => {
+                // Get the device for this mount point
+                let device = Self::get_mount_device(path)?;
+                info!(device = %device, fs_type = %fs_type, "Resizing ext filesystem");
+
+                let output = std::process::Command::new("resize2fs")
+                    .arg(&device)
+                    .output()
+                    .map_err(|e| {
+                        error!(error = %e, "Failed to execute resize2fs");
+                        Status::internal(format!("Failed to resize ext filesystem: {}", e))
+                    })?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    // "Nothing to do" is not an error
+                    if stderr.contains("Nothing to do") || stderr.contains("already") {
+                        return Ok(false);
+                    }
+                    error!(stderr = %stderr, "resize2fs failed");
+                    return Err(Status::internal(format!("resize2fs failed: {}", stderr)));
+                }
+                Ok(true)
+            }
+            "xfs" => {
+                info!(path = %path, "Resizing XFS filesystem");
+
+                let output = std::process::Command::new("xfs_growfs")
+                    .arg(path)
+                    .output()
+                    .map_err(|e| {
+                        error!(error = %e, "Failed to execute xfs_growfs");
+                        Status::internal(format!("Failed to resize XFS filesystem: {}", e))
+                    })?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    // Already at max size is not an error
+                    if stderr.contains("data size unchanged") {
+                        return Ok(false);
+                    }
+                    error!(stderr = %stderr, "xfs_growfs failed");
+                    return Err(Status::internal(format!("xfs_growfs failed: {}", stderr)));
+                }
+                Ok(true)
+            }
+            "ufs" => {
+                // FreeBSD UFS: use growfs command
+                let device = Self::get_mount_device(path)?;
+                info!(device = %device, "Resizing UFS filesystem");
+
+                let output = std::process::Command::new("growfs")
+                    .args(["-y", &device])
+                    .output()
+                    .map_err(|e| {
+                        error!(error = %e, "Failed to execute growfs");
+                        Status::internal(format!("Failed to resize UFS filesystem: {}", e))
+                    })?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    error!(stderr = %stderr, "growfs failed");
+                    return Err(Status::internal(format!("growfs failed: {}", stderr)));
+                }
+                Ok(true)
+            }
+            _ => {
+                warn!(fs_type = %fs_type, "Unknown filesystem type, skipping resize");
+                Ok(false)
+            }
+        }
+    }
+
+    /// Get the device backing a mount point.
+    fn get_mount_device(path: &str) -> Result<String, Status> {
+        Self::validate_path(path)?;
+
+        let output = std::process::Command::new("df")
+            .arg(path)
+            .output()
+            .map_err(|e| {
+                error!(error = %e, "Failed to execute df");
+                Status::internal(format!("Failed to get mount device: {}", e))
+            })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // df output: Filesystem ... (first column is device)
+        if let Some(line) = stdout.lines().nth(1)
+            && let Some(device) = line.split_whitespace().next()
+        {
+            return Ok(device.to_string());
+        }
+
+        Err(Status::internal("Could not determine mount device"))
+    }
+
+    /// Derive the iSCSI target IQN from a volume ID.
+    fn derive_iqn(volume_id: &str) -> String {
+        format!("{}:{}", BASE_IQN, volume_id)
+    }
+
+    /// Derive the NVMeoF target NQN from a volume ID.
+    fn derive_nqn(volume_id: &str) -> String {
+        format!("{}:{}", BASE_NQN, volume_id)
+    }
+
+    /// Find and disconnect any iSCSI/NVMeoF targets for this volume.
+    /// Uses session queries to find connected targets matching the volume ID.
+    fn disconnect_volume_targets(volume_id: &str) {
+        // Try iSCSI first
+        let iqn = Self::derive_iqn(volume_id);
+        if platform::is_iscsi_connected(&iqn) {
+            info!(target = %iqn, "Disconnecting iSCSI target");
+            if let Err(e) = platform::disconnect_iscsi(&iqn) {
+                warn!(error = %e, target = %iqn, "Failed to disconnect iSCSI target");
+            }
+        }
+
+        // Try NVMeoF
+        let nqn = Self::derive_nqn(volume_id);
+        if platform::is_nvmeof_connected(&nqn) {
+            info!(target = %nqn, "Disconnecting NVMeoF target");
+            if let Err(e) = platform::disconnect_nvmeof(&nqn) {
+                warn!(error = %e, target = %nqn, "Failed to disconnect NVMeoF target");
+            }
+        }
+    }
+
+    /// Check if a volume capability is for block (raw device) access.
+    fn is_block_volume(volume_capability: &Option<csi::VolumeCapability>) -> bool {
+        matches!(
+            volume_capability
+                .as_ref()
+                .and_then(|cap| cap.access_type.as_ref()),
+            Some(csi::volume_capability::AccessType::Block(_))
+        )
+    }
+
+    /// Get filesystem type from volume capability, with platform default fallback.
+    fn get_fs_type_from_capability(
+        volume_capability: &Option<csi::VolumeCapability>,
+        volume_context: &std::collections::HashMap<String, String>,
+    ) -> Result<&'static str, Status> {
+        // Try to get from volume capability first
+        if let Some(cap) = volume_capability
+            && let Some(csi::volume_capability::AccessType::Mount(mount)) = &cap.access_type
+            && !mount.fs_type.is_empty()
+        {
+            return platform::validate_fs_type(&mount.fs_type);
+        }
+
+        // Fall back to volume_context
+        let fs_type_raw = volume_context
+            .get("fs_type")
+            .or_else(|| volume_context.get("fsType"))
+            .map(|s| s.as_str())
+            .unwrap_or("");
+
+        platform::validate_fs_type(fs_type_raw)
+    }
+
+    /// Check if a block volume is staged by checking for an active target session.
+    ///
+    /// For block volumes, "staged" means the target session is connected.
+    /// We check both iSCSI and NVMeoF based on the derived target names.
+    fn is_block_volume_staged(volume_id: &str) -> bool {
+        let iqn = Self::derive_iqn(volume_id);
+        if platform::is_iscsi_connected(&iqn) {
+            return true;
+        }
+
+        let nqn = Self::derive_nqn(volume_id);
+        platform::is_nvmeof_connected(&nqn)
+    }
+
+    /// Find the block device for a volume by querying active sessions.
+    ///
+    /// Tries iSCSI first, then NVMeoF. Returns the device path if found.
+    fn find_block_device(volume_id: &str) -> Result<String, Status> {
+        // Try iSCSI first
+        let iqn = Self::derive_iqn(volume_id);
+        if platform::is_iscsi_connected(&iqn) {
+            return platform::find_iscsi_device(&iqn);
+        }
+
+        // Try NVMeoF
+        let nqn = Self::derive_nqn(volume_id);
+        if platform::is_nvmeof_connected(&nqn) {
+            return platform::find_nvmeof_device(&nqn);
+        }
+
+        Err(Status::failed_precondition(format!(
+            "No active session found for volume {}",
+            volume_id
+        )))
+    }
 }
 
 #[tonic::async_trait]
 impl csi::node_server::Node for NodeService {
     /// Stage a volume to a staging path.
-    /// This connects to the iSCSI/NVMeoF target, formats if needed, and mounts.
+    ///
+    /// For filesystem volumes: connects to iSCSI/NVMeoF target, formats if needed, and mounts.
+    /// For block volumes: connects to target and stores device path (no mount).
     async fn node_stage_volume(
         &self,
         request: Request<csi::NodeStageVolumeRequest>,
@@ -127,6 +409,7 @@ impl csi::node_server::Node for NodeService {
         let volume_id = &req.volume_id;
         let staging_target_path = &req.staging_target_path;
         let volume_context = &req.volume_context;
+        let is_block = Self::is_block_volume(&req.volume_capability);
 
         if volume_id.is_empty() {
             return Err(Status::invalid_argument("Volume ID is required"));
@@ -141,6 +424,7 @@ impl csi::node_server::Node for NodeService {
         info!(
             volume_id = %volume_id,
             staging_target_path = %staging_target_path,
+            is_block = %is_block,
             "NodeStageVolume request"
         );
 
@@ -157,16 +441,6 @@ impl csi::node_server::Node for NodeService {
             .or_else(|| volume_context.get("exportType"))
             .map(|s| s.as_str())
             .unwrap_or("iscsi");
-
-        // Get filesystem type, using platform default if not specified
-        let fs_type_raw = volume_context
-            .get("fs_type")
-            .or_else(|| volume_context.get("fsType"))
-            .map(|s| s.as_str())
-            .unwrap_or("");
-
-        // Validate and normalize filesystem type for this platform
-        let fs_type = platform::validate_fs_type(fs_type_raw)?;
 
         // Get portal/address info (required on Linux, optional on FreeBSD)
         let portal = volume_context
@@ -185,9 +459,18 @@ impl csi::node_server::Node for NodeService {
             .map(|s| s.as_str());
 
         // Check if already staged
-        if platform::is_mounted(staging_target_path)? {
-            info!(staging_target_path = %staging_target_path, "Volume already staged");
-            return Ok(Response::new(csi::NodeStageVolumeResponse {}));
+        if is_block {
+            // Block volume: check if target session is active
+            if Self::is_block_volume_staged(volume_id) {
+                info!(volume_id = %volume_id, "Block volume already staged (session active)");
+                return Ok(Response::new(csi::NodeStageVolumeResponse {}));
+            }
+        } else {
+            // Mount volume: check if mounted
+            if platform::is_mounted(staging_target_path)? {
+                info!(staging_target_path = %staging_target_path, "Volume already staged");
+                return Ok(Response::new(csi::NodeStageVolumeResponse {}));
+            }
         }
 
         // Connect to target and get device
@@ -204,25 +487,42 @@ impl csi::node_server::Node for NodeService {
             }
         };
 
-        // Format if needed (only for non-ZFS)
-        if fs_type != "zfs" && platform::needs_formatting(&device)? {
-            platform::format_device(&device, fs_type)?;
+        if is_block {
+            // Block volume: connection is complete, device will be queried at publish time
+            // No local state stored - device path is discovered from session
+            info!(
+                volume_id = %volume_id,
+                device = %device,
+                "Block volume staged successfully (session connected)"
+            );
+        } else {
+            // Mount volume: format if needed and mount
+            let fs_type =
+                Self::get_fs_type_from_capability(&req.volume_capability, volume_context)?;
+
+            if platform::needs_formatting(&device)? {
+                platform::format_device(&device, fs_type)?;
+            }
+
+            // Mount the device to staging path
+            platform::mount_device(&device, staging_target_path, fs_type)?;
+
+            info!(
+                volume_id = %volume_id,
+                staging_target_path = %staging_target_path,
+                device = %device,
+                fs_type = %fs_type,
+                "Mount volume staged successfully"
+            );
         }
-
-        // Mount the device to staging path
-        platform::mount_device(&device, staging_target_path, fs_type)?;
-
-        info!(
-            volume_id = %volume_id,
-            staging_target_path = %staging_target_path,
-            device = %device,
-            "Volume staged successfully"
-        );
 
         Ok(Response::new(csi::NodeStageVolumeResponse {}))
     }
 
     /// Unstage a volume from the staging path.
+    ///
+    /// For filesystem volumes: unmounts the staging path.
+    /// For block volumes: just disconnects the target (no local state to clean).
     async fn node_unstage_volume(
         &self,
         request: Request<csi::NodeUnstageVolumeRequest>,
@@ -241,36 +541,26 @@ impl csi::node_server::Node for NodeService {
 
         Self::validate_path(staging_target_path)?;
 
+        // Determine volume type: if staging path is mounted, it's a filesystem volume
+        // Block volumes don't mount anything, they just have an active session
+        let is_mounted = platform::is_mounted(staging_target_path)?;
+
         info!(
             volume_id = %volume_id,
             staging_target_path = %staging_target_path,
+            is_mounted = %is_mounted,
             "NodeUnstageVolume request"
         );
 
-        // Unmount from staging path
-        platform::unmount(staging_target_path)?;
-
-        // Disconnect from iSCSI/NVMeoF targets
-        // We derive the target names from the volume_id using the CSI naming convention.
-        // Check which protocol is actually connected before attempting disconnect.
-        let target_iqn = format!("iqn.2024-01.org.freebsd.csi:{}", volume_id);
-        let target_nqn = format!("nqn.2024-01.org.freebsd.csi:{}", volume_id);
-
-        // Check and disconnect iSCSI if connected
-        if platform::is_iscsi_connected(&target_iqn) {
-            info!(target_iqn = %target_iqn, "Disconnecting iSCSI target");
-            if let Err(e) = platform::disconnect_iscsi(&target_iqn) {
-                warn!(error = %e, target_iqn = %target_iqn, "Failed to disconnect iSCSI target");
-            }
+        if is_mounted {
+            // Filesystem volume: unmount from staging path
+            platform::unmount(staging_target_path)?;
         }
+        // Block volumes have no mount to clean up
 
-        // Check and disconnect NVMeoF if connected
-        if platform::is_nvmeof_connected(&target_nqn) {
-            info!(target_nqn = %target_nqn, "Disconnecting NVMeoF target");
-            if let Err(e) = platform::disconnect_nvmeof(&target_nqn) {
-                warn!(error = %e, target_nqn = %target_nqn, "Failed to disconnect NVMeoF target");
-            }
-        }
+        // Disconnect any iSCSI/NVMeoF targets for this volume
+        // Target names are derived from volume_id using our naming convention
+        Self::disconnect_volume_targets(volume_id);
 
         info!(
             volume_id = %volume_id,
@@ -281,7 +571,10 @@ impl csi::node_server::Node for NodeService {
         Ok(Response::new(csi::NodeUnstageVolumeResponse {}))
     }
 
-    /// Publish a volume to a target path (bind mount from staging).
+    /// Publish a volume to a target path.
+    ///
+    /// For filesystem volumes: bind mount from staging to target.
+    /// For block volumes: create symlink from device to target path.
     async fn node_publish_volume(
         &self,
         request: Request<csi::NodePublishVolumeRequest>,
@@ -290,6 +583,7 @@ impl csi::node_server::Node for NodeService {
         let volume_id = &req.volume_id;
         let target_path = &req.target_path;
         let staging_target_path = &req.staging_target_path;
+        let is_block = Self::is_block_volume(&req.volume_capability);
 
         if volume_id.is_empty() {
             return Err(Status::invalid_argument("Volume ID is required"));
@@ -314,53 +608,107 @@ impl csi::node_server::Node for NodeService {
             staging_target_path = %staging_target_path,
             target_path = %target_path,
             readonly = %req.readonly,
+            is_block = %is_block,
             "NodePublishVolume request"
         );
 
-        // Check if staging path is mounted
-        if !platform::is_mounted(staging_target_path)? {
-            return Err(Status::failed_precondition(format!(
-                "Volume not staged at {}",
-                staging_target_path
-            )));
-        }
+        if is_block {
+            // Block volume: query device from active session and create symlink
+            let device = Self::find_block_device(volume_id)?;
 
-        // Check if already published
-        if platform::is_mounted(target_path)? {
-            info!(target_path = %target_path, "Volume already published");
-            return Ok(Response::new(csi::NodePublishVolumeResponse {}));
-        }
-
-        // Create bind mount from staging to target
-        platform::bind_mount(staging_target_path, target_path)?;
-
-        // Handle readonly mount if requested
-        if req.readonly {
-            // Remount as read-only
-            let output = std::process::Command::new("mount")
-                .args(["-o", "remount,ro", target_path])
-                .output()
-                .map_err(|e| {
-                    error!(error = %e, "Failed to remount as readonly");
-                    Status::internal(format!("Failed to remount as readonly: {}", e))
+            // Check if already published (symlink exists and points to same device)
+            if let Ok(existing) = fs::read_link(target_path) {
+                if existing.to_string_lossy() == device {
+                    info!(target_path = %target_path, "Block volume already published");
+                    return Ok(Response::new(csi::NodePublishVolumeResponse {}));
+                }
+                // Remove stale symlink
+                fs::remove_file(target_path).map_err(|e| {
+                    error!(error = %e, path = %target_path, "Failed to remove stale symlink");
+                    Status::internal(format!("Failed to remove stale symlink: {}", e))
                 })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!(stderr = %stderr, "Failed to set readonly, continuing anyway");
             }
-        }
 
-        info!(
-            volume_id = %volume_id,
-            target_path = %target_path,
-            "Volume published successfully"
-        );
+            // Create parent directory if needed
+            if let Some(parent) = Path::new(target_path).parent()
+                && !parent.exists()
+            {
+                fs::create_dir_all(parent).map_err(|e| {
+                    error!(error = %e, path = ?parent, "Failed to create parent directory");
+                    Status::internal(format!("Failed to create parent directory: {}", e))
+                })?;
+            }
+
+            // Create symlink to device
+            symlink(&device, target_path).map_err(|e| {
+                error!(error = %e, device = %device, target = %target_path, "Failed to create device symlink");
+                Status::internal(format!("Failed to create device symlink: {}", e))
+            })?;
+
+            info!(
+                volume_id = %volume_id,
+                target_path = %target_path,
+                device = %device,
+                "Block volume published successfully"
+            );
+        } else {
+            // Mount volume: bind mount from staging
+            // Check if staging path is mounted
+            if !platform::is_mounted(staging_target_path)? {
+                return Err(Status::failed_precondition(format!(
+                    "Volume not staged at {}",
+                    staging_target_path
+                )));
+            }
+
+            // Check if already published
+            if platform::is_mounted(target_path)? {
+                info!(target_path = %target_path, "Volume already published");
+                return Ok(Response::new(csi::NodePublishVolumeResponse {}));
+            }
+
+            // Create bind mount from staging to target
+            platform::bind_mount(staging_target_path, target_path)?;
+
+            // Handle readonly mount if requested
+            if req.readonly {
+                // Remount as read-only
+                let output = std::process::Command::new("mount")
+                    .args(["-o", "remount,ro", target_path])
+                    .output()
+                    .map_err(|e| {
+                        error!(error = %e, "Failed to remount as readonly");
+                        Status::internal(format!("Failed to remount as readonly: {}", e))
+                    })?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    error!(stderr = %stderr, target_path = %target_path, "Failed to set readonly mount");
+                    // Unmount and fail - readonly was explicitly requested
+                    if let Err(e) = platform::unmount(target_path) {
+                        warn!(error = %e, "Failed to unmount after readonly failure");
+                    }
+                    return Err(Status::internal(format!(
+                        "Failed to set readonly mount: {}",
+                        stderr
+                    )));
+                }
+            }
+
+            info!(
+                volume_id = %volume_id,
+                target_path = %target_path,
+                "Mount volume published successfully"
+            );
+        }
 
         Ok(Response::new(csi::NodePublishVolumeResponse {}))
     }
 
     /// Unpublish a volume from the target path.
+    ///
+    /// For filesystem volumes: unmount the bind mount.
+    /// For block volumes: remove the symlink.
     async fn node_unpublish_volume(
         &self,
         request: Request<csi::NodeUnpublishVolumeRequest>,
@@ -379,28 +727,43 @@ impl csi::node_server::Node for NodeService {
 
         Self::validate_path(target_path)?;
 
+        let target = Path::new(target_path);
+
+        // Determine if this is a block volume by checking if target is a symlink
+        let is_block = target
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+
         info!(
             volume_id = %volume_id,
             target_path = %target_path,
+            is_block = %is_block,
             "NodeUnpublishVolume request"
         );
 
-        // Unmount from target path
-        platform::unmount(target_path)?;
+        if is_block {
+            // Block volume: remove the symlink
+            if let Err(e) = fs::remove_file(target_path)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                error!(error = %e, path = %target_path, "Failed to remove block device symlink");
+                return Err(Status::internal(format!("Failed to remove symlink: {}", e)));
+            }
+            info!(volume_id = %volume_id, target_path = %target_path, "Block volume unpublished");
+        } else {
+            // Mount volume: unmount from target path
+            platform::unmount(target_path)?;
 
-        // Try to remove the target directory
-        if Path::new(target_path).exists()
-            && let Err(e) = std::fs::remove_dir(target_path)
-        {
-            // Only warn, don't fail - the directory might not be empty
-            warn!(error = %e, target_path = %target_path, "Could not remove target directory");
+            // Try to remove the target directory
+            if target.exists()
+                && let Err(e) = fs::remove_dir(target_path)
+            {
+                // Only warn, don't fail - the directory might not be empty
+                warn!(error = %e, target_path = %target_path, "Could not remove target directory");
+            }
+            info!(volume_id = %volume_id, target_path = %target_path, "Mount volume unpublished");
         }
-
-        info!(
-            volume_id = %volume_id,
-            target_path = %target_path,
-            "Volume unpublished successfully"
-        );
 
         Ok(Response::new(csi::NodeUnpublishVolumeResponse {}))
     }
@@ -447,8 +810,14 @@ impl csi::node_server::Node for NodeService {
     }
 
     /// Expand a volume on this node.
-    /// For ZFS, expansion is handled automatically. For other filesystems,
-    /// filesystem-specific resize tools would be needed.
+    ///
+    /// This resizes the filesystem to use all available space on the underlying
+    /// block device. The controller has already expanded the ZFS zvol; this
+    /// method handles the filesystem layer.
+    ///
+    /// - ZFS/UFS: Expansion is automatic at the zvol level
+    /// - ext4/ext3/ext2: Uses resize2fs
+    /// - XFS: Uses xfs_growfs
     async fn node_expand_volume(
         &self,
         request: Request<csi::NodeExpandVolumeRequest>,
@@ -473,9 +842,19 @@ impl csi::node_server::Node for NodeService {
             "NodeExpandVolume request"
         );
 
-        // Get current capacity
-        // For ZFS, the underlying zvol handles expansion automatically
-        // For ext4/xfs, we'd need to run resize2fs/xfs_growfs
+        // Detect filesystem type and resize if needed
+        let fs_type = Self::detect_filesystem_type(volume_path)?;
+        debug!(volume_id = %volume_id, fs_type = %fs_type, "Detected filesystem type");
+
+        // Perform filesystem-specific resize
+        let resized = Self::resize_filesystem(volume_path, &fs_type)?;
+        if resized {
+            info!(volume_id = %volume_id, fs_type = %fs_type, "Filesystem resized successfully");
+        } else {
+            debug!(volume_id = %volume_id, fs_type = %fs_type, "Filesystem resize not needed or automatic");
+        }
+
+        // Get final capacity after resize
         let capacity_bytes = Self::get_volume_capacity(volume_path)?;
 
         info!(

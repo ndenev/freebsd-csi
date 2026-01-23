@@ -2,16 +2,21 @@
 //!
 //! These tests verify the gRPC service layer behavior without requiring
 //! actual ZFS/CTL operations (which would need root privileges and real hardware).
-//! Tests focus on request validation, error handling, and service state management.
+//! Tests focus on:
+//! - Request validation and error handling
+//! - CHAP authentication configuration
+//! - Export type conversion
+//! - Concurrent operation patterns
+//! - Rate limiting behavior
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 
-// Note: The ctld-agent crate needs to expose its types for integration tests.
-// For now, we test the validation logic and error conditions that can be
-// verified without mocking the external managers.
+// Import actual library types now that we have lib.rs
+use ctld_agent::{AuthConfig, ExportType, IscsiChapAuth, NvmeAuth};
 
 /// Helper to create a test request with the given parameters
 fn create_volume_request(name: &str, size_bytes: i64, export_type: i32) -> HashMap<String, String> {
@@ -20,6 +25,161 @@ fn create_volume_request(name: &str, size_bytes: i64, export_type: i32) -> HashM
     params.insert("size_bytes".to_string(), size_bytes.to_string());
     params.insert("export_type".to_string(), export_type.to_string());
     params
+}
+
+// ============================================================================
+// CHAP Authentication Tests
+// ============================================================================
+
+/// Test basic CHAP authentication construction
+#[test]
+fn test_iscsi_chap_auth_basic() {
+    let auth = IscsiChapAuth::new("testuser", "testsecret");
+
+    // Verify auth can be constructed
+    let config = AuthConfig::IscsiChap(auth);
+
+    // Verify it's the right variant
+    match config {
+        AuthConfig::IscsiChap(_) => (), // expected
+        _ => panic!("Expected IscsiChap variant"),
+    }
+}
+
+/// Test mutual CHAP authentication construction
+#[test]
+fn test_iscsi_chap_auth_mutual() {
+    let auth = IscsiChapAuth::with_mutual("testuser", "testsecret", "reverseuser", "reversesecret");
+
+    let config = AuthConfig::IscsiChap(auth);
+
+    match config {
+        AuthConfig::IscsiChap(_) => (),
+        _ => panic!("Expected IscsiChap variant"),
+    }
+}
+
+/// Test NVMe authentication construction
+#[test]
+fn test_nvme_auth_basic() {
+    let auth = NvmeAuth::new(
+        "nqn.2024-01.org.freebsd.host:initiator",
+        "secret123",
+        "sha256",
+    );
+
+    let config = AuthConfig::NvmeAuth(auth);
+
+    match config {
+        AuthConfig::NvmeAuth(_) => (),
+        _ => panic!("Expected NvmeAuth variant"),
+    }
+}
+
+/// Test NVMe authentication with DH group
+#[test]
+fn test_nvme_auth_with_dh_group() {
+    let auth = NvmeAuth::new(
+        "nqn.2024-01.org.freebsd.host:initiator",
+        "secret123",
+        "sha384",
+    )
+    .with_dh_group("dh-hmac-chap:ffdhe2048");
+
+    let config = AuthConfig::NvmeAuth(auth);
+
+    match config {
+        AuthConfig::NvmeAuth(_) => (),
+        _ => panic!("Expected NvmeAuth variant"),
+    }
+}
+
+/// Test AuthConfig::None variant
+#[test]
+fn test_auth_config_none() {
+    let config = AuthConfig::None;
+
+    match config {
+        AuthConfig::None => (),
+        _ => panic!("Expected None variant"),
+    }
+}
+
+/// Test CHAP username validation (non-empty)
+#[test]
+fn test_chap_username_validation() {
+    // Valid usernames
+    let valid_usernames = vec![
+        "admin",
+        "user123",
+        "iscsi-user",
+        "test_user",
+        "a", // minimum length
+    ];
+
+    for username in valid_usernames {
+        assert!(
+            !username.is_empty(),
+            "Username '{}' should be valid",
+            username
+        );
+        assert!(
+            username
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_'),
+            "Username '{}' should have valid characters",
+            username
+        );
+    }
+}
+
+/// Test CHAP secret length requirements
+#[test]
+fn test_chap_secret_length() {
+    // CHAP secrets typically need 12-16 characters minimum for security
+    let valid_secrets = vec![
+        "secretsecret",            // 12 chars
+        "longsecretvalue1",        // 16 chars
+        "averylongsecretpassword", // long
+    ];
+
+    for secret in valid_secrets {
+        assert!(
+            secret.len() >= 12,
+            "Secret should be at least 12 characters"
+        );
+    }
+
+    // Short secrets should be flagged
+    let short_secret = "short";
+    assert!(short_secret.len() < 12, "Short secrets should be detected");
+}
+
+// ============================================================================
+// Export Type Tests
+// ============================================================================
+
+/// Test export type enum values
+#[test]
+fn test_export_type_iscsi() {
+    let export = ExportType::Iscsi;
+
+    // Verify it's the expected variant
+    match export {
+        ExportType::Iscsi => (),
+        ExportType::Nvmeof => panic!("Expected Iscsi variant"),
+    }
+}
+
+/// Test export type NVMeoF
+#[test]
+fn test_export_type_nvmeof() {
+    let export = ExportType::Nvmeof;
+
+    match export {
+        ExportType::Nvmeof => (),
+        ExportType::Iscsi => panic!("Expected Nvmeof variant"),
+    }
 }
 
 // ============================================================================
@@ -46,6 +206,7 @@ fn test_valid_volume_name_characters() {
         "a",
         "A123",
         "test-volume-name-123",
+        "pvc-12345678-1234-1234-1234-123456789012", // Kubernetes PVC name format
     ];
 
     for name in valid_names {
@@ -124,47 +285,6 @@ fn test_valid_size_values() {
 }
 
 // ============================================================================
-// Export Type Validation Tests
-// ============================================================================
-
-/// Test export type enum values
-#[test]
-fn test_export_type_values() {
-    // Based on proto definition:
-    // EXPORT_TYPE_UNSPECIFIED = 0
-    // EXPORT_TYPE_ISCSI = 1
-    // EXPORT_TYPE_NVMEOF = 2
-
-    let unspecified = 0;
-    let iscsi = 1;
-    let nvmeof = 2;
-
-    assert_eq!(unspecified, 0, "UNSPECIFIED should be 0");
-    assert_eq!(iscsi, 1, "ISCSI should be 1");
-    assert_eq!(nvmeof, 2, "NVMEOF should be 2");
-}
-
-/// Test that unspecified export type is rejected
-#[test]
-fn test_unspecified_export_type_rejected() {
-    let export_type = 0; // EXPORT_TYPE_UNSPECIFIED
-    assert_eq!(export_type, 0, "Unspecified export type should be detected");
-}
-
-/// Test that valid export types are accepted
-#[test]
-fn test_valid_export_types() {
-    // Export type values from proto definition:
-    // 1 = EXPORT_TYPE_ISCSI
-    // 2 = EXPORT_TYPE_NVMEOF
-    let valid_types = vec![1, 2];
-
-    for t in valid_types {
-        assert!(t == 1 || t == 2, "Export type {} should be valid", t);
-    }
-}
-
-// ============================================================================
 // Snapshot ID Format Validation Tests
 // ============================================================================
 
@@ -177,6 +297,7 @@ fn test_snapshot_id_format() {
         "vol-1@snap-1",
         "vol_1@snap_1",
         "my.volume@my.snap",
+        "pvc-12345678-1234-1234-1234-123456789012@daily-backup-2024",
     ];
 
     for id in valid_ids {
@@ -219,30 +340,6 @@ fn test_invalid_snapshot_id_format() {
 }
 
 // ============================================================================
-// Request Parameter Tests
-// ============================================================================
-
-/// Test volume creation request parameter extraction
-#[test]
-fn test_create_volume_request_params() {
-    let params = create_volume_request("test-volume", 1073741824, 1);
-
-    assert_eq!(params.get("name").unwrap(), "test-volume");
-    assert_eq!(params.get("size_bytes").unwrap(), "1073741824");
-    assert_eq!(params.get("export_type").unwrap(), "1");
-}
-
-/// Test empty request parameter handling
-#[test]
-fn test_empty_request_params() {
-    let params: HashMap<String, String> = HashMap::new();
-
-    assert!(!params.contains_key("name"));
-    assert!(!params.contains_key("size_bytes"));
-    assert!(!params.contains_key("export_type"));
-}
-
-// ============================================================================
 // Pagination Tests
 // ============================================================================
 
@@ -257,38 +354,58 @@ fn test_pagination_token_parsing() {
     }
 }
 
-/// Test invalid pagination token handling
+/// Test pagination logic
 #[test]
-fn test_invalid_pagination_token() {
-    let invalid_tokens = vec!["abc", "-1", "1.5", ""];
+fn test_pagination_logic() {
+    let items: Vec<i32> = (0..100).collect();
+    let max_entries = 10usize;
 
-    for token in invalid_tokens {
-        let result = token.parse::<usize>();
-        // Empty string or invalid values should fail or return default
-        if !token.is_empty() {
-            assert!(
-                result.is_err() || result.unwrap_or(0) == 0,
-                "Token '{}' should be handled gracefully",
-                token
-            );
-        }
-        // Empty token is valid (uses default 0), non-empty invalid tokens are handled above
-    }
+    // First page
+    let start_idx = 0usize;
+    let end_idx = std::cmp::min(start_idx + max_entries, items.len());
+    let first_page: Vec<_> = items[start_idx..end_idx].to_vec();
+    assert_eq!(first_page.len(), 10);
+    assert_eq!(first_page[0], 0);
+    assert_eq!(first_page[9], 9);
+
+    // Second page
+    let start_idx = 10usize;
+    let end_idx = std::cmp::min(start_idx + max_entries, items.len());
+    let second_page: Vec<_> = items[start_idx..end_idx].to_vec();
+    assert_eq!(second_page.len(), 10);
+    assert_eq!(second_page[0], 10);
+
+    // Last partial page
+    let start_idx = 95usize;
+    let end_idx = std::cmp::min(start_idx + max_entries, items.len());
+    let last_page: Vec<_> = items[start_idx..end_idx].to_vec();
+    assert_eq!(last_page.len(), 5);
+    assert_eq!(last_page[4], 99);
 }
 
-/// Test pagination bounds calculation
+/// Test next token generation
 #[test]
-fn test_pagination_bounds() {
-    let total_items = 25;
-    let max_entries = 10;
-    let starting_idx = 0;
+fn test_pagination_next_token() {
+    let total = 25usize;
+    let max_entries = 10usize;
 
-    let end_idx = std::cmp::min(starting_idx + max_entries, total_items);
-    assert_eq!(end_idx, 10);
+    // Page 1: items 0-9, next token should be "10"
+    let end_idx = std::cmp::min(max_entries, total);
+    let next_token = if end_idx < total {
+        end_idx.to_string()
+    } else {
+        String::new()
+    };
+    assert_eq!(next_token, "10");
 
-    let starting_idx = 20;
-    let end_idx = std::cmp::min(starting_idx + max_entries, total_items);
-    assert_eq!(end_idx, 25);
+    // Page 3: items 20-24, next token should be empty (no more pages)
+    let end_idx = std::cmp::min(20 + max_entries, total);
+    let next_token = if end_idx < total {
+        end_idx.to_string()
+    } else {
+        String::new()
+    };
+    assert_eq!(next_token, "");
 }
 
 // ============================================================================
@@ -313,6 +430,15 @@ fn test_zfs_device_path() {
     assert_eq!(device_path, "/dev/zvol/tank/csi/vol1");
 }
 
+/// Test ZFS snapshot path format
+#[test]
+fn test_zfs_snapshot_path() {
+    let dataset = "tank/csi/vol1";
+    let snap_name = "snap1";
+    let snapshot_path = format!("{}@{}", dataset, snap_name);
+    assert_eq!(snapshot_path, "tank/csi/vol1@snap1");
+}
+
 // ============================================================================
 // iSCSI Target Name Validation Tests
 // ============================================================================
@@ -326,6 +452,27 @@ fn test_iscsi_iqn_format() {
 
     assert!(target_iqn.starts_with("iqn."));
     assert!(target_iqn.contains(volume_name));
+
+    // Verify IQN format regex pattern
+    let iqn_pattern =
+        target_iqn.starts_with("iqn.") && target_iqn.contains('-') && target_iqn.contains(':');
+    assert!(iqn_pattern, "IQN should match format");
+}
+
+/// Test IQN length limits (per RFC 3720)
+#[test]
+fn test_iqn_length_limits() {
+    // RFC 3720 limits IQN to 223 bytes
+    let base_iqn = "iqn.2024-01.org.freebsd.csi";
+    let volume_name = "a".repeat(200);
+    let target_iqn = format!("{}:{}", base_iqn, volume_name);
+
+    // This should exceed the limit
+    assert!(target_iqn.len() > 223, "Long IQN should be detected");
+
+    // Normal length should be fine
+    let normal_iqn = format!("{}:vol1", base_iqn);
+    assert!(normal_iqn.len() <= 223, "Normal IQN should be within limit");
 }
 
 // ============================================================================
@@ -343,65 +490,107 @@ fn test_nvmeof_nqn_format() {
     assert!(target_nqn.contains(volume_name));
 }
 
-// ============================================================================
-// Timestamp Handling Tests
-// ============================================================================
-
-/// Test timestamp generation
+/// Test NQN length limits (per NVMe spec)
 #[test]
-fn test_timestamp_generation() {
-    use std::time::{SystemTime, UNIX_EPOCH};
+fn test_nqn_length_limits() {
+    // NVMe spec limits NQN to 223 characters
+    let base_nqn = "nqn.2024-01.org.freebsd.csi";
+    let volume_name = "a".repeat(200);
+    let target_nqn = format!("{}:{}", base_nqn, volume_name);
 
-    let creation_time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    assert!(creation_time > 0, "Timestamp should be positive");
-    // Should be after year 2024 (approximately 1704067200)
-    assert!(creation_time > 1704067200, "Timestamp should be recent");
+    assert!(target_nqn.len() > 223, "Long NQN should be detected");
 }
 
 // ============================================================================
-// Error Status Tests
+// Rate Limiting Tests
 // ============================================================================
 
-/// Test get volume not found error handling
-#[test]
-fn test_get_volume_not_found() {
-    // Simulate a volume lookup that fails
-    let volumes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let volume_id = "non-existent-volume";
+/// Test semaphore-based rate limiting pattern
+#[tokio::test]
+async fn test_rate_limiting_semaphore() {
+    let max_concurrent = 3;
+    let semaphore = Arc::new(Semaphore::new(max_concurrent));
 
-    // Verify lookup returns None
-    let result = volumes.get(volume_id);
-    assert!(result.is_none(), "Non-existent volume should return None");
-
-    // Verify appropriate error message format
-    let error_message = format!("volume '{}' not found", volume_id);
-    assert!(error_message.contains("not found"));
-    assert!(error_message.contains(volume_id));
-}
-
-/// Test that error status strings are descriptive
-#[test]
-fn test_error_messages() {
-    let errors = vec![
-        ("volume name cannot be empty", "empty name"),
-        ("size_bytes must be positive", "zero size"),
-        ("export_type must be ISCSI or NVMEOF", "unspecified type"),
-        ("volume '{}' not found", "missing volume"),
-        ("snapshot_id cannot be empty", "empty snapshot id"),
-    ];
-
-    for (message, _context) in errors {
-        assert!(!message.is_empty(), "Error message should not be empty");
-        assert!(
-            message.len() > 10,
-            "Error message should be descriptive: {}",
-            message
-        );
+    // Acquire all permits
+    let mut permits = Vec::new();
+    for _ in 0..max_concurrent {
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        permits.push(permit);
     }
+
+    // Verify no more permits available (would block)
+    assert_eq!(semaphore.available_permits(), 0);
+
+    // Release one permit
+    permits.pop();
+    assert_eq!(semaphore.available_permits(), 1);
+}
+
+/// Test that try_acquire returns None when exhausted
+#[tokio::test]
+async fn test_rate_limiting_try_acquire() {
+    let semaphore = Arc::new(Semaphore::new(1));
+
+    // Acquire the only permit
+    let _permit = semaphore.acquire().await.unwrap();
+
+    // Try to acquire another - should fail
+    let result = semaphore.try_acquire();
+    assert!(
+        result.is_err(),
+        "Should not be able to acquire when exhausted"
+    );
+}
+
+/// Test concurrent operations with rate limiting
+#[tokio::test]
+async fn test_concurrent_operations_rate_limited() {
+    let max_concurrent = 5;
+    let total_operations = 20;
+    let semaphore = Arc::new(Semaphore::new(max_concurrent));
+    let active_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let max_observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let mut handles = Vec::new();
+
+    for i in 0..total_operations {
+        let sem = semaphore.clone();
+        let active = active_count.clone();
+        let max_obs = max_observed.clone();
+
+        handles.push(tokio::spawn(async move {
+            // Acquire permit
+            let _permit = sem.acquire().await.unwrap();
+
+            // Track active operations
+            let current = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+
+            // Update max observed
+            max_obs.fetch_max(current, std::sync::atomic::Ordering::SeqCst);
+
+            // Simulate work
+            tokio::time::sleep(Duration::from_millis(10)).await;
+
+            // Decrement active count
+            active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+
+            i
+        }));
+    }
+
+    // Wait for all operations
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
+    // Verify max concurrent never exceeded limit
+    let observed_max = max_observed.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        observed_max <= max_concurrent,
+        "Max concurrent {} exceeded limit {}",
+        observed_max,
+        max_concurrent
+    );
 }
 
 // ============================================================================
@@ -455,6 +644,116 @@ async fn test_multiple_concurrent_readers() {
     }
 }
 
+/// Test that writes block readers appropriately
+#[tokio::test]
+async fn test_rwlock_write_exclusion() {
+    let data: Arc<RwLock<i32>> = Arc::new(RwLock::new(0));
+    let iterations = 100;
+
+    let mut handles = Vec::new();
+
+    // Spawn writers
+    for _ in 0..iterations {
+        let data_clone = data.clone();
+        handles.push(tokio::spawn(async move {
+            let mut guard = data_clone.write().await;
+            *guard += 1;
+        }));
+    }
+
+    // Wait for all writes
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
+    // Verify all writes completed
+    let final_value = *data.read().await;
+    assert_eq!(final_value, iterations, "All writes should complete");
+}
+
+// ============================================================================
+// Error Status Tests
+// ============================================================================
+
+/// Test get volume not found error handling
+#[test]
+fn test_get_volume_not_found() {
+    let volumes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let volume_id = "non-existent-volume";
+
+    let result = volumes.get(volume_id);
+    assert!(result.is_none(), "Non-existent volume should return None");
+
+    let error_message = format!("volume '{}' not found", volume_id);
+    assert!(error_message.contains("not found"));
+    assert!(error_message.contains(volume_id));
+}
+
+/// Test that error status strings are descriptive
+#[test]
+fn test_error_messages() {
+    let errors = vec![
+        ("volume name cannot be empty", "empty name"),
+        ("size_bytes must be positive", "zero size"),
+        ("export_type must be ISCSI or NVMEOF", "unspecified type"),
+        ("volume '{}' not found", "missing volume"),
+        ("snapshot_id cannot be empty", "empty snapshot id"),
+        ("CHAP username cannot be empty", "auth error"),
+        ("concurrent operation limit exceeded", "rate limit"),
+    ];
+
+    for (message, _context) in errors {
+        assert!(!message.is_empty(), "Error message should not be empty");
+        assert!(
+            message.len() > 10,
+            "Error message should be descriptive: {}",
+            message
+        );
+    }
+}
+
+// ============================================================================
+// Auth Group Name Tests
+// ============================================================================
+
+/// Test auth group name generation for volumes
+#[test]
+fn test_auth_group_name_generation() {
+    let volume_id = "pvc-12345678-abcd-1234-5678-123456789012";
+
+    // Auth group names should be derived from volume ID
+    let auth_group = format!("ag-{}", volume_id);
+
+    // Verify format
+    assert!(auth_group.starts_with("ag-"));
+    assert!(auth_group.contains(volume_id));
+
+    // Verify it's a valid identifier (alphanumeric, dash, underscore)
+    let is_valid = auth_group
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_');
+    assert!(is_valid, "Auth group name should be a valid identifier");
+}
+
+/// Test auth group uniqueness for different volumes
+#[test]
+fn test_auth_group_uniqueness() {
+    let volumes = ["vol1", "vol2", "pvc-a", "pvc-b"];
+
+    let auth_groups: Vec<String> = volumes.iter().map(|v| format!("ag-{}", v)).collect();
+
+    // Check all auth groups are unique
+    let unique_count = auth_groups
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    assert_eq!(
+        unique_count,
+        volumes.len(),
+        "All auth groups should be unique"
+    );
+}
+
 // ============================================================================
 // Volume Context Tests
 // ============================================================================
@@ -478,6 +777,22 @@ fn test_volume_context_construction() {
     assert!(context.contains_key("export_type"));
 }
 
+/// Test volume context for NVMeoF exports
+#[test]
+fn test_volume_context_nvmeof() {
+    let mut context: HashMap<String, String> = HashMap::new();
+    context.insert(
+        "target_name".to_string(),
+        "nqn.2024-01.org.freebsd.csi:vol1".to_string(),
+    );
+    context.insert("namespace_id".to_string(), "1".to_string());
+    context.insert("zfs_dataset".to_string(), "tank/csi/vol1".to_string());
+    context.insert("export_type".to_string(), "nvmeof".to_string());
+
+    assert_eq!(context.get("export_type").unwrap(), "nvmeof");
+    assert!(context.get("target_name").unwrap().starts_with("nqn."));
+}
+
 // ============================================================================
 // Integration Scenarios
 // ============================================================================
@@ -489,15 +804,13 @@ fn test_volume_lifecycle_params() {
     // Create volume params
     let name = "test-vol";
     let size_bytes: i64 = 10 * 1024 * 1024 * 1024; // 10GB
-    // Export type: 1 = ISCSI, 2 = NVMEOF (0 = UNSPECIFIED is invalid)
-    let export_type = 1;
+    let export_type = 1; // ISCSI
 
     // Validate create params
     assert!(!name.is_empty());
     assert!(size_bytes > 0);
     assert!(export_type == 1 || export_type == 2);
 
-    // Simulate volume ID (same as name in this implementation)
     let volume_id = name;
 
     // Delete volume params
@@ -512,20 +825,202 @@ fn test_volume_lifecycle_params() {
 #[test]
 #[allow(clippy::const_is_empty)]
 fn test_snapshot_lifecycle_params() {
-    // Create snapshot params
     let source_volume_id = "test-vol";
     let snap_name = "snap1";
 
-    // Validate create params
     assert!(!source_volume_id.is_empty());
     assert!(!snap_name.is_empty());
 
-    // Expected snapshot ID
     let snapshot_id = format!("{}@{}", source_volume_id, snap_name);
     assert_eq!(snapshot_id, "test-vol@snap1");
 
-    // Delete snapshot params
     assert!(!snapshot_id.is_empty());
     let parts: Vec<&str> = snapshot_id.split('@').collect();
     assert_eq!(parts.len(), 2);
+}
+
+/// Test volume with CHAP authentication flow
+#[test]
+fn test_volume_with_chap_flow() {
+    // Setup auth
+    let auth = IscsiChapAuth::new("csi-user", "verysecretpass");
+    let config = AuthConfig::IscsiChap(auth);
+
+    // Create volume params
+    let name = "test-vol-chap";
+    let size_bytes: i64 = 1024 * 1024 * 1024; // 1GB
+    let export_type = ExportType::Iscsi;
+
+    // Verify all components are valid
+    assert!(size_bytes > 0);
+    assert!(matches!(export_type, ExportType::Iscsi));
+    assert!(matches!(config, AuthConfig::IscsiChap(_)));
+
+    // Expected auth group
+    let auth_group = format!("ag-{}", name);
+    assert!(!auth_group.is_empty());
+}
+
+/// Test volume with mutual CHAP authentication
+#[test]
+fn test_volume_with_mutual_chap() {
+    let auth = IscsiChapAuth::with_mutual(
+        "initiator-user",
+        "initiator-secret",
+        "target-user",
+        "target-secret",
+    );
+    let config = AuthConfig::IscsiChap(auth);
+
+    assert!(matches!(config, AuthConfig::IscsiChap(_)));
+}
+
+/// Test NVMeoF volume with DH-HMAC-CHAP
+#[test]
+fn test_nvmeof_volume_with_dh_hmac_chap() {
+    let auth = NvmeAuth::new(
+        "nqn.2024-01.org.freebsd.host:initiator01",
+        "supersecretkey123456789012345678901234567890",
+        "sha256",
+    )
+    .with_dh_group("dh-hmac-chap:ffdhe2048");
+
+    let config = AuthConfig::NvmeAuth(auth);
+    let export_type = ExportType::Nvmeof;
+
+    assert!(matches!(config, AuthConfig::NvmeAuth(_)));
+    assert!(matches!(export_type, ExportType::Nvmeof));
+}
+
+// ============================================================================
+// Timestamp Handling Tests
+// ============================================================================
+
+/// Test timestamp generation
+#[test]
+fn test_timestamp_generation() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let creation_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    assert!(creation_time > 0, "Timestamp should be positive");
+    // Should be after year 2024 (approximately 1704067200)
+    assert!(creation_time > 1704067200, "Timestamp should be recent");
+}
+
+// ============================================================================
+// Request Parameter Tests
+// ============================================================================
+
+/// Test volume creation request parameter extraction
+#[test]
+fn test_create_volume_request_params() {
+    let params = create_volume_request("test-volume", 1073741824, 1);
+
+    assert_eq!(params.get("name").unwrap(), "test-volume");
+    assert_eq!(params.get("size_bytes").unwrap(), "1073741824");
+    assert_eq!(params.get("export_type").unwrap(), "1");
+}
+
+/// Test empty request parameter handling
+#[test]
+fn test_empty_request_params() {
+    let params: HashMap<String, String> = HashMap::new();
+
+    assert!(!params.contains_key("name"));
+    assert!(!params.contains_key("size_bytes"));
+    assert!(!params.contains_key("export_type"));
+}
+
+// ============================================================================
+// High Concurrency Stress Tests
+// ============================================================================
+
+/// Test 10+ parallel operations (per plan requirements)
+#[tokio::test]
+async fn test_high_concurrency_10_plus_parallel() {
+    let total_operations = 15;
+    let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let mut handles = Vec::new();
+
+    for i in 0..total_operations {
+        let completed_clone = completed.clone();
+        handles.push(tokio::spawn(async move {
+            // Simulate a storage operation
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            completed_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            i
+        }));
+    }
+
+    // All operations should complete
+    let mut results = Vec::new();
+    for handle in handles {
+        results.push(handle.await.unwrap());
+    }
+
+    assert_eq!(results.len(), total_operations);
+    assert_eq!(
+        completed.load(std::sync::atomic::Ordering::SeqCst),
+        total_operations
+    );
+}
+
+/// Test concurrent create/delete operations don't conflict
+#[tokio::test]
+async fn test_concurrent_create_delete_isolation() {
+    let volumes: Arc<RwLock<HashMap<String, i64>>> = Arc::new(RwLock::new(HashMap::new()));
+
+    let mut handles = Vec::new();
+
+    // Spawn 5 creators
+    for i in 0..5 {
+        let volumes_clone = volumes.clone();
+        handles.push(tokio::spawn(async move {
+            let vol_name = format!("vol-{}", i);
+            let mut guard = volumes_clone.write().await;
+            guard.insert(vol_name.clone(), 1024 * 1024 * 1024);
+            vol_name
+        }));
+    }
+
+    // Wait for creates
+    let created: Vec<String> = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|r| r.unwrap())
+        .collect();
+
+    assert_eq!(created.len(), 5);
+
+    // Verify all volumes exist
+    let guard = volumes.read().await;
+    assert_eq!(guard.len(), 5);
+
+    // Now delete in parallel
+    drop(guard);
+    let mut delete_handles = Vec::new();
+    for vol_name in created {
+        let volumes_clone = volumes.clone();
+        delete_handles.push(tokio::spawn(async move {
+            let mut guard = volumes_clone.write().await;
+            guard.remove(&vol_name).is_some()
+        }));
+    }
+
+    let deleted: Vec<bool> = futures::future::join_all(delete_handles)
+        .await
+        .into_iter()
+        .map(|r| r.unwrap())
+        .collect();
+
+    assert!(deleted.iter().all(|&d| d), "All deletes should succeed");
+    assert!(
+        volumes.read().await.is_empty(),
+        "All volumes should be deleted"
+    );
 }

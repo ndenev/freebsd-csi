@@ -2,6 +2,9 @@
 //!
 //! Provides plugin identification and capability reporting to Kubernetes.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tonic::{Request, Response, Status};
 
 use crate::csi;
@@ -9,17 +12,59 @@ use crate::csi;
 pub const DRIVER_NAME: &str = "csi.freebsd.org";
 pub const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Shared readiness state for the CSI driver
+///
+/// Used by the probe() method to report actual readiness status
+/// and can be updated by signal handlers during shutdown.
+#[derive(Debug)]
+pub struct ReadinessState {
+    ready: AtomicBool,
+}
+
+impl ReadinessState {
+    pub fn new() -> Self {
+        Self {
+            ready: AtomicBool::new(false),
+        }
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::SeqCst)
+    }
+
+    pub fn set_ready(&self, ready: bool) {
+        self.ready.store(ready, Ordering::SeqCst);
+    }
+}
+
+impl Default for ReadinessState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// CSI Identity Service
 ///
 /// Implements the CSI Identity service which provides:
 /// - Plugin identification (name and version)
 /// - Plugin capability reporting
 /// - Readiness probing
-pub struct IdentityService;
+pub struct IdentityService {
+    readiness: Option<Arc<ReadinessState>>,
+}
 
 impl IdentityService {
+    /// Create a new IdentityService without shared readiness state
+    /// (always reports ready for backward compatibility)
     pub fn new() -> Self {
-        Self
+        Self { readiness: None }
+    }
+
+    /// Create a new IdentityService with shared readiness state
+    pub fn with_readiness(readiness: Arc<ReadinessState>) -> Self {
+        Self {
+            readiness: Some(readiness),
+        }
     }
 }
 
@@ -72,12 +117,20 @@ impl csi::identity_server::Identity for IdentityService {
     }
 
     /// Probes the plugin to check if it is ready.
+    ///
+    /// Returns ready=true when the driver has completed initialization
+    /// and is accepting requests. Returns ready=false during startup
+    /// or shutdown.
     async fn probe(
         &self,
         _request: Request<csi::ProbeRequest>,
     ) -> Result<Response<csi::ProbeResponse>, Status> {
-        // The plugin is ready when this service is running
-        Ok(Response::new(csi::ProbeResponse { ready: Some(true) }))
+        let ready = match &self.readiness {
+            Some(state) => state.is_ready(),
+            // Backward compatibility: if no readiness state provided, always ready
+            None => true,
+        };
+        Ok(Response::new(csi::ProbeResponse { ready: Some(ready) }))
     }
 }
 
@@ -118,5 +171,42 @@ mod tests {
         let probe = response.into_inner();
 
         assert_eq!(probe.ready, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_probe_with_readiness_state() {
+        use std::sync::Arc;
+
+        let readiness = Arc::new(ReadinessState::new());
+        let service = IdentityService::with_readiness(readiness.clone());
+
+        // Initially not ready
+        let request = Request::new(csi::ProbeRequest {});
+        let response = Identity::probe(&service, request).await.unwrap();
+        assert_eq!(response.into_inner().ready, Some(false));
+
+        // Set ready
+        readiness.set_ready(true);
+        let request = Request::new(csi::ProbeRequest {});
+        let response = Identity::probe(&service, request).await.unwrap();
+        assert_eq!(response.into_inner().ready, Some(true));
+
+        // Set not ready (shutdown)
+        readiness.set_ready(false);
+        let request = Request::new(csi::ProbeRequest {});
+        let response = Identity::probe(&service, request).await.unwrap();
+        assert_eq!(response.into_inner().ready, Some(false));
+    }
+
+    #[test]
+    fn test_readiness_state() {
+        let state = ReadinessState::new();
+        assert!(!state.is_ready());
+
+        state.set_ready(true);
+        assert!(state.is_ready());
+
+        state.set_ready(false);
+        assert!(!state.is_ready());
     }
 }

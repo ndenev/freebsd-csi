@@ -15,6 +15,11 @@ parameters:
   exportType: iscsi
   fsType: {{ .Values.storageClassIscsi.parameters.fsType | default "ext4" }}
   portal: {{ .Values.storageClassIscsi.parameters.portal | quote }}
+  {{- /* CHAP authentication secret parameters */ -}}
+  {{- if .Values.storageClassIscsi.chapSecret.name }}
+  csi.storage.k8s.io/provisioner-secret-name: {{ .Values.storageClassIscsi.chapSecret.name | quote }}
+  csi.storage.k8s.io/provisioner-secret-namespace: {{ .Values.storageClassIscsi.chapSecret.namespace | default .Release.Namespace | quote }}
+  {{- end }}
 allowVolumeExpansion: {{ .Values.storageClassIscsi.allowVolumeExpansion }}
 reclaimPolicy: {{ .Values.storageClassIscsi.reclaimPolicy }}
 volumeBindingMode: {{ .Values.storageClassIscsi.volumeBindingMode }}
@@ -38,6 +43,11 @@ parameters:
   fsType: {{ .Values.storageClassNvmeof.parameters.fsType | default "ext4" }}
   transportAddr: {{ .Values.storageClassNvmeof.parameters.transportAddr | quote }}
   transportPort: {{ .Values.storageClassNvmeof.parameters.transportPort | default "4420" | quote }}
+  {{- /* NVMeoF DH-HMAC-CHAP authentication secret parameters */ -}}
+  {{- if .Values.storageClassNvmeof.authSecret.name }}
+  csi.storage.k8s.io/provisioner-secret-name: {{ .Values.storageClassNvmeof.authSecret.name | quote }}
+  csi.storage.k8s.io/provisioner-secret-namespace: {{ .Values.storageClassNvmeof.authSecret.namespace | default .Release.Namespace | quote }}
+  {{- end }}
 allowVolumeExpansion: {{ .Values.storageClassNvmeof.allowVolumeExpansion }}
 reclaimPolicy: {{ .Values.storageClassNvmeof.reclaimPolicy }}
 volumeBindingMode: {{ .Values.storageClassNvmeof.volumeBindingMode }}

@@ -4,31 +4,19 @@
 //! and communicates with the ctld-agent for iSCSI target management.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
+use tokio::signal;
 use tracing::{Level, debug, info};
 use tracing_subscriber::FmtSubscriber;
 
-/// CSI proto generated types
-pub mod csi {
-    tonic::include_proto!("csi.v1");
-}
-
-/// ctld-agent proto generated types (client)
-pub mod agent {
-    tonic::include_proto!("ctld_agent.v1");
-}
-
-mod agent_client;
-mod controller;
-mod identity;
-mod node;
-mod platform;
-
-pub use agent_client::{AgentClient, TlsConfig};
-pub use controller::ControllerService;
-pub use identity::{DRIVER_NAME, DRIVER_VERSION, IdentityService};
-pub use node::NodeService;
+use csi_driver::agent_client::TlsConfig;
+use csi_driver::controller::ControllerService;
+use csi_driver::csi;
+use csi_driver::identity::{IdentityService, ReadinessState};
+use csi_driver::metrics;
+use csi_driver::node::NodeService;
 
 /// CLI arguments for the CSI driver
 #[derive(Parser, Debug)]
@@ -78,6 +66,11 @@ struct Args {
     /// TLS domain name (for server certificate verification)
     #[arg(long, env = "TLS_DOMAIN", default_value = "ctld-agent")]
     tls_domain: String,
+
+    /// Prometheus metrics HTTP address (e.g., 0.0.0.0:9090)
+    /// If not set, metrics endpoint is disabled
+    #[arg(long, env = "METRICS_ADDR")]
+    metrics_addr: Option<String>,
 }
 
 #[tokio::main]
@@ -96,6 +89,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
+
+    // Initialize Prometheus metrics endpoint if configured
+    if let Some(ref addr_str) = args.metrics_addr {
+        let addr = addr_str
+            .parse()
+            .map_err(|e| format!("Invalid metrics address '{}': {}", addr_str, e))?;
+        if let Err(e) = metrics::init_metrics(addr) {
+            return Err(format!("Failed to initialize metrics: {}", e).into());
+        }
+    }
 
     // Determine node_id
     let node_id = match args.node_id {
@@ -116,13 +119,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse CSI endpoint
     let endpoint = args.endpoint.clone();
 
+    // Create shared readiness state
+    let readiness = Arc::new(ReadinessState::new());
+
     // Create services and build gRPC server
     use csi::controller_server::ControllerServer;
     use csi::identity_server::IdentityServer;
     use csi::node_server::NodeServer;
     use tonic::transport::Server;
 
-    let identity = IdentityService::new();
+    let identity = IdentityService::with_readiness(readiness.clone());
     let mut server = Server::builder();
     let mut router = server.add_service(IdentityServer::new(identity));
 
@@ -165,7 +171,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         router = router.add_service(NodeServer::new(node_svc));
     }
 
-    // Start server based on endpoint type
+    // Mark as ready before starting server
+    readiness.set_ready(true);
+
+    // Start server based on endpoint type with graceful shutdown
     if endpoint.starts_with("unix://") {
         let path = endpoint.strip_prefix("unix://").unwrap();
 
@@ -185,13 +194,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let stream = UnixListenerStream::new(listener);
 
         info!("CSI driver listening on {}", endpoint);
-        router.serve_with_incoming(stream).await?;
+
+        // Serve with graceful shutdown on SIGTERM/SIGINT
+        let readiness_clone = readiness.clone();
+        router
+            .serve_with_incoming_shutdown(stream, async move {
+                shutdown_signal().await;
+                info!("Shutdown signal received, draining connections...");
+                readiness_clone.set_ready(false);
+            })
+            .await?;
     } else {
         // TCP endpoint
         let addr = endpoint.parse()?;
         info!("CSI driver listening on {}", addr);
-        router.serve(addr).await?;
+
+        // Serve with graceful shutdown
+        let readiness_clone = readiness.clone();
+        router
+            .serve_with_shutdown(addr, async move {
+                shutdown_signal().await;
+                info!("Shutdown signal received, draining connections...");
+                readiness_clone.set_ready(false);
+            })
+            .await?;
     }
 
+    info!("CSI driver shutdown complete");
     Ok(())
+}
+
+/// Wait for shutdown signal (SIGTERM or SIGINT)
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            info!("Received SIGINT");
+        }
+        _ = terminate => {
+            info!("Received SIGTERM");
+        }
+    }
 }

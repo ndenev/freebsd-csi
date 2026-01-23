@@ -8,6 +8,45 @@ enum ExportType {
     EXPORT_TYPE_NVMEOF = 2;
 }
 
+// iSCSI CHAP authentication credentials
+// Used for both initiator authentication (forward CHAP) and mutual authentication
+message IscsiChapCredentials {
+    // Forward CHAP: initiator authenticates to target
+    string username = 1;
+    string secret = 2;
+
+    // Mutual CHAP (optional): target authenticates to initiator
+    // Only used if mutual_username is non-empty
+    string mutual_username = 3;
+    string mutual_secret = 4;
+}
+
+// NVMeoF authentication credentials (FreeBSD 15+)
+//
+// Note: FreeBSD 15's ctld does not yet support DH-HMAC-CHAP for NVMeoF.
+// Currently only host-nqn based access control is implemented.
+// The secret/hash_function/dh_group fields are reserved for future use
+// when ctld adds DH-HMAC-CHAP support.
+message NvmeAuthCredentials {
+    // Host NQN for access control (required)
+    // Only hosts with matching NQN can connect to the controller
+    string host_nqn = 1;
+
+    // Reserved for future DH-HMAC-CHAP support
+    string secret = 2;
+    string hash_function = 3;
+    string dh_group = 4;
+}
+
+// Authentication credentials - protocol-specific
+// The auth type should match the export_type in the request
+message AuthCredentials {
+    oneof credentials {
+        IscsiChapCredentials iscsi_chap = 1;
+        NvmeAuthCredentials nvme_auth = 2;
+    }
+}
+
 // Volume represents a ZFS dataset exported via iSCSI or NVMeoF
 message Volume {
     string id = 1;
@@ -25,6 +64,11 @@ message CreateVolumeRequest {
     int64 size_bytes = 2;
     ExportType export_type = 3;
     map<string, string> parameters = 4;
+
+    // Optional authentication credentials
+    // If provided, the target will require authentication
+    // Type should match export_type (iscsi_chap for iSCSI, nvme_auth for NVMeoF)
+    AuthCredentials auth = 5;
 }
 
 message CreateVolumeResponse {
@@ -107,6 +151,21 @@ message GetSnapshotResponse {
     Snapshot snapshot = 1;
 }
 
+// Capacity information for the storage pool
+message GetCapacityRequest {
+    // Optional: filter by parameters (e.g., exportType)
+    map<string, string> parameters = 1;
+}
+
+message GetCapacityResponse {
+    // Available capacity in bytes
+    int64 available_capacity = 1;
+    // Total capacity in bytes
+    int64 total_capacity = 2;
+    // Used capacity in bytes
+    int64 used_capacity = 3;
+}
+
 // The storage agent service
 service StorageAgent {
     // Volume operations
@@ -121,4 +180,7 @@ service StorageAgent {
     rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
     rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
     rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
+
+    // Capacity information
+    rpc GetCapacity(GetCapacityRequest) returns (GetCapacityResponse);
 }

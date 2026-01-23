@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "csi_driver"
+path = "src/lib.rs"
+
+[[bin]]
+name = "csi-driver"
+path = "src/main.rs"
+
 [dependencies]
 tokio.workspace = true
 tonic.workspace = true
@@ -19,6 +27,10 @@ clap.workspace = true
 uuid.workspace = true
 hostname.workspace = true
 tokio-stream = "0.1"
+
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
 
 [build-dependencies]
 tonic-prost-build = "0.14"

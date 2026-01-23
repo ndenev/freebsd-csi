@@ -301,6 +301,122 @@ impl ToUcl for Controller {
 }
 
 // ============================================================================
+// Auth Group types
+// ============================================================================
+
+use super::types::{AuthConfig, IscsiChapAuth, NvmeAuth};
+
+/// Authentication group for ctld.
+///
+/// Generates UCL auth-group blocks with CHAP credentials for iSCSI
+/// or host-nqn access control for NVMeoF.
+///
+/// Note: FreeBSD 15's ctld does not yet support DH-HMAC-CHAP for NVMeoF.
+/// NVMeoF auth-groups only support host-nqn and host-address restrictions.
+#[derive(Debug, Clone)]
+pub struct AuthGroup {
+    /// CHAP credentials (optional, iSCSI only)
+    pub chap: Option<ChapCredential>,
+    /// Mutual CHAP credentials (optional, iSCSI only)
+    pub chap_mutual: Option<ChapCredential>,
+    /// NVMeoF host NQN restriction (optional)
+    pub host_nqn: Option<String>,
+}
+
+/// CHAP credential for UCL output
+#[derive(Debug, Clone)]
+pub struct ChapCredential {
+    pub username: String,
+    pub secret: String,
+}
+
+impl AuthGroup {
+    /// Create an AuthGroup from an AuthConfig.
+    /// Returns None if no authentication is configured.
+    pub fn from_auth_config(auth: &AuthConfig, _volume_name: &str) -> Option<Self> {
+        match auth {
+            AuthConfig::None => None,
+            AuthConfig::IscsiChap(chap) => Some(Self::from_iscsi_chap(chap)),
+            AuthConfig::NvmeAuth(nvme) => Some(Self::from_nvme_auth(nvme)),
+        }
+    }
+
+    /// Create from iSCSI CHAP credentials
+    fn from_iscsi_chap(chap: &IscsiChapAuth) -> Self {
+        let chap_cred = ChapCredential {
+            username: chap.username.clone(),
+            secret: chap.secret.clone(),
+        };
+
+        let chap_mutual = if chap.has_mutual() {
+            Some(ChapCredential {
+                username: chap.mutual_username.clone().unwrap_or_default(),
+                secret: chap.mutual_secret.clone().unwrap_or_default(),
+            })
+        } else {
+            None
+        };
+
+        Self {
+            chap: Some(chap_cred),
+            chap_mutual,
+            host_nqn: None,
+        }
+    }
+
+    /// Create from NVMeoF auth credentials
+    ///
+    /// Note: FreeBSD 15's ctld does not support DH-HMAC-CHAP for NVMeoF.
+    /// We generate host-nqn based access control instead, which restricts
+    /// which NVMe hosts can connect to the controller.
+    fn from_nvme_auth(nvme: &NvmeAuth) -> Self {
+        Self {
+            chap: None,
+            chap_mutual: None,
+            host_nqn: Some(nvme.host_nqn.clone()),
+        }
+    }
+}
+
+impl ToUcl for AuthGroup {
+    fn to_ucl(&self, level: usize) -> String {
+        let mut s = String::new();
+        let ind = indent(level);
+
+        // Write CHAP credentials (iSCSI)
+        if let Some(ref chap) = self.chap {
+            writeln!(
+                s,
+                "{}chap {} {};",
+                ind,
+                ucl_quote(&chap.username),
+                ucl_quote(&chap.secret)
+            )
+            .unwrap();
+        }
+
+        // Write mutual CHAP credentials (iSCSI)
+        if let Some(ref mutual) = self.chap_mutual {
+            writeln!(
+                s,
+                "{}chap-mutual {} {};",
+                ind,
+                ucl_quote(&mutual.username),
+                ucl_quote(&mutual.secret)
+            )
+            .unwrap();
+        }
+
+        // Write host-nqn restriction (NVMeoF)
+        if let Some(ref nqn) = self.host_nqn {
+            writeln!(s, "{}host-nqn = {};", ind, ucl_quote(nqn)).unwrap();
+        }
+
+        s
+    }
+}
+
+// ============================================================================
 // Top-level config
 // ============================================================================
 
@@ -417,12 +533,29 @@ impl UclConfigManager {
         Ok(user_content)
     }
 
-    /// Write the config file with user content + CSI-managed targets
+    /// Write the config file with user content + CSI-managed targets (no auth groups).
+    ///
+    /// This is a convenience wrapper around `write_config_with_auth` for targets
+    /// that don't require authentication.
+    #[allow(dead_code)]
     pub fn write_config(
         &self,
         user_content: &str,
         iscsi_targets: &[(String, Target)],
         nvme_controllers: &[(String, Controller)],
+    ) -> Result<()> {
+        self.write_config_with_auth(user_content, iscsi_targets, nvme_controllers, &[])
+    }
+
+    /// Write the config file with user content + CSI-managed targets + auth groups.
+    ///
+    /// This extended version supports per-volume authentication groups for CHAP.
+    pub fn write_config_with_auth(
+        &self,
+        user_content: &str,
+        iscsi_targets: &[(String, Target)],
+        nvme_controllers: &[(String, Controller)],
+        auth_groups: &[(String, AuthGroup)],
     ) -> Result<()> {
         let mut content = user_content.to_string();
 
@@ -434,6 +567,13 @@ impl UclConfigManager {
         // Add CSI-managed section
         content.push_str(CSI_SECTION_START);
         content.push('\n');
+
+        // Write auth groups first (they must be defined before targets reference them)
+        for (name, auth_group) in auth_groups {
+            writeln!(content, "auth-group {} {{", ucl_quote(name)).unwrap();
+            content.push_str(&auth_group.to_ucl(1));
+            writeln!(content, "}}").unwrap();
+        }
 
         // Write iSCSI targets
         for (iqn, target) in iscsi_targets {

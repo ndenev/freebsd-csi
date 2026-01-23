@@ -10,8 +10,8 @@ use std::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 
 use super::error::{CtlError, Result};
-use super::types::{DevicePath, ExportType, Iqn, Nqn, TargetName};
-use super::ucl_config::{Controller, CtlConfig, Target, UclConfigManager};
+use super::types::{AuthConfig, DevicePath, ExportType, Iqn, Nqn, TargetName};
+use super::ucl_config::{AuthGroup, Controller, CtlConfig, Target, UclConfigManager};
 
 /// Represents a CTL export (either iSCSI target or NVMeoF controller)
 #[derive(Debug, Clone)]
@@ -26,6 +26,8 @@ pub struct Export {
     pub target_name: TargetName,
     /// LUN ID (for iSCSI) or Namespace ID (for NVMeoF)
     pub lun_id: u32,
+    /// Authentication configuration (CHAP for iSCSI, DH-HMAC-CHAP for NVMeoF)
+    pub auth: AuthConfig,
 }
 
 /// Unified manager for CTL exports (iSCSI and NVMeoF)
@@ -129,6 +131,8 @@ impl CtlManager {
                     export_type: ExportType::Iscsi,
                     target_name: iqn.into(),
                     lun_id,
+                    // Auth is not persisted in UCL config, defaults to none
+                    auth: AuthConfig::None,
                 })
             })
             .collect();
@@ -154,6 +158,8 @@ impl CtlManager {
                     export_type: ExportType::Nvmeof,
                     target_name: nqn.into(),
                     lun_id: ns_id,
+                    // Auth is not persisted in UCL config, defaults to none
+                    auth: AuthConfig::None,
                 })
             })
             .collect();
@@ -173,13 +179,21 @@ impl CtlManager {
     /// Export a volume via iSCSI or NVMeoF
     ///
     /// Updates in-memory cache only. Call `write_config()` to persist.
-    #[instrument(skip(self))]
+    ///
+    /// # Arguments
+    /// * `volume_name` - Unique name for the volume
+    /// * `device_path` - Path to the backing device (e.g., /dev/zvol/tank/csi/vol1)
+    /// * `export_type` - iSCSI or NVMeoF
+    /// * `lun_id` - LUN ID for iSCSI or Namespace ID for NVMeoF
+    /// * `auth` - Optional authentication configuration (CHAP/DH-HMAC-CHAP)
+    #[instrument(skip(self, auth))]
     pub fn export_volume(
         &self,
         volume_name: &str,
         device_path: &str,
         export_type: ExportType,
         lun_id: u32,
+        auth: AuthConfig,
     ) -> Result<Export> {
         // Validate and parse inputs using newtypes
         let device_path = DevicePath::parse(device_path)?;
@@ -189,8 +203,11 @@ impl CtlManager {
         };
 
         debug!(
-            "Exporting volume {} as {} target {}",
-            volume_name, export_type, target_name
+            "Exporting volume {} as {} target {} (auth={})",
+            volume_name,
+            export_type,
+            target_name,
+            if auth.is_some() { "enabled" } else { "none" }
         );
 
         let export = Export {
@@ -199,6 +216,7 @@ impl CtlManager {
             export_type,
             target_name,
             lun_id,
+            auth,
         };
 
         // Use Entry API for atomic check-and-insert
@@ -241,22 +259,29 @@ impl CtlManager {
     /// Write UCL config and reload ctld.
     ///
     /// Preserves user-managed targets while updating CSI-managed targets.
+    /// Generates per-volume auth-groups for targets that require authentication.
     #[instrument(skip(self))]
     pub fn write_config(&self) -> Result<()> {
         let exports = self.exports.read().unwrap();
 
-        // Convert exports to Target/Controller types
+        // Convert exports to Target/Controller types and collect auth groups
         let mut iscsi_targets: Vec<(String, Target)> = Vec::new();
         let mut nvme_controllers: Vec<(String, Controller)> = Vec::new();
+        let mut auth_groups: Vec<(String, AuthGroup)> = Vec::new();
 
         for export in exports.values() {
+            // Get auth group name (either "no-authentication" or per-volume "ag-<name>")
+            let auth_group_name = export.auth.auth_group_name(&export.volume_name);
+
+            // If this export has authentication, create an auth group entry
+            if let Some(ag) = AuthGroup::from_auth_config(&export.auth, &export.volume_name) {
+                auth_groups.push((auth_group_name.clone(), ag));
+            }
+
             match export.export_type {
                 ExportType::Iscsi => {
-                    // Use no-authentication for CSI-managed iSCSI targets
-                    // The CSI driver doesn't currently support CHAP credential configuration
-                    // TODO: Add CHAP support when StorageClass parameters are implemented
                     let target = Target::new(
-                        "no-authentication".to_string(),
+                        auth_group_name,
                         self.portal_group_name.clone(),
                         export.lun_id,
                         export.device_path.as_str().to_string(),
@@ -265,10 +290,8 @@ impl CtlManager {
                     iscsi_targets.push((export.target_name.to_string(), target));
                 }
                 ExportType::Nvmeof => {
-                    // NVMeoF uses different auth than iSCSI - use no-authentication for now
-                    // TODO: Add proper NVMe DH-HMAC-CHAP support if needed
                     let controller = Controller::new(
-                        "no-authentication".to_string(),
+                        auth_group_name,
                         self.transport_group.clone(),
                         export.lun_id,
                         export.device_path.as_str().to_string(),
@@ -282,17 +305,22 @@ impl CtlManager {
         drop(exports);
 
         info!(
-            "Writing UCL config with {} iSCSI targets and {} NVMeoF controllers",
+            "Writing UCL config with {} iSCSI targets, {} NVMeoF controllers, {} auth groups",
             iscsi_targets.len(),
-            nvme_controllers.len()
+            nvme_controllers.len(),
+            auth_groups.len()
         );
 
         // Read user content (non-CSI targets)
         let user_content = self.ucl_manager.read_user_content()?;
 
-        // Write config with CSI targets
-        self.ucl_manager
-            .write_config(&user_content, &iscsi_targets, &nvme_controllers)?;
+        // Write config with CSI targets and auth groups
+        self.ucl_manager.write_config_with_auth(
+            &user_content,
+            &iscsi_targets,
+            &nvme_controllers,
+            &auth_groups,
+        )?;
 
         info!("UCL config updated successfully");
 
@@ -336,9 +364,32 @@ mod tests {
             export_type: ExportType::Iscsi,
             target_name: iqn.into(),
             lun_id: 0,
+            auth: AuthConfig::None,
         };
 
         assert_eq!(export.volume_name, "vol1");
         assert_eq!(export.export_type, ExportType::Iscsi);
+        assert!(!export.auth.is_some());
+    }
+
+    #[test]
+    fn test_export_with_chap_auth() {
+        use super::super::types::IscsiChapAuth;
+
+        let device_path = DevicePath::parse("/dev/zvol/tank/vol2").unwrap();
+        let iqn = Iqn::parse("iqn.2024-01.com.example:vol2").unwrap();
+
+        let chap = IscsiChapAuth::new("testuser", "testsecret");
+        let export = Export {
+            volume_name: "vol2".to_string(),
+            device_path,
+            export_type: ExportType::Iscsi,
+            target_name: iqn.into(),
+            lun_id: 0,
+            auth: AuthConfig::IscsiChap(chap),
+        };
+
+        assert!(export.auth.is_some());
+        assert_eq!(export.auth.auth_group_name("vol2"), "ag-vol2");
     }
 }
