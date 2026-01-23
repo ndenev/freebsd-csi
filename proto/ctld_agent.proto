@@ -8,6 +8,22 @@ enum ExportType {
     EXPORT_TYPE_NVMEOF = 2;
 }
 
+// Clone mode determines how volumes are created from snapshots
+enum CloneMode {
+    // Default: server chooses (currently defaults to LINKED)
+    CLONE_MODE_UNSPECIFIED = 0;
+
+    // Instant clone using zfs clone (creates dependency on source snapshot)
+    // Fast, space-efficient, but source volume/snapshot cannot be deleted
+    // until clone is deleted or promoted
+    CLONE_MODE_LINKED = 1;
+
+    // Full copy using zfs send/recv (independent volume)
+    // Slow (time proportional to data size), uses full space,
+    // but no dependencies - source can be deleted immediately
+    CLONE_MODE_COPY = 2;
+}
+
 // iSCSI CHAP authentication credentials
 // Used for both initiator authentication (forward CHAP) and mutual authentication
 message IscsiChapCredentials {
@@ -47,6 +63,27 @@ message AuthCredentials {
     }
 }
 
+// Content source for creating a volume from existing data
+message VolumeContentSource {
+    // Source type: either a snapshot or an existing volume
+    oneof source {
+        // The snapshot to restore from (snapshot ID as returned by CreateSnapshot)
+        // Format: "volume_id@snap_name"
+        string snapshot_id = 1;
+
+        // The source volume to clone from (volume ID)
+        // A temporary snapshot will be created for the clone operation
+        // For COPY mode: temp snapshot is deleted after copy completes
+        // For LINKED mode: temp snapshot is preserved (clone depends on it)
+        string source_volume_id = 3;
+    }
+
+    // How to create the volume from the source
+    // LINKED: fast but creates dependency (zfs clone)
+    // COPY: slow but independent (zfs send/recv)
+    CloneMode clone_mode = 2;
+}
+
 // Volume represents a ZFS dataset exported via iSCSI or NVMeoF
 message Volume {
     string id = 1;
@@ -69,6 +106,10 @@ message CreateVolumeRequest {
     // If provided, the target will require authentication
     // Type should match export_type (iscsi_chap for iSCSI, nvme_auth for NVMeoF)
     AuthCredentials auth = 5;
+
+    // Optional: create volume from existing snapshot
+    // If provided, volume data is populated from the specified snapshot
+    VolumeContentSource content_source = 6;
 }
 
 message CreateVolumeResponse {

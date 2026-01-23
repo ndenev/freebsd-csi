@@ -26,6 +26,12 @@ fn check_command_result(output: &Output, context: &str) -> Result<()> {
     Err(ZfsError::CommandFailed(format!("{}: {}", context, stderr)))
 }
 
+/// Escape a string for safe use in shell commands.
+/// Wraps the string in single quotes and escapes any embedded single quotes.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Validate that a name is safe for use in ZFS commands.
 /// Only allows alphanumeric characters, underscores, hyphens, and periods.
 fn validate_name(name: &str) -> Result<()> {
@@ -475,6 +481,288 @@ impl ZfsManager {
 
         info!(count = results.len(), "Volume scan complete");
         Ok(results)
+    }
+
+    /// Clone a volume from an existing snapshot (instant, creates dependency).
+    ///
+    /// This creates a new volume that shares data blocks with the snapshot.
+    /// The clone depends on the snapshot, which depends on the source volume.
+    /// Use `promote_clone()` to reverse the dependency if needed.
+    #[instrument(skip(self))]
+    pub fn clone_from_snapshot(
+        &self,
+        source_volume: &str,
+        snap_name: &str,
+        target_volume: &str,
+    ) -> Result<Dataset> {
+        validate_name(source_volume)?;
+        validate_name(snap_name)?;
+        validate_name(target_volume)?;
+
+        let snapshot_full = format!("{}@{}", self.full_path(source_volume), snap_name);
+        let target_full = self.full_path(target_volume);
+
+        info!(
+            snapshot = %snapshot_full,
+            target = %target_full,
+            "Cloning volume from snapshot"
+        );
+
+        // Verify snapshot exists
+        let snap_check = Command::new("zfs")
+            .args(["list", "-H", "-t", "snapshot", &snapshot_full])
+            .output()?;
+
+        if !snap_check.status.success() {
+            warn!(snapshot = %snapshot_full, "Snapshot not found for clone");
+            return Err(ZfsError::DatasetNotFound(snapshot_full));
+        }
+
+        // Create the clone
+        let output = Command::new("zfs")
+            .args(["clone", &snapshot_full, &target_full])
+            .output()?;
+
+        if let Err(e) = check_command_result(&output, &target_full) {
+            warn!(
+                snapshot = %snapshot_full,
+                target = %target_full,
+                error = %e,
+                "Failed to create clone"
+            );
+            return Err(e);
+        }
+
+        info!(
+            snapshot = %snapshot_full,
+            target = %target_full,
+            "Clone created successfully"
+        );
+
+        self.get_dataset(target_volume)
+    }
+
+    /// Copy a volume from a snapshot using zfs send/recv (slow, independent).
+    ///
+    /// This creates a fully independent volume with no dependencies.
+    /// The data is physically copied, so this takes time proportional to volume size.
+    #[instrument(skip(self))]
+    pub fn copy_from_snapshot(
+        &self,
+        source_volume: &str,
+        snap_name: &str,
+        target_volume: &str,
+    ) -> Result<Dataset> {
+        validate_name(source_volume)?;
+        validate_name(snap_name)?;
+        validate_name(target_volume)?;
+
+        let snapshot_full = format!("{}@{}", self.full_path(source_volume), snap_name);
+        let target_full = self.full_path(target_volume);
+
+        info!(
+            snapshot = %snapshot_full,
+            target = %target_full,
+            "Copying volume from snapshot via send/recv"
+        );
+
+        // Verify snapshot exists
+        let snap_check = Command::new("zfs")
+            .args(["list", "-H", "-t", "snapshot", &snapshot_full])
+            .output()?;
+
+        if !snap_check.status.success() {
+            warn!(snapshot = %snapshot_full, "Snapshot not found for copy");
+            return Err(ZfsError::DatasetNotFound(snapshot_full));
+        }
+
+        // Use zfs send | zfs recv pipeline
+        // We use sh -c to pipe the commands together
+        let pipeline = format!(
+            "zfs send {} | zfs recv {}",
+            shell_escape(&snapshot_full),
+            shell_escape(&target_full)
+        );
+
+        let output = Command::new("sh").args(["-c", &pipeline]).output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(
+                snapshot = %snapshot_full,
+                target = %target_full,
+                error = %stderr,
+                "Failed to copy volume via send/recv"
+            );
+
+            if stderr.contains("already exists") {
+                return Err(ZfsError::DatasetExists(target_full));
+            }
+            return Err(ZfsError::CommandFailed(format!(
+                "send/recv failed: {}",
+                stderr
+            )));
+        }
+
+        info!(
+            snapshot = %snapshot_full,
+            target = %target_full,
+            "Volume copied successfully"
+        );
+
+        // After recv, we need to destroy the received snapshot to clean up
+        // The recv creates <target>@<snap_name>
+        let received_snap = format!("{}@{}", target_full, snap_name);
+        let destroy_output = Command::new("zfs")
+            .args(["destroy", &received_snap])
+            .output()?;
+
+        if !destroy_output.status.success() {
+            // Log but don't fail - the volume was created successfully
+            let stderr = String::from_utf8_lossy(&destroy_output.stderr);
+            warn!(
+                snapshot = %received_snap,
+                error = %stderr,
+                "Failed to clean up received snapshot"
+            );
+        }
+
+        self.get_dataset(target_volume)
+    }
+
+    /// List clones that depend on snapshots of a volume.
+    ///
+    /// Returns a list of (snapshot_name, clone_name) tuples for all clones
+    /// that depend on snapshots of the specified volume.
+    #[instrument(skip(self))]
+    pub fn list_clones_for_volume(&self, volume_name: &str) -> Result<Vec<(String, String)>> {
+        validate_name(volume_name)?;
+
+        let full_name = self.full_path(volume_name);
+        debug!(volume = %full_name, "Listing clones for volume");
+
+        // Get all snapshots for this volume with their clones property
+        let output = Command::new("zfs")
+            .args([
+                "list",
+                "-H",
+                "-t",
+                "snapshot",
+                "-o",
+                "name,clones",
+                "-r",
+                "-d",
+                "1",
+                &full_name,
+            ])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("does not exist") {
+                return Ok(Vec::new());
+            }
+            return Err(ZfsError::CommandFailed(format!(
+                "failed to list clones: {}",
+                stderr
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut results = Vec::new();
+
+        for line in stdout.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 2 {
+                continue;
+            }
+
+            let snap_full = parts[0];
+            let clones = parts[1];
+
+            // Skip if no clones (shown as "-")
+            if clones == "-" || clones.is_empty() {
+                continue;
+            }
+
+            // Extract snapshot name (after @)
+            let snap_name = snap_full
+                .rsplit('@')
+                .next()
+                .unwrap_or(snap_full)
+                .to_string();
+
+            // Clones are comma-separated
+            for clone in clones.split(',') {
+                let clone = clone.trim();
+                if !clone.is_empty() {
+                    results.push((snap_name.clone(), clone.to_string()));
+                }
+            }
+        }
+
+        debug!(volume = %full_name, count = results.len(), "Found clones");
+        Ok(results)
+    }
+
+    /// Promote a clone to become the origin (reverses dependency).
+    ///
+    /// After promotion, the original parent becomes dependent on this clone.
+    /// This allows deleting the original parent volume.
+    #[instrument(skip(self))]
+    pub fn promote_clone(&self, clone_name: &str) -> Result<()> {
+        validate_name(clone_name)?;
+
+        let full_name = self.full_path(clone_name);
+        info!(clone = %full_name, "Promoting clone");
+
+        let output = Command::new("zfs").args(["promote", &full_name]).output()?;
+
+        if let Err(e) = check_command_result(&output, &full_name) {
+            warn!(clone = %full_name, error = %e, "Failed to promote clone");
+            return Err(e);
+        }
+
+        info!(clone = %full_name, "Clone promoted successfully");
+        Ok(())
+    }
+
+    /// Get the origin snapshot of a clone, if any.
+    ///
+    /// Returns None if the dataset is not a clone.
+    #[instrument(skip(self))]
+    pub fn get_origin(&self, name: &str) -> Result<Option<String>> {
+        validate_name(name)?;
+
+        let full_name = self.full_path(name);
+
+        let output = Command::new("zfs")
+            .args(["get", "-H", "-o", "value", "origin", &full_name])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("does not exist") {
+                return Err(ZfsError::DatasetNotFound(full_name));
+            }
+            return Err(ZfsError::CommandFailed(format!(
+                "failed to get origin: {}",
+                stderr
+            )));
+        }
+
+        let origin = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        // "-" means no origin (not a clone)
+        if origin == "-" || origin.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(origin))
+        }
     }
 
     /// Get capacity information for the parent dataset.

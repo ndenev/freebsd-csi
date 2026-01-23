@@ -10,7 +10,8 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
 use crate::agent::{
-    AuthCredentials, ExportType, IscsiChapCredentials, NvmeAuthCredentials, auth_credentials,
+    AuthCredentials, CloneMode, ExportType, IscsiChapCredentials, NvmeAuthCredentials,
+    VolumeContentSource, auth_credentials,
 };
 use crate::agent_client::{AgentClient, TlsConfig};
 use crate::csi;
@@ -28,6 +29,10 @@ const NVME_HOST_NQN_KEY: &str = "nvme.auth.host_nqn";
 const NVME_SECRET_KEY: &str = "nvme.auth.secret";
 const NVME_HASH_FUNCTION_KEY: &str = "nvme.auth.hash_function";
 const NVME_DH_GROUP_KEY: &str = "nvme.auth.dh_group";
+
+// StorageClass parameter for clone mode when restoring from snapshot
+// Values: "linked" (default, fast zfs clone) or "copy" (independent zfs send/recv)
+const CLONE_MODE_PARAM: &str = "cloneMode";
 
 /// Default volume size: 1GB
 const DEFAULT_VOLUME_SIZE: i64 = 1024 * 1024 * 1024;
@@ -227,6 +232,76 @@ impl ControllerService {
         })
     }
 
+    /// Extract content source (snapshot or volume) from CSI request.
+    ///
+    /// CSI uses VolumeContentSource to specify:
+    /// - Volume restoration from a snapshot
+    /// - Volume cloning from another volume (PVC-to-PVC)
+    ///
+    /// For snapshots, we use the snapshot_id directly.
+    /// For volumes, we pass the source volume ID (agent will create a temp snapshot).
+    ///
+    /// The clone_mode is read from StorageClass parameters to determine
+    /// whether to use fast linking (zfs clone) or full copy (zfs send/recv).
+    fn extract_content_source(
+        content_source: Option<&csi::VolumeContentSource>,
+        parameters: &HashMap<String, String>,
+    ) -> Option<VolumeContentSource> {
+        use crate::agent::volume_content_source::Source;
+        use csi::volume_content_source::Type;
+
+        let source = content_source?;
+        let source_type = source.r#type.as_ref()?;
+
+        // Parse clone mode from StorageClass parameters
+        let clone_mode = parameters
+            .get(CLONE_MODE_PARAM)
+            .or_else(|| parameters.get("clone_mode"))
+            .map(|s| match s.to_lowercase().as_str() {
+                "copy" | "independent" => CloneMode::Copy,
+                "linked" | "clone" => CloneMode::Linked,
+                _ => CloneMode::Unspecified,
+            })
+            .unwrap_or(CloneMode::Unspecified);
+
+        match source_type {
+            Type::Snapshot(snapshot_source) => {
+                if snapshot_source.snapshot_id.is_empty() {
+                    warn!("VolumeContentSource has empty snapshot_id");
+                    return None;
+                }
+
+                debug!(
+                    snapshot_id = %snapshot_source.snapshot_id,
+                    clone_mode = ?clone_mode,
+                    "Extracting content source from snapshot"
+                );
+
+                Some(VolumeContentSource {
+                    source: Some(Source::SnapshotId(snapshot_source.snapshot_id.clone())),
+                    clone_mode: clone_mode as i32,
+                })
+            }
+            Type::Volume(volume_source) => {
+                if volume_source.volume_id.is_empty() {
+                    warn!("VolumeContentSource has empty volume_id");
+                    return None;
+                }
+
+                debug!(
+                    volume_id = %volume_source.volume_id,
+                    clone_mode = ?clone_mode,
+                    "Extracting content source from volume (PVC cloning)"
+                );
+
+                Some(VolumeContentSource {
+                    source: Some(Source::SourceVolumeId(volume_source.volume_id.clone())),
+                    clone_mode: clone_mode as i32,
+                })
+            }
+        }
+    }
+
     /// Get required volume size from capacity range.
     fn get_volume_size(capacity_range: Option<&csi::CapacityRange>) -> i64 {
         capacity_range
@@ -343,17 +418,29 @@ impl csi::controller_server::Controller for ControllerService {
         // Extract authentication credentials from CSI secrets
         let auth = Self::extract_auth_credentials(&req.secrets, export_type);
 
+        // Extract content source for snapshot restore
+        let content_source =
+            Self::extract_content_source(req.volume_content_source.as_ref(), &req.parameters);
+
         debug!(
             name = %name,
             size_bytes = size_bytes,
             export_type = ?export_type,
             has_auth = auth.is_some(),
+            has_content_source = content_source.is_some(),
             "Creating volume"
         );
 
         let mut client = self.get_client().await?;
         let volume = match client
-            .create_volume(name, size_bytes, export_type, req.parameters.clone(), auth)
+            .create_volume(
+                name,
+                size_bytes,
+                export_type,
+                req.parameters.clone(),
+                auth,
+                content_source,
+            )
             .await
         {
             Ok(v) => v,
@@ -537,6 +624,14 @@ impl csi::controller_server::Controller for ControllerService {
                 r#type: Some(csi::controller_service_capability::Type::Rpc(
                     csi::controller_service_capability::Rpc {
                         r#type: Type::ListSnapshots as i32,
+                    },
+                )),
+            },
+            // Clone/restore from snapshot capability
+            csi::ControllerServiceCapability {
+                r#type: Some(csi::controller_service_capability::Type::Rpc(
+                    csi::controller_service_capability::Rpc {
+                        r#type: Type::CloneVolume as i32,
                     },
                 )),
             },

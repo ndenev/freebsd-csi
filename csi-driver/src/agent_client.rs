@@ -25,7 +25,7 @@ const BACKOFF_MULTIPLIER: u64 = 2;
 use crate::agent::{
     AuthCredentials, CreateSnapshotRequest, CreateVolumeRequest, DeleteSnapshotRequest,
     DeleteVolumeRequest, ExpandVolumeRequest, ExportType, GetCapacityRequest, GetVolumeRequest,
-    ListSnapshotsRequest, ListVolumesRequest, Snapshot, Volume,
+    ListSnapshotsRequest, ListVolumesRequest, Snapshot, Volume, VolumeContentSource,
     storage_agent_client::StorageAgentClient,
 };
 
@@ -170,6 +170,9 @@ impl AgentClient {
     /// If `auth` is provided, the target will be configured to require authentication.
     /// For iSCSI, this means CHAP credentials. For NVMeoF, DH-HMAC-CHAP.
     ///
+    /// If `content_source` is provided, the volume will be created from the specified snapshot.
+    /// The clone_mode determines whether to use fast linking (zfs clone) or full copy (zfs send/recv).
+    ///
     /// Automatically retries on transient failures with exponential backoff.
     pub async fn create_volume(
         &mut self,
@@ -178,6 +181,7 @@ impl AgentClient {
         export_type: ExportType,
         parameters: HashMap<String, String>,
         auth: Option<AuthCredentials>,
+        content_source: Option<VolumeContentSource>,
     ) -> Result<Volume, tonic::Status> {
         let request = CreateVolumeRequest {
             name: name.to_string(),
@@ -185,6 +189,7 @@ impl AgentClient {
             export_type: export_type as i32,
             parameters,
             auth,
+            content_source,
         };
 
         debug!(name = name, "Creating volume with retry");

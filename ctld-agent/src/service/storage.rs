@@ -30,7 +30,7 @@ pub mod proto {
 
 use proto::storage_agent_server::StorageAgent;
 use proto::{
-    AuthCredentials, CreateSnapshotRequest, CreateSnapshotResponse, CreateVolumeRequest,
+    AuthCredentials, CloneMode, CreateSnapshotRequest, CreateSnapshotResponse, CreateVolumeRequest,
     CreateVolumeResponse, DeleteSnapshotRequest, DeleteSnapshotResponse, DeleteVolumeRequest,
     DeleteVolumeResponse, ExpandVolumeRequest, ExpandVolumeResponse, ExportType,
     GetCapacityRequest, GetCapacityResponse, GetSnapshotRequest, GetSnapshotResponse,
@@ -366,6 +366,49 @@ impl StorageService {
             parameters: metadata.parameters.clone(),
         }
     }
+
+    /// Helper to create a volume from a snapshot (used by both snapshot restore and volume clone).
+    ///
+    /// Returns Ok(Dataset) on success, or Err(Status) on failure.
+    /// Caller is responsible for calling timer.failure() on error.
+    async fn create_volume_from_snapshot(
+        &self,
+        target_name: &str,
+        source_volume: &str,
+        snap_name: &str,
+        clone_mode: CloneMode,
+    ) -> Result<crate::zfs::Dataset, Status> {
+        let zfs = self.zfs.read().await;
+
+        match clone_mode {
+            CloneMode::Copy => {
+                // Full independent copy via zfs send/recv (slow but no dependencies)
+                info!(
+                    target = %target_name,
+                    source = %source_volume,
+                    snapshot = %snap_name,
+                    "Creating volume using COPY mode (zfs send/recv)"
+                );
+                zfs.copy_from_snapshot(source_volume, snap_name, target_name)
+                    .map_err(|e| {
+                        Status::internal(format!("failed to copy volume from snapshot: {}", e))
+                    })
+            }
+            CloneMode::Linked | CloneMode::Unspecified => {
+                // Fast clone (instant but creates dependency on snapshot)
+                info!(
+                    target = %target_name,
+                    source = %source_volume,
+                    snapshot = %snap_name,
+                    "Creating volume using LINKED mode (zfs clone)"
+                );
+                zfs.clone_from_snapshot(source_volume, snap_name, target_name)
+                    .map_err(|e| {
+                        Status::internal(format!("failed to clone volume from snapshot: {}", e))
+                    })
+            }
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -405,8 +448,160 @@ impl StorageAgent for StorageService {
             ));
         }
 
-        // Create ZFS volume
-        let dataset = {
+        // Create ZFS volume - either fresh or from content source (snapshot/volume)
+        let dataset = if let Some(ref content_source) = req.content_source {
+            use proto::volume_content_source::Source;
+
+            // Determine clone mode
+            let clone_mode =
+                CloneMode::try_from(content_source.clone_mode).unwrap_or(CloneMode::Unspecified);
+
+            match &content_source.source {
+                Some(Source::SnapshotId(snapshot_id)) => {
+                    // Volume creation from existing snapshot
+                    if snapshot_id.is_empty() {
+                        timer.failure("invalid_argument");
+                        return Err(Status::invalid_argument(
+                            "content_source.snapshot_id cannot be empty",
+                        ));
+                    }
+
+                    // Parse snapshot ID (format: volume_id@snap_name)
+                    let parts: Vec<&str> = snapshot_id.split('@').collect();
+                    if parts.len() != 2 {
+                        timer.failure("invalid_argument");
+                        return Err(Status::invalid_argument(format!(
+                            "invalid snapshot_id format '{}', expected 'volume_id@snap_name'",
+                            snapshot_id
+                        )));
+                    }
+
+                    let source_volume = parts[0];
+                    let snap_name = parts[1];
+
+                    match self
+                        .create_volume_from_snapshot(
+                            &req.name,
+                            source_volume,
+                            snap_name,
+                            clone_mode,
+                        )
+                        .await
+                    {
+                        Ok(d) => d,
+                        Err(e) => {
+                            timer.failure("zfs_error");
+                            return Err(e);
+                        }
+                    }
+                }
+                Some(Source::SourceVolumeId(source_volume_id)) => {
+                    // Volume creation from existing volume (PVC cloning)
+                    // We create a temporary snapshot, then clone from it.
+                    //
+                    // Cleanup behavior:
+                    // - COPY mode: temp snapshot deleted after send/recv completes
+                    // - LINKED mode: temp snapshot preserved (clone depends on it)
+                    //   When the clone is later deleted, our auto-promote logic
+                    //   transfers snapshot ownership if needed.
+                    if source_volume_id.is_empty() {
+                        timer.failure("invalid_argument");
+                        return Err(Status::invalid_argument(
+                            "content_source.source_volume_id cannot be empty",
+                        ));
+                    }
+
+                    // Generate unique snapshot name using target volume name + timestamp
+                    // Using timestamp avoids collision if same target name is retried
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let temp_snap_name = format!("pvc-clone-{}-{}", &req.name, timestamp);
+
+                    info!(
+                        source_volume = %source_volume_id,
+                        temp_snapshot = %temp_snap_name,
+                        target_volume = %req.name,
+                        clone_mode = ?clone_mode,
+                        "Cloning volume from existing PVC"
+                    );
+
+                    // Create temporary snapshot of source volume
+                    {
+                        let zfs = self.zfs.read().await;
+                        if let Err(e) = zfs.create_snapshot(source_volume_id, &temp_snap_name) {
+                            timer.failure("zfs_error");
+                            return Err(Status::internal(format!(
+                                "failed to create temporary snapshot for volume clone: {}",
+                                e
+                            )));
+                        }
+                    }
+
+                    // Clone from the temporary snapshot
+                    let result = self
+                        .create_volume_from_snapshot(
+                            &req.name,
+                            source_volume_id,
+                            &temp_snap_name,
+                            clone_mode,
+                        )
+                        .await;
+
+                    // Handle cleanup based on result and clone mode
+                    match (&result, clone_mode) {
+                        (Ok(_), CloneMode::Copy) => {
+                            // Success with COPY mode - clean up temp snapshot
+                            let zfs = self.zfs.read().await;
+                            if let Err(e) = zfs.delete_snapshot(source_volume_id, &temp_snap_name) {
+                                warn!(
+                                    source_volume = %source_volume_id,
+                                    snapshot = %temp_snap_name,
+                                    error = %e,
+                                    "Failed to clean up temporary snapshot after copy"
+                                );
+                            }
+                        }
+                        (Ok(_), _) => {
+                            // Success with LINKED mode - keep temp snapshot
+                            info!(
+                                source_volume = %source_volume_id,
+                                snapshot = %temp_snap_name,
+                                "Temporary snapshot preserved (LINKED mode clone depends on it)"
+                            );
+                        }
+                        (Err(_), _) => {
+                            // Failed - always clean up temp snapshot
+                            let zfs = self.zfs.read().await;
+                            if let Err(e) = zfs.delete_snapshot(source_volume_id, &temp_snap_name) {
+                                warn!(
+                                    source_volume = %source_volume_id,
+                                    snapshot = %temp_snap_name,
+                                    error = %e,
+                                    "Failed to clean up temporary snapshot after failed clone"
+                                );
+                            }
+                        }
+                    }
+
+                    match result {
+                        Ok(d) => d,
+                        Err(e) => {
+                            timer.failure("zfs_error");
+                            return Err(e);
+                        }
+                    }
+                }
+                None => {
+                    timer.failure("invalid_argument");
+                    return Err(Status::invalid_argument(
+                        "content_source must specify either snapshot_id or source_volume_id",
+                    ));
+                }
+            }
+        } else {
+            // Fresh volume creation
             let zfs = self.zfs.read().await;
             match zfs.create_volume(&req.name, req.size_bytes as u64) {
                 Ok(d) => d,
@@ -565,9 +760,63 @@ impl StorageAgent for StorageService {
             .map(|m| m.name.clone())
             .unwrap_or_else(|| req.volume_id.clone());
 
+        // Handle clone dependencies: auto-promote clones to allow source deletion.
+        // When volume A has snapshot A@snap with clone B, we must promote B first
+        // so that A can be deleted. After promotion, A@snap becomes B@snap and
+        // A becomes deletable (or becomes a clone of B@snap, which we then delete).
+        {
+            let zfs = self.zfs.read().await;
+            match zfs.list_clones_for_volume(&volume_name) {
+                Ok(clones) if !clones.is_empty() => {
+                    info!(
+                        volume = %volume_name,
+                        clone_count = clones.len(),
+                        "Volume has clones, promoting them to allow deletion"
+                    );
+
+                    // Promote each clone to reverse the dependency
+                    for (snap_name, clone_full_path) in &clones {
+                        // Extract clone name from full path (e.g., "tank/csi/clone1" -> "clone1")
+                        let clone_name = clone_full_path
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(clone_full_path);
+
+                        info!(
+                            volume = %volume_name,
+                            snapshot = %snap_name,
+                            clone = %clone_name,
+                            "Promoting clone to transfer snapshot ownership"
+                        );
+
+                        if let Err(e) = zfs.promote_clone(clone_name) {
+                            warn!(
+                                clone = %clone_name,
+                                error = %e,
+                                "Failed to promote clone (may already be promoted or not under our parent)"
+                            );
+                            // Continue anyway - the clone might be outside our managed dataset
+                        }
+                    }
+                }
+                Ok(_) => {
+                    debug!(volume = %volume_name, "No clones to promote");
+                }
+                Err(e) => {
+                    debug!(
+                        volume = %volume_name,
+                        error = %e,
+                        "Could not check for clones (volume may not exist)"
+                    );
+                }
+            }
+        }
+
         // CSI Spec compliance: Check for dependent snapshots before deletion
         // Per CSI spec, if volume has snapshots and we don't treat them as independent,
         // we must return FAILED_PRECONDITION so the user can delete snapshots first.
+        // Note: After promoting clones above, the original snapshots may have moved
+        // to the promoted clone, so this check is for remaining snapshots only.
         {
             let zfs = self.zfs.read().await;
             match zfs.list_snapshots_for_volume(&volume_name) {
@@ -606,6 +855,23 @@ impl StorageAgent for StorageService {
                 }
             }
         }
+
+        // Check if this volume is a clone (has an origin snapshot)
+        // We need this info BEFORE deletion to clean up temp snapshots afterward
+        let origin_info: Option<String> = {
+            let zfs = self.zfs.read().await;
+            match zfs.get_origin(&volume_name) {
+                Ok(origin) => origin,
+                Err(e) => {
+                    debug!(
+                        volume = %volume_name,
+                        error = %e,
+                        "Could not get origin (volume may not exist)"
+                    );
+                    None
+                }
+            }
+        };
 
         // Try to unexport the volume via unified CTL manager
         // This is idempotent - if already unexported, we continue
@@ -664,6 +930,67 @@ impl StorageAgent for StorageService {
                     "failed to delete ZFS volume: {}",
                     e
                 )));
+            }
+        }
+
+        // Clean up origin snapshot if this was a clone from PVC-to-PVC cloning
+        // We only clean up snapshots with our "pvc-clone-" prefix to avoid
+        // accidentally deleting user-created snapshots
+        if let Some(origin) = origin_info
+            && let Some(snap_name) = origin.rsplit('@').next()
+            && snap_name.starts_with("pvc-clone-")
+            && let Some(source_path) = origin.rsplit_once('@').map(|(p, _)| p)
+        {
+            // Origin format: "pool/dataset/volume@snapshot_name"
+            // Extract just the volume name from the full path
+            let source_volume = source_path.rsplit('/').next().unwrap_or(source_path);
+
+            info!(
+                deleted_clone = %volume_name,
+                origin_snapshot = %origin,
+                source_volume = %source_volume,
+                "Attempting to clean up temp snapshot from PVC cloning"
+            );
+
+            let zfs = self.zfs.read().await;
+            // Check if snapshot still has other clones
+            match zfs.list_clones_for_volume(source_volume) {
+                Ok(clones) => {
+                    // Filter to clones of this specific snapshot
+                    let snap_clones: Vec<_> =
+                        clones.iter().filter(|(sn, _)| sn == snap_name).collect();
+
+                    if snap_clones.is_empty() {
+                        // No more clones, safe to delete the temp snapshot
+                        if let Err(e) = zfs.delete_snapshot(source_volume, snap_name) {
+                            warn!(
+                                snapshot = %snap_name,
+                                source_volume = %source_volume,
+                                error = %e,
+                                "Failed to clean up temp snapshot (may already be deleted)"
+                            );
+                        } else {
+                            info!(
+                                snapshot = %snap_name,
+                                source_volume = %source_volume,
+                                "Cleaned up temp snapshot from PVC cloning"
+                            );
+                        }
+                    } else {
+                        debug!(
+                            snapshot = %snap_name,
+                            remaining_clones = snap_clones.len(),
+                            "Temp snapshot still has clones, not deleting"
+                        );
+                    }
+                }
+                Err(e) => {
+                    debug!(
+                        source_volume = %source_volume,
+                        error = %e,
+                        "Could not check clones for cleanup"
+                    );
+                }
             }
         }
 
