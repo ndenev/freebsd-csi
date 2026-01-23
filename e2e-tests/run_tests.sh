@@ -27,13 +27,13 @@ TEST_PATTERN=""
 VERBOSE=""
 FAIL_FAST=""
 
-# Colors for output
+# Colors for output (using printf to generate actual escape sequences)
 if [ -t 1 ]; then
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[1;33m'
-    BLUE='\033[0;34m'
-    NC='\033[0m'
+    RED=$(printf '\033[0;31m')
+    GREEN=$(printf '\033[0;32m')
+    YELLOW=$(printf '\033[1;33m')
+    BLUE=$(printf '\033[0;34m')
+    NC=$(printf '\033[0m')
 else
     RED=''
     GREEN=''
@@ -173,18 +173,18 @@ else
     check_fail "CSI driver" "CSI driver csi.freebsd.org not found. Is it installed?"
 fi
 
-# Check ZFS (need root or operator permissions)
-if zfs list "$ZFS_POOL" >/dev/null 2>&1; then
-    check_ok "ZFS pool '$ZFS_POOL' accessible"
+# Check ZFS (uses sudo for privileged operations)
+if sudo zfs list "$ZFS_POOL" >/dev/null 2>&1; then
+    check_ok "ZFS pool '$ZFS_POOL' accessible (via sudo)"
 else
-    check_fail "ZFS" "Cannot access ZFS pool '$ZFS_POOL'. Run as root or check permissions."
+    check_fail "ZFS" "Cannot access ZFS pool '$ZFS_POOL'. Check sudo permissions."
 fi
 
-# Check CTL
-if ctladm lunlist >/dev/null 2>&1; then
-    check_ok "CTL accessible"
+# Check CTL (uses sudo for privileged operations)
+if sudo ctladm lunlist >/dev/null 2>&1; then
+    check_ok "CTL accessible (via sudo)"
 else
-    check_fail "CTL" "Cannot access CTL. Run as root or check permissions."
+    check_fail "CTL" "Cannot access CTL. Check sudo permissions."
 fi
 
 # Check Python3
@@ -217,8 +217,8 @@ mkdir -p "$REPORT_DIR"
 # Capture storage state before tests
 echo ""
 echo "Capturing initial storage state..."
-zfs list -t all -r "$ZFS_POOL/$CSI_PREFIX" > "$REPORT_DIR/zfs-before.txt" 2>/dev/null || true
-ctladm lunlist > "$REPORT_DIR/ctl-before.txt" 2>/dev/null || true
+sudo zfs list -t all -r "$ZFS_POOL/$CSI_PREFIX" > "$REPORT_DIR/zfs-before.txt" 2>/dev/null || true
+sudo ctladm lunlist > "$REPORT_DIR/ctl-before.txt" 2>/dev/null || true
 
 # Build pytest arguments
 PYTEST_ARGS=""
@@ -270,8 +270,8 @@ DURATION=$((END_TIME - START_TIME))
 # Capture storage state after tests
 echo ""
 echo "Capturing final storage state..."
-zfs list -t all -r "$ZFS_POOL/$CSI_PREFIX" > "$REPORT_DIR/zfs-after.txt" 2>/dev/null || true
-ctladm lunlist > "$REPORT_DIR/ctl-after.txt" 2>/dev/null || true
+sudo zfs list -t all -r "$ZFS_POOL/$CSI_PREFIX" > "$REPORT_DIR/zfs-after.txt" 2>/dev/null || true
+sudo ctladm lunlist > "$REPORT_DIR/ctl-after.txt" 2>/dev/null || true
 
 # Summary
 echo ""

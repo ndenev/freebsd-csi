@@ -73,19 +73,34 @@ class StorageState:
 class StorageMonitor:
     """Monitor FreeBSD storage state: ZFS, CTL, iSCSI."""
 
-    def __init__(self, pool: str = "tank", csi_prefix: str = "csi"):
+    def __init__(self, pool: str = "tank", csi_prefix: str = "csi", use_sudo: bool = True):
         """Initialize storage monitor.
 
         Args:
             pool: ZFS pool name
             csi_prefix: Dataset prefix used by CSI driver
+            use_sudo: Whether to use sudo for privileged commands (default: True)
         """
         self.pool = pool
         self.csi_prefix = csi_prefix
         self.csi_path = f"{pool}/{csi_prefix}"
+        self.use_sudo = use_sudo
+
+    # Commands that require elevated privileges
+    PRIVILEGED_COMMANDS = {"zfs", "ctladm"}
 
     def _run(self, cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
-        """Run a command and return result."""
+        """Run a command and return result.
+
+        Automatically uses sudo for ZFS and CTL commands if use_sudo is enabled.
+
+        Args:
+            cmd: Command and arguments
+            check: Whether to raise on non-zero exit
+        """
+        # Auto-detect privileged commands
+        if self.use_sudo and cmd and cmd[0] in self.PRIVILEGED_COMMANDS:
+            cmd = ["sudo"] + cmd
         return subprocess.run(
             cmd,
             capture_output=True,
