@@ -486,6 +486,41 @@ class StorageMonitor:
         return not self.verify_volume_exported(volume_id)
 
     # -------------------------------------------------------------------------
+    # Cleanup Operations (for Retain policy tests)
+    # -------------------------------------------------------------------------
+
+    def cleanup_volume(self, volume_id: str, agent_address: str = "10.0.0.10:50051") -> bool:
+        """Clean up a volume's backend storage via ctld-agent.
+
+        This is used for cleanup of Retain policy volumes where Kubernetes
+        doesn't call DeleteVolume. It calls the ctld-agent's DeleteVolume RPC
+        directly, which properly unexports the iSCSI target and deletes the
+        ZFS dataset.
+
+        Args:
+            volume_id: Volume ID (PV name)
+            agent_address: ctld-agent gRPC address (host:port)
+
+        Returns:
+            True if cleanup succeeded or volume didn't exist
+        """
+        # Import here to avoid circular dependency and allow tests without grpc
+        try:
+            from lib.agent_client import AgentClient
+        except ImportError:
+            raise RuntimeError(
+                "grpcio not installed. Run: pip install grpcio grpcio-tools"
+            )
+
+        with AgentClient(address=agent_address) as client:
+            try:
+                return client.delete_volume(volume_id)
+            except Exception as e:
+                # Log but don't fail - best effort cleanup
+                print(f"Warning: Failed to cleanup volume {volume_id}: {e}")
+                return False
+
+    # -------------------------------------------------------------------------
     # iSCSI Operations
     # -------------------------------------------------------------------------
 

@@ -70,9 +70,11 @@ class TestReclaimPolicy:
         assert storage.verify_dataset_exists(dataset), "Dataset deleted with Retain"
         assert storage.verify_volume_exported(pv_name, "iscsi"), "Export removed with Retain"
 
-        # Manual cleanup for test hygiene
+        # Manual cleanup for test hygiene:
+        # 1. Delete the PV from Kubernetes
         k8s.delete("pv", pv_name, wait=True)
-        # Note: Backend storage may need manual cleanup with Retain policy
+        # 2. Clean up backend storage (ZFS dataset) since DeleteVolume won't be called
+        storage.cleanup_volume(pv_name)
 
     def test_delete_policy_with_snapshots(
         self,
@@ -142,5 +144,6 @@ class TestReclaimPolicy:
         assert k8s.get("pv", retain_pv) is not None
         assert storage.verify_dataset_exists(retain_dataset)
 
-        # Cleanup retained PV
+        # Cleanup retained PV and backend storage
         k8s.delete("pv", retain_pv, wait=True)
+        storage.cleanup_volume(retain_pv)

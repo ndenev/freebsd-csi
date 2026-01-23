@@ -10,6 +10,10 @@ pyyaml>=6.0
 # JUnit XML report parsing (optional, for report analysis)
 junitparser>=3.0.0
 
+# gRPC client for direct ctld-agent communication (Retain policy cleanup)
+grpcio>=1.50.0
+grpcio-tools>=1.50.0
+
 # Type checking (development only)
 # mypy>=1.0.0
 # types-PyYAML>=6.0.0
