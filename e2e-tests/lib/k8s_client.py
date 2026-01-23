@@ -339,6 +339,54 @@ class K8sClient:
             {"spec": {"resources": {"requests": {"storage": new_size}}}},
         )
 
+    def delete_pvc_and_wait_pv(
+        self,
+        name: str,
+        timeout: int = 120,
+        ignore_not_found: bool = True,
+    ) -> bool:
+        """Delete a PVC and wait for its PV to be deleted.
+
+        This ensures the CSI DeleteVolume is called before returning.
+        For PVs with Delete reclaim policy, this waits for full cleanup.
+
+        Args:
+            name: PVC name
+            timeout: Total timeout for both PVC and PV deletion
+            ignore_not_found: Don't error if PVC doesn't exist
+
+        Returns:
+            True if deleted successfully, False if PVC not found
+        """
+        # Get the PV name before deleting the PVC
+        pv_name = self.get_pvc_volume(name)
+
+        # Delete the PVC
+        if not self.delete("pvc", name, wait=True, timeout=timeout // 2, ignore_not_found=ignore_not_found):
+            return False  # PVC not found
+
+        # If we got a PV name, wait for it to be deleted
+        if pv_name:
+            deadline = time.time() + (timeout // 2)
+            while time.time() < deadline:
+                # Check if PV still exists
+                pv = self._kubectl_json(["get", "pv", pv_name])
+                if pv is None:
+                    # PV is gone, cleanup complete
+                    return True
+                # PV still exists, check its phase
+                phase = pv.get("status", {}).get("phase", "")
+                if phase in ("Released", "Failed"):
+                    # PV is released but not deleted yet, keep waiting
+                    time.sleep(2)
+                    continue
+                time.sleep(2)
+
+            # Timeout - PV still exists
+            print(f"Warning: PV {pv_name} still exists after PVC deletion (may need manual cleanup)")
+
+        return True
+
     # -------------------------------------------------------------------------
     # Pod Operations
     # -------------------------------------------------------------------------

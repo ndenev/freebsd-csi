@@ -236,17 +236,62 @@ impl CtlManager {
 
     /// Unexport a volume
     ///
-    /// Updates in-memory cache only. Call `write_config()` to persist.
+    /// Removes the LUN from CTL kernel via ctladm and updates in-memory cache.
+    /// Call `write_config()` after to persist the configuration change.
     #[instrument(skip(self))]
     pub fn unexport_volume(&self, volume_name: &str) -> Result<()> {
         debug!("Unexporting volume {}", volume_name);
 
         let mut exports = self.exports.write().unwrap();
-        if exports.remove(volume_name).is_none() {
-            return Err(CtlError::TargetNotFound(volume_name.to_string()));
+        let export = exports
+            .remove(volume_name)
+            .ok_or_else(|| CtlError::TargetNotFound(volume_name.to_string()))?;
+
+        // Forcibly remove the LUN from CTL kernel using ctladm
+        // This ensures the LUN is removed even if there are active sessions
+        let lun_id = export.lun_id;
+        drop(exports); // Release lock before running external command
+
+        if let Err(e) = self.remove_lun(lun_id) {
+            // Log but don't fail - the LUN may already be removed
+            // or ctld reload will clean it up
+            warn!(
+                volume = %volume_name,
+                lun_id = lun_id,
+                error = %e,
+                "Failed to remove LUN via ctladm (may already be removed)"
+            );
         }
 
-        info!("Unexported {} (cache only)", volume_name);
+        info!("Unexported {} (lun_id={})", volume_name, lun_id);
+        Ok(())
+    }
+
+    /// Remove a LUN from CTL kernel via ctladm
+    ///
+    /// This forcibly removes the LUN even if there are active sessions.
+    fn remove_lun(&self, lun_id: u32) -> Result<()> {
+        debug!(lun_id = lun_id, "Removing LUN via ctladm");
+
+        let output = Command::new("ctladm")
+            .args(["remove", "-b", "block", "-l", &lun_id.to_string()])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Check for "LUN does not exist" type errors - these are OK
+            if stderr.contains("LUN") && stderr.contains("not") {
+                debug!(lun_id = lun_id, "LUN already removed");
+                return Ok(());
+            }
+            warn!(lun_id = lun_id, stderr = %stderr, "ctladm remove failed");
+            return Err(CtlError::CommandFailed(format!(
+                "ctladm remove -b block -l {} failed: {}",
+                lun_id, stderr
+            )));
+        }
+
+        info!(lun_id = lun_id, "LUN removed successfully via ctladm");
         Ok(())
     }
 
