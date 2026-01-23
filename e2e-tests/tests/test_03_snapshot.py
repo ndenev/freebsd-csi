@@ -100,6 +100,9 @@ class TestSnapshotOperations:
             ["sh", "-c", f"echo '{original_data}' > /mnt/data/test.txt"],
         )
 
+        # Sync to ensure data is flushed to disk before snapshot
+        k8s.exec_in_pod(pod_name, ["sync"])
+
         # Create snapshot
         snap_name = snapshot_factory(source_pvc)
         assert wait_snapshot_ready(snap_name, timeout=60)

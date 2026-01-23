@@ -73,6 +73,9 @@ class TestLinkedCloneMode:
         test_data = "linked-clone-test-data"
         k8s.exec_in_pod(pod, ["sh", "-c", f"echo '{test_data}' > /mnt/data/test.txt"])
 
+        # Sync to ensure data is flushed to disk before snapshot
+        k8s.exec_in_pod(pod, ["sync"])
+
         # Create snapshot
         snap_name = snapshot_factory(source_pvc)
         assert wait_snapshot_ready(snap_name, timeout=60)
@@ -186,18 +189,20 @@ class TestLinkedCloneMode:
         origin_before = storage.get_origin(clone_dataset)
         assert origin_before is not None
 
-        # Delete snapshot first, then source
-        k8s.delete("volumesnapshot", snap_name, wait=True)
-        time.sleep(2)
+        # Delete source PVC first - this should trigger auto-promote of the clone
+        # NOTE: Don't delete snapshot first - ZFS won't allow it while clone depends on it
         k8s.delete("pvc", source_pvc, wait=True)
         time.sleep(5)
 
-        # Clone should still exist
+        # Clone should still exist after source deletion
         assert storage.verify_dataset_exists(clone_dataset), "Clone deleted unexpectedly"
 
         # After auto-promote, clone may no longer have origin
         # (or origin points to a local snapshot)
         # Main point: clone survives source deletion
+
+        # Now snapshot can be deleted (after clone is promoted, it no longer depends on it)
+        k8s.delete("volumesnapshot", snap_name, wait=True)
 
     def test_multiple_clones_from_one_snapshot(
         self,

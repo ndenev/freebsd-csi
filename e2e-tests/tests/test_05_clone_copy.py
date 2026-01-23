@@ -76,6 +76,9 @@ class TestCopyCloneMode:
         test_data = "copy-clone-test-data"
         k8s.exec_in_pod(pod, ["sh", "-c", f"echo '{test_data}' > /mnt/data/test.txt"])
 
+        # Sync to ensure data is flushed to disk before snapshot
+        k8s.exec_in_pod(pod, ["sync"])
+
         # Create snapshot
         snap_name = snapshot_factory(source_pvc)
         assert wait_snapshot_ready(snap_name, timeout=60)
