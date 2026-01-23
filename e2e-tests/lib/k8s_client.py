@@ -46,14 +46,22 @@ class K8sClient:
             cmd.extend(["--kubeconfig", self.kubeconfig])
         cmd.extend(args)
 
-        return subprocess.run(
+        result = subprocess.run(
             cmd,
             input=input_data,
             capture_output=True,
             text=True,
             timeout=timeout,
-            check=check,
+            check=False,
         )
+        if check and result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode,
+                cmd,
+                output=result.stdout,
+                stderr=result.stderr,
+            )
+        return result
 
     def _kubectl_json(self, args: list[str], timeout: int = 60) -> dict | list | None:
         """Run kubectl command and parse JSON output.
@@ -89,11 +97,16 @@ class K8sClient:
         if isinstance(manifest, dict):
             manifest = yaml.dump(manifest)
 
-        result = self._kubectl(
-            ["-n", self.namespace, "apply", "-f", "-", "-o", "json"],
-            input_data=manifest,
-        )
-        return json.loads(result.stdout)
+        try:
+            result = self._kubectl(
+                ["-n", self.namespace, "apply", "-f", "-", "-o", "json"],
+                input_data=manifest,
+            )
+            return json.loads(result.stdout)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"kubectl apply failed: {e.stderr or e.output or 'unknown error'}"
+            ) from e
 
     def apply_file(self, path: str) -> dict:
         """Apply a manifest file.

@@ -6,6 +6,7 @@ Monitors ZFS datasets/snapshots, CTL LUNs/ports, and iSCSI targets.
 import json
 import re
 import subprocess
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -361,64 +362,48 @@ class StorageMonitor:
             return ""
 
     def list_ctl_luns(self) -> list[LunInfo]:
-        """List CTL LUNs.
+        """List CTL LUNs using XML output.
 
         Returns:
             List of LunInfo
         """
         try:
-            result = self._run(["ctladm", "lunlist", "-v"])
+            result = self._run(["ctladm", "devlist", "-x"])
         except subprocess.CalledProcessError:
             return []
 
         luns = []
-        current_lun = None
 
-        for line in result.stdout.split("\n"):
-            line = line.strip()
+        try:
+            root = ET.fromstring(result.stdout)
+            for lun_elem in root.findall("lun"):
+                lun_id = int(lun_elem.get("id", -1))
 
-            # LUN header line: "  0 <backend> ..."
-            lun_match = re.match(r"(\d+)\s+(\w+)\s+(\d+)\s+(\d+)\s+(.+)", line)
-            if lun_match:
-                if current_lun:
-                    luns.append(current_lun)
+                # Get text content with defaults
+                def get_text(tag: str, default: str = "") -> str:
+                    elem = lun_elem.find(tag)
+                    return elem.text if elem is not None and elem.text else default
 
-                lun_id = int(lun_match.group(1))
-                backend = lun_match.group(2)
-                size = int(lun_match.group(3))
-                blocksize = int(lun_match.group(4))
-                rest = lun_match.group(5)
+                def get_int(tag: str, default: int = 0) -> int:
+                    text = get_text(tag, str(default))
+                    try:
+                        return int(text)
+                    except ValueError:
+                        return default
 
-                current_lun = LunInfo(
+                lun = LunInfo(
                     lun_id=lun_id,
-                    backend=backend,
-                    size=size,
-                    blocksize=blocksize,
-                    serial="",
-                    device_id="",
-                    path=None,
+                    backend=get_text("backend_type", "unknown"),
+                    serial=get_text("serial_number"),
+                    device_id=get_text("device_id"),
+                    size=get_int("size") * get_int("blocksize", 512),  # Convert to bytes
+                    blocksize=get_int("blocksize", 512),
+                    path=get_text("file") or None,
                 )
-
-                # Extract device_id from rest
-                if "device_id=" in rest:
-                    did_match = re.search(r"device_id=(\S+)", rest)
-                    if did_match:
-                        current_lun.device_id = did_match.group(1)
-
-            # Serial line
-            elif current_lun and "Serial Number:" in line:
-                serial_match = re.search(r"Serial Number:\s*(.+)", line)
-                if serial_match:
-                    current_lun.serial = serial_match.group(1).strip()
-
-            # File/device path (for block backend)
-            elif current_lun and ("file=" in line or "dev=" in line):
-                path_match = re.search(r"(?:file|dev)=(\S+)", line)
-                if path_match:
-                    current_lun.path = path_match.group(1)
-
-        if current_lun:
-            luns.append(current_lun)
+                luns.append(lun)
+        except ET.ParseError:
+            # Fall back to empty list on parse error
+            return []
 
         return luns
 

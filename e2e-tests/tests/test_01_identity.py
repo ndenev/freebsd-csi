@@ -32,12 +32,16 @@ class TestIdentityService:
 
     def test_controller_pods_running(self, k8s: K8sClient):
         """Verify CSI controller pods are running."""
-        # Save original namespace and switch to kube-system
+        # Save original namespace and switch to freebsd-csi namespace
         orig_ns = k8s.namespace
-        k8s.namespace = "kube-system"
+        k8s.namespace = "freebsd-csi"
 
         try:
-            pods = k8s.list_resources("pod", "app=freebsd-csi-controller")
+            # Use Kubernetes recommended labels
+            pods = k8s.list_resources(
+                "pod",
+                "app.kubernetes.io/name=freebsd-csi,app.kubernetes.io/component=controller",
+            )
             assert len(pods) > 0, "No controller pods found"
 
             for pod in pods:
@@ -49,10 +53,14 @@ class TestIdentityService:
     def test_node_pods_running(self, k8s: K8sClient):
         """Verify CSI node pods are running on nodes."""
         orig_ns = k8s.namespace
-        k8s.namespace = "kube-system"
+        k8s.namespace = "freebsd-csi"
 
         try:
-            pods = k8s.list_resources("pod", "app=freebsd-csi-node")
+            # Use Kubernetes recommended labels
+            pods = k8s.list_resources(
+                "pod",
+                "app.kubernetes.io/name=freebsd-csi,app.kubernetes.io/component=node",
+            )
             # At least one node pod should exist
             assert len(pods) >= 0, "Node pods check completed"
 

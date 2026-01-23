@@ -102,9 +102,11 @@ def resources_dir() -> Path:
 
 @pytest.fixture(scope="session")
 def setup_storageclasses(k8s: K8sClient, resources_dir: Path) -> Generator[list[str], None, None]:
-    """Create test StorageClasses at session start, cleanup at end."""
+    """Create test StorageClasses and VolumeSnapshotClass at session start, cleanup at end."""
     storage_class_dir = resources_dir / "storageclasses"
+    snapshot_class_dir = resources_dir / "snapshotclasses"
     created_classes = []
+    created_snapshot_classes = []
 
     # Apply all StorageClass manifests
     for yaml_file in storage_class_dir.glob("*.yaml"):
@@ -116,12 +118,27 @@ def setup_storageclasses(k8s: K8sClient, resources_dir: Path) -> Generator[list[
         except Exception as e:
             print(f"Warning: Failed to create StorageClass from {yaml_file}: {e}")
 
+    # Apply all VolumeSnapshotClass manifests
+    if snapshot_class_dir.exists():
+        for yaml_file in snapshot_class_dir.glob("*.yaml"):
+            try:
+                k8s.apply_file(str(yaml_file))
+                created_snapshot_classes.append("freebsd-e2e-snapclass")
+            except Exception as e:
+                print(f"Warning: Failed to create VolumeSnapshotClass from {yaml_file}: {e}")
+
     yield created_classes
 
     # Cleanup - try to delete but don't fail if already gone
     for sc_name in created_classes:
         try:
             k8s.delete("storageclass", sc_name, ignore_not_found=True)
+        except Exception:
+            pass
+
+    for vsc_name in created_snapshot_classes:
+        try:
+            k8s.delete("volumesnapshotclass", vsc_name, ignore_not_found=True)
         except Exception:
             pass
 
@@ -187,7 +204,7 @@ def pvc_factory(
         """
         suffix = f"-{name_suffix}" if name_suffix else f"-{len(created)}"
         name = f"pvc-{unique_name}{suffix}"
-        k8s.create_pvc(name, storage_class, size, data_source)
+        k8s.create_pvc(name, storage_class, size, data_source=data_source)
         created.append(name)
         return name
 
@@ -250,14 +267,14 @@ def snapshot_factory(
 
     def create(
         pvc_name: str,
-        snapshot_class: str | None = None,
+        snapshot_class: str | None = "freebsd-e2e-snapclass",
         name_suffix: str = "",
     ) -> str:
         """Create a VolumeSnapshot.
 
         Args:
             pvc_name: Source PVC name
-            snapshot_class: Optional VolumeSnapshotClass
+            snapshot_class: VolumeSnapshotClass (defaults to freebsd-e2e-snapclass)
             name_suffix: Optional suffix for name
 
         Returns:

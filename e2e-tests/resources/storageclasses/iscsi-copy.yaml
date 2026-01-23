@@ -12,5 +12,9 @@ allowVolumeExpansion: true
 parameters:
   # Export volume via iSCSI
   exportType: iscsi
+  # iSCSI portal addresses (required for Linux initiators)
+  portal: "10.0.0.10:3260,10.0.0.11:3260"
+  # Filesystem type
+  fsType: ext4
   # Use COPY clone mode (slow, fully independent)
   cloneMode: copy
