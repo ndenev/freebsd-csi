@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{RwLock, Semaphore};
 use tonic::{Request, Response, Status};
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 /// Default maximum number of concurrent storage operations
 const DEFAULT_MAX_CONCURRENT_OPS: usize = 10;
@@ -465,11 +465,17 @@ impl StorageAgent for StorageService {
         }
 
         // Write UCL config and reload ctld
+        // CRITICAL: If this fails, ctld won't know about the export and
+        // initiators won't be able to connect. We must return error.
         {
             let ctl = self.ctl.read().await;
             if let Err(e) = ctl.write_config() {
-                warn!("Failed to write CTL config: {}", e);
-                // Continue anyway - export is in cache, config will persist on next operation
+                error!("Failed to write CTL config: {}", e);
+                timer.failure("config_write_error");
+                return Err(Status::internal(format!(
+                    "Volume created but CTL config write failed: {}. Target may be inaccessible.",
+                    e
+                )));
             }
         }
 
@@ -560,18 +566,31 @@ impl StorageAgent for StorageService {
             match ctl.unexport_volume(&req.volume_id) {
                 Ok(()) => {
                     // Write UCL config with updated (removed) export entries
+                    // CRITICAL: If this fails, export will reappear on ctld restart
+                    // pointing to a deleted zvol, causing errors for initiators.
                     if let Err(e) = ctl.write_config() {
-                        warn!("Failed to write CTL config: {}", e);
-                        // Continue anyway - unexport is in cache, config will persist on next operation
+                        error!("Failed to write CTL config after unexport: {}", e);
+                        timer.failure("config_write_error");
+                        return Err(Status::internal(format!(
+                            "Unexport succeeded but CTL config write failed: {}. Export may reappear on restart.",
+                            e
+                        )));
                     }
                 }
                 Err(CtlError::TargetNotFound(_)) => {
-                    // Already unexported - this is fine (idempotent)
+                    // Already unexported - this is fine (idempotent per CSI spec)
                     debug!("Volume {} already unexported (idempotent)", req.volume_id);
                 }
                 Err(e) => {
-                    warn!("Failed to unexport volume: {}", e);
-                    // Continue to try ZFS deletion - don't fail the whole operation
+                    // Unexport failed - export is still active.
+                    // CRITICAL: If we delete the ZFS dataset now, we'll have an orphan
+                    // export pointing to a non-existent zvol. Return error.
+                    error!("Failed to unexport volume: {}", e);
+                    timer.failure("unexport_error");
+                    return Err(Status::internal(format!(
+                        "Failed to unexport volume: {}. Cannot safely delete while exported.",
+                        e
+                    )));
                 }
             }
         }
