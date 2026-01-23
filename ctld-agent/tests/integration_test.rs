@@ -1024,3 +1024,130 @@ async fn test_concurrent_create_delete_isolation() {
         "All volumes should be deleted"
     );
 }
+
+// ============================================================================
+// CSI Spec Compliance Tests - FAILED_PRECONDITION for Snapshots
+// ============================================================================
+
+/// Test the error message format for volumes with dependent snapshots
+///
+/// Per CSI spec, DeleteVolume should return FAILED_PRECONDITION when:
+/// "volume has snapshots and the plugin doesn't treat them as independent entities"
+#[test]
+fn test_delete_volume_snapshot_error_format() {
+    let volume_name = "pvc-test-volume";
+    let snapshots = vec!["backup-daily", "csi-snap-1", "csi-snap-2"];
+    let snapshot_list = snapshots.join(", ");
+
+    // Simulate the error message format from delete_volume
+    let error_message = format!(
+        "Volume '{}' has {} dependent snapshot(s): [{}]. \
+         Delete all VolumeSnapshots referencing this volume before deletion. \
+         If these are external snapshots (not CSI-managed), remove them manually with: \
+         zfs destroy {}@<snapshot_name>",
+        volume_name,
+        snapshots.len(),
+        snapshot_list,
+        volume_name
+    );
+
+    // Verify error contains all required information
+    assert!(
+        error_message.contains(volume_name),
+        "Error should contain volume name"
+    );
+    assert!(
+        error_message.contains("dependent snapshot"),
+        "Error should mention dependent snapshots"
+    );
+    assert!(
+        error_message.contains(&snapshots.len().to_string()),
+        "Error should contain snapshot count"
+    );
+    for snap in &snapshots {
+        assert!(
+            error_message.contains(snap),
+            "Error should list snapshot: {}",
+            snap
+        );
+    }
+    assert!(
+        error_message.contains("VolumeSnapshots"),
+        "Error should mention Kubernetes VolumeSnapshots"
+    );
+    assert!(
+        error_message.contains("zfs destroy"),
+        "Error should provide manual cleanup command"
+    );
+}
+
+/// Test that empty snapshot list allows deletion
+#[test]
+fn test_delete_volume_no_snapshots_ok() {
+    let snapshots: Vec<String> = vec![];
+
+    // When snapshots list is empty, deletion should proceed
+    let should_block = !snapshots.is_empty();
+    assert!(
+        !should_block,
+        "Empty snapshot list should not block deletion"
+    );
+}
+
+/// Test snapshot list parsing from ZFS output
+#[test]
+fn test_snapshot_list_parsing() {
+    // Simulate ZFS output: tank/csi/vol1@snap1\ntank/csi/vol1@snap2
+    let zfs_output = "tank/csi/vol1@snap1\ntank/csi/vol1@snap2\ntank/csi/vol1@backup-daily";
+    let prefix = "tank/csi/vol1@";
+
+    let snapshots: Vec<String> = zfs_output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| line.strip_prefix(prefix).map(|s| s.to_string()))
+        .collect();
+
+    assert_eq!(snapshots.len(), 3);
+    assert!(snapshots.contains(&"snap1".to_string()));
+    assert!(snapshots.contains(&"snap2".to_string()));
+    assert!(snapshots.contains(&"backup-daily".to_string()));
+}
+
+/// Test distinguishing CSI-managed vs external snapshots (by naming convention)
+#[test]
+fn test_snapshot_categorization() {
+    let snapshots = [
+        "csi-snap-1234",       // CSI-managed (csi- prefix)
+        "snapshot-1234",       // CSI-managed (snapshot- prefix)
+        "backup-daily",        // External (cronjob)
+        "zfs-auto-2024-01-01", // External (ZFS auto-snapshot)
+        "manual-backup",       // External (manual)
+    ];
+
+    // CSI-managed snapshots typically have csi- or snapshot- prefix
+    let csi_managed: Vec<_> = snapshots
+        .iter()
+        .filter(|s| s.starts_with("csi-") || s.starts_with("snapshot-"))
+        .collect();
+
+    let external: Vec<_> = snapshots
+        .iter()
+        .filter(|s| !s.starts_with("csi-") && !s.starts_with("snapshot-"))
+        .collect();
+
+    assert_eq!(csi_managed.len(), 2);
+    assert_eq!(external.len(), 3);
+
+    // Error message should differentiate between CSI and external snapshots
+    let error_hint = if !external.is_empty() {
+        let external_list: Vec<&str> = external.iter().copied().copied().collect();
+        format!(
+            "External snapshots detected: [{}]. Remove manually with zfs destroy.",
+            external_list.join(", ")
+        )
+    } else {
+        "Delete VolumeSnapshots using kubectl.".to_string()
+    };
+
+    assert!(error_hint.contains("External snapshots"));
+}

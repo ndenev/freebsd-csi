@@ -559,6 +559,54 @@ impl StorageAgent for StorageService {
             volumes.get(&req.volume_id).cloned()
         };
 
+        // Determine volume name early (needed for snapshot check)
+        let volume_name = metadata
+            .as_ref()
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| req.volume_id.clone());
+
+        // CSI Spec compliance: Check for dependent snapshots before deletion
+        // Per CSI spec, if volume has snapshots and we don't treat them as independent,
+        // we must return FAILED_PRECONDITION so the user can delete snapshots first.
+        {
+            let zfs = self.zfs.read().await;
+            match zfs.list_snapshots_for_volume(&volume_name) {
+                Ok(snapshots) if !snapshots.is_empty() => {
+                    let snapshot_list = snapshots.join(", ");
+                    warn!(
+                        volume = %volume_name,
+                        snapshot_count = snapshots.len(),
+                        snapshots = %snapshot_list,
+                        "Cannot delete volume with dependent snapshots"
+                    );
+                    timer.failure("has_snapshots");
+                    return Err(Status::failed_precondition(format!(
+                        "Volume '{}' has {} dependent snapshot(s): [{}]. \
+                         Delete all VolumeSnapshots referencing this volume before deletion. \
+                         If these are external snapshots (not CSI-managed), remove them manually with: \
+                         zfs destroy {}@<snapshot_name>",
+                        volume_name,
+                        snapshots.len(),
+                        snapshot_list,
+                        volume_name
+                    )));
+                }
+                Ok(_) => {
+                    // No snapshots, proceed with deletion
+                    debug!(volume = %volume_name, "No dependent snapshots, proceeding with deletion");
+                }
+                Err(e) => {
+                    // Failed to check snapshots - log but continue
+                    // This maintains idempotency for volumes that don't exist
+                    debug!(
+                        volume = %volume_name,
+                        error = %e,
+                        "Could not check for snapshots (volume may not exist)"
+                    );
+                }
+            }
+        }
+
         // Try to unexport the volume via unified CTL manager
         // This is idempotent - if already unexported, we continue
         {
@@ -596,12 +644,6 @@ impl StorageAgent for StorageService {
         }
 
         // Clear ZFS metadata before deleting (for consistency)
-        // Use volume_id as the name since metadata might be None
-        let volume_name = metadata
-            .as_ref()
-            .map(|m| m.name.clone())
-            .unwrap_or_else(|| req.volume_id.clone());
-
         {
             let zfs = self.zfs.read().await;
             if let Err(e) = zfs.clear_volume_metadata(&volume_name) {

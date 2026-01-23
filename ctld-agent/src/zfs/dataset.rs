@@ -246,6 +246,60 @@ impl ZfsManager {
         Ok(())
     }
 
+    /// List all snapshots for a specific volume
+    ///
+    /// Returns snapshot names (without the volume@ prefix) for the given volume.
+    /// This is used to check for dependent snapshots before volume deletion.
+    #[instrument(skip(self))]
+    pub fn list_snapshots_for_volume(&self, volume_name: &str) -> Result<Vec<String>> {
+        validate_name(volume_name)?;
+
+        let full_name = self.full_path(volume_name);
+        debug!(volume = %full_name, "Listing snapshots for volume");
+
+        // Check if volume exists first
+        if !self.dataset_exists(&full_name)? {
+            // Volume doesn't exist, so no snapshots
+            return Ok(Vec::new());
+        }
+
+        let output = Command::new("zfs")
+            .args([
+                "list", "-H", "-t", "snapshot", "-o", "name", "-r", "-d",
+                "1", // Only direct snapshots, not nested
+                &full_name,
+            ])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // If no snapshots exist, zfs list may return error or empty
+            if stderr.contains("does not exist") || stderr.contains("no datasets available") {
+                return Ok(Vec::new());
+            }
+            warn!(volume = %full_name, error = %stderr, "Failed to list snapshots");
+            return Err(ZfsError::CommandFailed(format!(
+                "failed to list snapshots: {}",
+                stderr
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let prefix = format!("{}@", full_name);
+
+        let snapshots: Vec<String> = stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| {
+                // Extract just the snapshot name (after the @)
+                line.strip_prefix(&prefix).map(|s| s.to_string())
+            })
+            .collect();
+
+        debug!(volume = %full_name, count = snapshots.len(), "Found snapshots");
+        Ok(snapshots)
+    }
+
     /// Get information about a specific dataset
     pub fn get_dataset(&self, name: &str) -> Result<Dataset> {
         // Validate name for command injection prevention
