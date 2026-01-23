@@ -305,24 +305,38 @@ impl NodeService {
 
     /// Find and disconnect any iSCSI/NVMeoF targets for this volume.
     /// Uses session queries to find connected targets matching the volume ID.
-    fn disconnect_volume_targets(volume_id: &str) {
+    ///
+    /// Returns error if disconnect fails - this is critical for correctness.
+    /// Returning success when still connected would lie to Kubernetes and
+    /// could cause data corruption (zombie LUNs, dual-attach scenarios).
+    fn disconnect_volume_targets(volume_id: &str) -> Result<(), Status> {
         // Try iSCSI first
         let iqn = Self::derive_iqn(volume_id);
         if platform::is_iscsi_connected(&iqn) {
             info!(target = %iqn, "Disconnecting iSCSI target");
-            if let Err(e) = platform::disconnect_iscsi(&iqn) {
-                warn!(error = %e, target = %iqn, "Failed to disconnect iSCSI target");
-            }
+            platform::disconnect_iscsi(&iqn).map_err(|e| {
+                error!(error = %e, target = %iqn, "Failed to disconnect iSCSI target");
+                Status::internal(format!(
+                    "Failed to disconnect iSCSI target {}: {}. Volume may still be connected.",
+                    iqn, e
+                ))
+            })?;
         }
 
         // Try NVMeoF
         let nqn = Self::derive_nqn(volume_id);
         if platform::is_nvmeof_connected(&nqn) {
             info!(target = %nqn, "Disconnecting NVMeoF target");
-            if let Err(e) = platform::disconnect_nvmeof(&nqn) {
-                warn!(error = %e, target = %nqn, "Failed to disconnect NVMeoF target");
-            }
+            platform::disconnect_nvmeof(&nqn).map_err(|e| {
+                error!(error = %e, target = %nqn, "Failed to disconnect NVMeoF target");
+                Status::internal(format!(
+                    "Failed to disconnect NVMeoF target {}: {}. Volume may still be connected.",
+                    nqn, e
+                ))
+            })?;
         }
+
+        Ok(())
     }
 
     /// Check if a volume capability is for block (raw device) access.
@@ -558,9 +572,11 @@ impl csi::node_server::Node for NodeService {
         }
         // Block volumes have no mount to clean up
 
-        // Disconnect any iSCSI/NVMeoF targets for this volume
-        // Target names are derived from volume_id using our naming convention
-        Self::disconnect_volume_targets(volume_id);
+        // Disconnect any iSCSI/NVMeoF targets for this volume.
+        // Target names are derived from volume_id using our naming convention.
+        // IMPORTANT: We must return error if disconnect fails - lying to Kubernetes
+        // about the disconnect state can cause data corruption (zombie LUNs).
+        Self::disconnect_volume_targets(volume_id)?;
 
         info!(
             volume_id = %volume_id,
