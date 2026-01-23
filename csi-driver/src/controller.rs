@@ -663,6 +663,12 @@ impl csi::controller_server::Controller for ControllerService {
         let mut unsupported_reasons: Vec<String> = Vec::new();
 
         for cap in &req.volume_capabilities {
+            // Determine if this is a block volume request
+            let is_block = matches!(
+                &cap.access_type,
+                Some(csi::volume_capability::AccessType::Block(_))
+            );
+
             // Check access type (mount vs block)
             match &cap.access_type {
                 Some(csi::volume_capability::AccessType::Mount(_)) => {
@@ -696,11 +702,14 @@ impl csi::controller_server::Controller for ControllerService {
                             .push("MULTI_NODE_SINGLE_WRITER not supported".to_string());
                     }
                     Ok(Mode::MultiNodeMultiWriter) => {
-                        // ReadWriteMany - not supported (requires cluster filesystem)
-                        unsupported_reasons.push(
-                            "MULTI_NODE_MULTI_WRITER not supported (requires cluster filesystem)"
-                                .to_string(),
-                        );
+                        // ReadWriteMany - supported for block volumes (application handles coordination),
+                        // but not for mount volumes (standard filesystems can't handle concurrent writers)
+                        if !is_block {
+                            unsupported_reasons.push(
+                                "MULTI_NODE_MULTI_WRITER not supported for mount volumes (requires cluster filesystem)"
+                                    .to_string(),
+                            );
+                        }
                     }
                     Ok(Mode::SingleNodeSingleWriter) | Ok(Mode::SingleNodeMultiWriter) => {
                         // Alpha modes - treat as single node writer
