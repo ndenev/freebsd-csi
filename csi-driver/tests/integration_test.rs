@@ -150,7 +150,7 @@ fn is_access_mode_supported(mode: i32, is_block: bool) -> Result<(), String> {
             }
         }
         Ok(Mode::SingleNodeSingleWriter) => Ok(()), // RWOP - always supported
-        Ok(Mode::SingleNodeMultiWriter) => Ok(()), // Single node multi-writer - supported
+        Ok(Mode::SingleNodeMultiWriter) => Ok(()),  // Single node multi-writer - supported
         Ok(Mode::Unknown) | Err(_) => Err(format!("Unknown access mode: {}", mode)),
     }
 }
@@ -186,7 +186,11 @@ fn test_mount_volume_rejects_multi_node_write_modes() {
 
     let mnsw_result = is_access_mode_supported(Mode::MultiNodeSingleWriter as i32, is_block);
     assert!(mnsw_result.is_err());
-    assert!(mnsw_result.unwrap_err().contains("MULTI_NODE_SINGLE_WRITER"));
+    assert!(
+        mnsw_result
+            .unwrap_err()
+            .contains("MULTI_NODE_SINGLE_WRITER")
+    );
 }
 
 /// Test: Mount volumes support single-node and read-only modes
