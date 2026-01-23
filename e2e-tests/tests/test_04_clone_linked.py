@@ -43,7 +43,7 @@ class TestLinkedCloneMode:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=60)
+        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
 
         # Verify it's a ZFS clone (has origin)
         clone_pv = k8s.get_pvc_volume(clone_pvc)
@@ -90,7 +90,7 @@ class TestLinkedCloneMode:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=60)
+        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
 
         # Verify data
         clone_pod = pod_factory(clone_pvc, name_suffix="reader")
@@ -129,7 +129,7 @@ class TestLinkedCloneMode:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=60)
+        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
 
         # Write to clone
         clone_pod = pod_factory(clone_pvc)
@@ -177,7 +177,7 @@ class TestLinkedCloneMode:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=60)
+        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
 
         clone_pv = k8s.get_pvc_volume(clone_pvc)
         clone_dataset = f"{storage.csi_path}/{clone_pv}"
@@ -230,7 +230,7 @@ class TestLinkedCloneMode:
                 name_suffix=f"clone-{i}",
             )
             clones.append(clone_pvc)
-            assert wait_pvc_bound(clone_pvc, timeout=60)
+            assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
 
         # Verify all clones exist with origins
         for clone_pvc in clones:

@@ -11,6 +11,7 @@ import pytest
 from lib.k8s_client import K8sClient
 from lib.log_collector import LogCollector
 from lib.storage_monitor import StorageMonitor, StorageState
+from lib.resource_tracker import ResourceTracker
 
 
 # -------------------------------------------------------------------------
@@ -168,6 +169,23 @@ def storage_state_before(storage: StorageMonitor) -> StorageState:
     return storage.capture_state()
 
 
+@pytest.fixture
+def resource_tracker(k8s: K8sClient) -> Generator[ResourceTracker, None, None]:
+    """Centralized resource tracker for coordinated cleanup.
+
+    All factory fixtures register resources with this tracker.
+    Cleanup happens in dependency order:
+    1. Pods (release PVC usage)
+    2. Clone PVCs (depend on snapshots)
+    3. Snapshots (depend on source volumes)
+    4. Source PVCs (base volumes)
+    """
+    tracker = ResourceTracker(k8s=k8s)
+    yield tracker
+    # Cleanup all tracked resources in correct order
+    tracker.cleanup_all(timeout=60)
+
+
 # -------------------------------------------------------------------------
 # Factory Fixtures
 # -------------------------------------------------------------------------
@@ -178,12 +196,13 @@ def pvc_factory(
     k8s: K8sClient,
     unique_name: str,
     setup_storageclasses: list[str],
-) -> Generator[Callable, None, None]:
-    """Factory for creating PVCs with automatic cleanup.
+    resource_tracker: ResourceTracker,
+) -> Callable:
+    """Factory for creating PVCs with automatic cleanup via ResourceTracker.
 
-    PVCs are cleaned up in reverse order (clones before sources).
+    Cleanup is handled by resource_tracker in correct dependency order.
     """
-    created: list[str] = []
+    created_count = 0
 
     def create(
         storage_class: str,
@@ -196,35 +215,36 @@ def pvc_factory(
         Args:
             storage_class: StorageClass name
             size: Storage size
-            data_source: Optional dataSource for cloning
+            data_source: Optional dataSource for cloning (snapshot or PVC)
             name_suffix: Optional suffix for name
 
         Returns:
             PVC name
         """
-        suffix = f"-{name_suffix}" if name_suffix else f"-{len(created)}"
+        nonlocal created_count
+        suffix = f"-{name_suffix}" if name_suffix else f"-{created_count}"
         name = f"pvc-{unique_name}{suffix}"
         k8s.create_pvc(name, storage_class, size, data_source=data_source)
-        created.append(name)
+
+        # Track for cleanup - clones need to be deleted before their sources
+        is_clone = data_source is not None
+        depends_on = data_source.get("name") if data_source else None
+        resource_tracker.track_pvc(name, is_clone=is_clone, depends_on=depends_on)
+
+        created_count += 1
         return name
 
-    yield create
-
-    # Cleanup in reverse order (clones before sources)
-    for name in reversed(created):
-        try:
-            k8s.delete("pvc", name, wait=True, timeout=60, ignore_not_found=True)
-        except Exception as e:
-            print(f"Warning: Failed to delete PVC {name}: {e}")
+    return create
 
 
 @pytest.fixture
 def pod_factory(
     k8s: K8sClient,
     unique_name: str,
-) -> Generator[Callable, None, None]:
-    """Factory for creating Pods with automatic cleanup."""
-    created: list[str] = []
+    resource_tracker: ResourceTracker,
+) -> Callable:
+    """Factory for creating Pods with automatic cleanup via ResourceTracker."""
+    created_count = 0
 
     def create(
         pvc_name: str,
@@ -241,29 +261,28 @@ def pod_factory(
         Returns:
             Pod name
         """
-        suffix = f"-{name_suffix}" if name_suffix else f"-{len(created)}"
+        nonlocal created_count
+        suffix = f"-{name_suffix}" if name_suffix else f"-{created_count}"
         name = f"pod-{unique_name}{suffix}"
         k8s.create_pod_with_pvc(name, pvc_name, mount_path)
-        created.append(name)
+
+        # Track for cleanup - pods are deleted first to release PVC usage
+        resource_tracker.track_pod(name)
+
+        created_count += 1
         return name
 
-    yield create
-
-    # Cleanup
-    for name in reversed(created):
-        try:
-            k8s.delete("pod", name, wait=True, timeout=60, ignore_not_found=True)
-        except Exception as e:
-            print(f"Warning: Failed to delete Pod {name}: {e}")
+    return create
 
 
 @pytest.fixture
 def snapshot_factory(
     k8s: K8sClient,
     unique_name: str,
-) -> Generator[Callable, None, None]:
-    """Factory for creating VolumeSnapshots with automatic cleanup."""
-    created: list[str] = []
+    resource_tracker: ResourceTracker,
+) -> Callable:
+    """Factory for creating VolumeSnapshots with automatic cleanup via ResourceTracker."""
+    created_count = 0
 
     def create(
         pvc_name: str,
@@ -280,20 +299,18 @@ def snapshot_factory(
         Returns:
             Snapshot name
         """
-        suffix = f"-{name_suffix}" if name_suffix else f"-{len(created)}"
+        nonlocal created_count
+        suffix = f"-{name_suffix}" if name_suffix else f"-{created_count}"
         name = f"snap-{unique_name}{suffix}"
         k8s.create_snapshot(name, pvc_name, snapshot_class)
-        created.append(name)
+
+        # Track for cleanup - snapshots deleted after clones but before source PVCs
+        resource_tracker.track_snapshot(name, source_pvc=pvc_name)
+
+        created_count += 1
         return name
 
-    yield create
-
-    # Cleanup
-    for name in reversed(created):
-        try:
-            k8s.delete("volumesnapshot", name, wait=True, timeout=60, ignore_not_found=True)
-        except Exception as e:
-            print(f"Warning: Failed to delete VolumeSnapshot {name}: {e}")
+    return create
 
 
 # -------------------------------------------------------------------------

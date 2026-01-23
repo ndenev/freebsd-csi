@@ -116,6 +116,7 @@ class TestSnapshotOperations:
         assert modified_data in stdout
 
         # Create clone from snapshot
+        # Clone operations take longer: ZFS clone + iSCSI export + K8s binding
         clone_pvc = pvc_factory(
             "freebsd-e2e-iscsi-linked",
             "1Gi",
@@ -126,7 +127,7 @@ class TestSnapshotOperations:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=60)
+        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
 
         # Delete source pod before mounting clone
         k8s.delete("pod", pod_name, wait=True)

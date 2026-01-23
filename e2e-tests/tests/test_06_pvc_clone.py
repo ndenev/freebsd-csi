@@ -48,7 +48,7 @@ class TestPvcCloning:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=60)
+        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
 
         # Verify clone has data
         clone_pod = pod_factory(clone_pvc, name_suffix="reader")
@@ -89,7 +89,7 @@ class TestPvcCloning:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=60)
+        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
 
         # Verify temp snapshot was created
         snaps_after = storage.list_snapshots(source_dataset)
@@ -126,7 +126,7 @@ class TestPvcCloning:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=60)
+        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
 
         # Verify temp snapshot exists
         snaps = storage.list_snapshots(source_dataset)
@@ -180,7 +180,7 @@ class TestPvcCloning:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=60)
+        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
 
         # Modify clone
         clone_pod = pod_factory(clone_pvc, name_suffix="clone-pod")
@@ -234,7 +234,7 @@ class TestPvcCloning:
                 name_suffix=f"clone-{i}",
             )
             clones.append(clone_pvc)
-            assert wait_pvc_bound(clone_pvc, timeout=60)
+            assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
 
         # Each clone should have its own temp snapshot (or share one)
         # Main verification: all clones exist
