@@ -44,10 +44,10 @@ pub fn is_nvmeof_connected(target_nqn: &str) -> bool {
     if let Ok(entries) = fs::read_dir(nvme_subsys) {
         for entry in entries.flatten() {
             let nqn_path = entry.path().join("subsysnqn");
-            if let Ok(nqn) = fs::read_to_string(&nqn_path) {
-                if nqn.trim() == target_nqn {
-                    return true;
-                }
+            if let Ok(nqn) = fs::read_to_string(&nqn_path)
+                && nqn.trim() == target_nqn
+            {
+                return true;
             }
         }
     }
