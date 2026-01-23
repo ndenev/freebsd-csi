@@ -1,0 +1,15 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: freebsd-e2e-iscsi-retain
+  labels:
+    app.kubernetes.io/component: e2e-testing
+    app.kubernetes.io/part-of: freebsd-csi
+provisioner: csi.freebsd.org
+# Retain policy - PV and backend storage preserved after PVC deletion
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+parameters:
+  exportType: iscsi
+  cloneMode: linked

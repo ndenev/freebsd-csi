@@ -1,0 +1,15 @@
+# FreeBSD CSI E2E Test Dependencies
+
+# Core testing
+pytest>=7.0.0
+pytest-timeout>=2.0.0
+
+# YAML parsing for K8s manifests
+pyyaml>=6.0
+
+# JUnit XML report parsing (optional, for report analysis)
+junitparser>=3.0.0
+
+# Type checking (development only)
+# mypy>=1.0.0
+# types-PyYAML>=6.0.0

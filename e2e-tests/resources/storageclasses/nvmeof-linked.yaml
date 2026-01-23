@@ -1,0 +1,16 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: freebsd-e2e-nvmeof-linked
+  labels:
+    app.kubernetes.io/component: e2e-testing
+    app.kubernetes.io/part-of: freebsd-csi
+provisioner: csi.freebsd.org
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+parameters:
+  # Export volume via NVMe over Fabrics
+  exportType: nvmeof
+  # Use LINKED clone mode
+  cloneMode: linked
