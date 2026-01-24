@@ -224,31 +224,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Wait for shutdown signal (SIGTERM or SIGINT)
+/// Wait for shutdown signal (SIGTERM, SIGINT, or SIGHUP)
+///
+/// This function only supports Unix systems (FreeBSD/Linux) since the CSI driver
+/// runs on Linux Kubernetes nodes.
 async fn shutdown_signal() {
-    let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+    use signal::unix::{SignalKind, signal};
+
+    // Install signal handlers, logging errors but continuing with available handlers
+    let mut sigterm = match signal(SignalKind::terminate()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!("Failed to install SIGTERM handler: {}", e);
+            None
+        }
     };
 
-    #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
+    let mut sigint = match signal(SignalKind::interrupt()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!("Failed to install SIGINT handler: {}", e);
+            None
+        }
     };
 
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
+    let mut sighup = match signal(SignalKind::hangup()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!("Failed to install SIGHUP handler: {}", e);
+            None
+        }
+    };
 
+    // Wait for any signal - use pending() for handlers that failed to install
     tokio::select! {
-        _ = ctrl_c => {
+        _ = async { sigterm.as_mut().unwrap().recv().await }, if sigterm.is_some() => {
+            info!("Received SIGTERM");
+        }
+        _ = async { sigint.as_mut().unwrap().recv().await }, if sigint.is_some() => {
             info!("Received SIGINT");
         }
-        _ = terminate => {
-            info!("Received SIGTERM");
+        _ = async { sighup.as_mut().unwrap().recv().await }, if sighup.is_some() => {
+            info!("Received SIGHUP (config reload not implemented, shutting down)");
         }
     }
 }
