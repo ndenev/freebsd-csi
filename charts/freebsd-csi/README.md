@@ -55,7 +55,10 @@ helm install freebsd-csi charts/freebsd-csi \
 | `storageClassIscsi.create` | Create an iSCSI StorageClass | `false` |
 | `storageClassIscsi.name` | iSCSI StorageClass name | `freebsd-zfs-iscsi` |
 | `storageClassIscsi.default` | Set as default StorageClass | `false` |
-| `storageClassIscsi.parameters.portal` | **Required if create=true.** iSCSI portal address | `""` |
+| `storageClassIscsi.parameters.portal` | **Required if create=true.** iSCSI portal address (default port: 3260). Supports multipath: `10.0.0.1:3260,10.0.0.2:3260` | `""` |
+| `storageClassIscsi.parameters.blockSize` | Logical block size (512 or 4096) | - |
+| `storageClassIscsi.parameters.physicalBlockSize` | Physical block size hint | - |
+| `storageClassIscsi.parameters.enableUnmap` | Enable TRIM/discard for SSD-backed storage | - |
 | `storageClassIscsi.chapSecret.name` | Existing secret with CHAP credentials | `""` |
 | `storageClassIscsi.chapSecret.namespace` | Namespace of CHAP secret | Release namespace |
 | `storageClassIscsi.chapSecret.credentials.username` | CHAP username (creates secret if set) | `""` |
@@ -65,8 +68,11 @@ helm install freebsd-csi charts/freebsd-csi \
 | `storageClassNvmeof.create` | Create an NVMeoF StorageClass | `false` |
 | `storageClassNvmeof.name` | NVMeoF StorageClass name | `freebsd-zfs-nvmeof` |
 | `storageClassNvmeof.default` | Set as default StorageClass | `false` |
-| `storageClassNvmeof.parameters.transportAddr` | **Required if create=true.** NVMeoF target address | `""` |
+| `storageClassNvmeof.parameters.transportAddr` | **Required if create=true.** NVMeoF target address (default port: 4420). Supports multipath: `10.0.0.1,10.0.0.2` | `""` |
 | `storageClassNvmeof.parameters.transportPort` | NVMeoF transport port | `4420` |
+| `storageClassNvmeof.parameters.blockSize` | Logical block size (512 or 4096) | - |
+| `storageClassNvmeof.parameters.physicalBlockSize` | Physical block size hint | - |
+| `storageClassNvmeof.parameters.enableUnmap` | Enable TRIM/discard for SSD-backed storage | - |
 | `storageClassNvmeof.authSecret.name` | Existing secret with NVMeoF auth credentials | `""` |
 | `storageClassNvmeof.authSecret.namespace` | Namespace of auth secret | Release namespace |
 | `storageClassNvmeof.authSecret.credentials.hostNqn` | Host NQN for access control (creates secret if set) | `""` |
@@ -163,13 +169,24 @@ storageClassIscsi:
   default: true
   parameters:
     fsType: ext4
-    portal: "192.168.1.100:3260"
+    portal: "192.168.1.100:3260"  # Default port: 3260
+    blockSize: "4096"             # Optional: 4K block size
+    enableUnmap: "true"           # Optional: Enable TRIM/discard
+
+# High-availability example with multipath
+# storageClassIscsi:
+#   create: true
+#   parameters:
+#     portal: "10.0.0.1:3260,10.0.0.2:3260"  # Multiple portals for HA
+#     blockSize: "4096"
 
 # Optional: Also create NVMeoF StorageClass (FreeBSD 15.0+ required on storage server)
 # storageClassNvmeof:
 #   create: true
 #   parameters:
-#     transportAddr: "192.168.1.100"
+#     transportAddr: "192.168.1.100"  # Default port: 4420
+#     blockSize: "4096"
+#     enableUnmap: "true"
 
 controller:
   resources:
@@ -202,7 +219,27 @@ provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
   fsType: ext4
-  portal: "192.168.1.100:3260"
+  portal: "192.168.1.100:3260"  # Default port: 3260
+  blockSize: "4096"             # Optional: 4K block size
+  enableUnmap: "true"           # Optional: Enable TRIM/discard
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+```
+
+**iSCSI StorageClass with Multipath:**
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: freebsd-zfs-iscsi-ha
+provisioner: csi.freebsd.org
+parameters:
+  exportType: iscsi
+  fsType: ext4
+  # Multiple portals for multipath - dm-multipath combines paths automatically
+  portal: "10.0.0.1:3260,10.0.0.2:3260"
+  blockSize: "4096"
 allowVolumeExpansion: true
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
@@ -218,8 +255,10 @@ provisioner: csi.freebsd.org
 parameters:
   exportType: nvmeof
   fsType: ext4
-  transportAddr: "192.168.1.100"
+  transportAddr: "192.168.1.100"  # Default port: 4420
   transportPort: "4420"
+  blockSize: "4096"
+  enableUnmap: "true"
 allowVolumeExpansion: true
 reclaimPolicy: Delete
 volumeBindingMode: Immediate

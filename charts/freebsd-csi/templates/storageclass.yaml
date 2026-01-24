@@ -15,6 +15,16 @@ parameters:
   exportType: iscsi
   fsType: {{ .Values.storageClassIscsi.parameters.fsType | default "ext4" }}
   portal: {{ .Values.storageClassIscsi.parameters.portal | quote }}
+  {{- /* Block device configuration parameters */ -}}
+  {{- if .Values.storageClassIscsi.parameters.blockSize }}
+  blockSize: {{ .Values.storageClassIscsi.parameters.blockSize | quote }}
+  {{- end }}
+  {{- if .Values.storageClassIscsi.parameters.physicalBlockSize }}
+  physicalBlockSize: {{ .Values.storageClassIscsi.parameters.physicalBlockSize | quote }}
+  {{- end }}
+  {{- if .Values.storageClassIscsi.parameters.enableUnmap }}
+  enableUnmap: {{ .Values.storageClassIscsi.parameters.enableUnmap | quote }}
+  {{- end }}
   {{- /* CHAP authentication secret parameters */ -}}
   {{- $iscsiSecretName := "" }}
   {{- $iscsiSecretNamespace := .Release.Namespace }}
@@ -55,6 +65,16 @@ parameters:
   fsType: {{ .Values.storageClassNvmeof.parameters.fsType | default "ext4" }}
   transportAddr: {{ .Values.storageClassNvmeof.parameters.transportAddr | quote }}
   transportPort: {{ .Values.storageClassNvmeof.parameters.transportPort | default "4420" | quote }}
+  {{- /* Block device configuration parameters */ -}}
+  {{- if .Values.storageClassNvmeof.parameters.blockSize }}
+  blockSize: {{ .Values.storageClassNvmeof.parameters.blockSize | quote }}
+  {{- end }}
+  {{- if .Values.storageClassNvmeof.parameters.physicalBlockSize }}
+  physicalBlockSize: {{ .Values.storageClassNvmeof.parameters.physicalBlockSize | quote }}
+  {{- end }}
+  {{- if .Values.storageClassNvmeof.parameters.enableUnmap }}
+  enableUnmap: {{ .Values.storageClassNvmeof.parameters.enableUnmap | quote }}
+  {{- end }}
   {{- /* NVMeoF DH-HMAC-CHAP authentication secret parameters */ -}}
   {{- $nvmeSecretName := "" }}
   {{- $nvmeSecretNamespace := .Release.Namespace }}

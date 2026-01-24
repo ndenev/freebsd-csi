@@ -275,13 +275,29 @@ csi-driver \
 
 StorageClass parameters control how volumes are provisioned:
 
+#### Connection Parameters
+
 | Parameter | Values | Default | Description |
 |-----------|--------|---------|-------------|
 | `exportType` | `iscsi`, `nvmeof` | `iscsi` | Protocol for exporting volumes |
 | `fsType` | `ext4`, `xfs` (Linux); `ufs` (FreeBSD) | `ext4` | Filesystem type for formatting volumes |
-| `portal` | `<host>:<port>` | - | **Required for iSCSI on Linux.** iSCSI portal address |
-| `transportAddr` | `<host>` | - | **Required for NVMeoF.** NVMe-oF transport address |
+| `portal` | `<ip>:<port>[,<ip2>:<port2>...]` | - | **Required for iSCSI on Linux.** iSCSI portal address(es). Default port: 3260 |
+| `transportAddr` | `<ip>[,<ip2>...]` | - | **Required for NVMeoF.** NVMe-oF transport address(es) |
 | `transportPort` | `<port>` | `4420` | NVMe-oF transport port |
+
+> **Multipath Support:** Both `portal` and `transportAddr` accept comma-separated values for multipath configurations.
+> For iSCSI, each portal will be discovered and logged into separately. For NVMeoF, each address will be connected separately.
+> Native multipath (NVMe) or dm-multipath (iSCSI) will combine the paths automatically.
+
+#### Block Device Parameters
+
+| Parameter | Values | Default | Description |
+|-----------|--------|---------|-------------|
+| `blockSize` | `512`, `4096` | CTL default | Logical block size for the volume |
+| `physicalBlockSize` | `512`, `4096`, etc. | - | Physical block size hint for storage optimization |
+| `enableUnmap` | `true`, `false` | `false` | Enable TRIM/discard passthrough for SSD-backed storage |
+
+> **Note:** These parameters also accept alternative naming conventions: `block_size`, `physical_block_size`/`pblocksize`, `enable_unmap`/`unmap`.
 
 #### Filesystem Types by Platform
 
@@ -304,23 +320,28 @@ provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
   fsType: ext4
-  portal: "192.168.1.100:3260"  # REQUIRED for Linux
+  portal: "192.168.1.100:3260"  # REQUIRED for Linux (default port: 3260)
+  blockSize: "4096"             # Optional: 4K block size
+  enableUnmap: "true"           # Optional: Enable TRIM/discard
 allowVolumeExpansion: true
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
 ```
 
-**iSCSI with XFS:**
+**iSCSI with Multipath (high availability):**
 ```yaml
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: freebsd-zfs-iscsi-xfs
+  name: freebsd-zfs-iscsi-ha
 provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
-  fsType: xfs
-  portal: "192.168.1.100:3260"
+  fsType: ext4
+  # Multiple portals for multipath - dm-multipath combines paths automatically
+  portal: "10.0.0.1:3260,10.0.0.2:3260"
+  blockSize: "4096"
+  enableUnmap: "true"
 allowVolumeExpansion: true
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
@@ -336,8 +357,29 @@ provisioner: csi.freebsd.org
 parameters:
   exportType: nvmeof
   fsType: ext4
-  transportAddr: "192.168.1.100"  # REQUIRED
+  transportAddr: "192.168.1.100"  # REQUIRED (default port: 4420)
   transportPort: "4420"
+  blockSize: "4096"
+  enableUnmap: "true"
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+```
+
+**NVMeoF with Multipath:**
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: freebsd-zfs-nvmeof-ha
+provisioner: csi.freebsd.org
+parameters:
+  exportType: nvmeof
+  fsType: ext4
+  # Multiple addresses for multipath - native NVMe multipath combines paths
+  transportAddr: "10.0.0.1,10.0.0.2"
+  transportPort: "4420"
+  blockSize: "4096"
 allowVolumeExpansion: true
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
