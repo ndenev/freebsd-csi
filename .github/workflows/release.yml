@@ -1,22 +1,9 @@
 name: Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      bump:
-        description: 'Version bump type'
-        required: true
-        default: 'patch'
-        type: choice
-        options:
-          - patch
-          - minor
-          - major
-      dry_run:
-        description: 'Dry run (no publish, no git push, no release)'
-        required: false
-        default: false
-        type: boolean
+  push:
+    tags:
+      - 'v*'
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,86 +11,22 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/freebsd-csi-driver
 
 jobs:
+  # Extract version from tag
   version:
-    name: Bump Version
+    name: Extract Version
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/master'
-    permissions:
-      contents: write
     outputs:
-      version: ${{ steps.bump.outputs.version }}
-      tag: ${{ steps.bump.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Get current version
-        id: current
+      - name: Extract version from tag
+        id: version
         run: |
-          # Read from workspace Cargo.toml (root), not individual crates
-          VERSION=$(grep -A5 '\[workspace.package\]' Cargo.toml | grep '^version' | sed 's/.*"\(.*\)".*/\1/')
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Current version: $VERSION"
-
-      - name: Calculate new version
-        id: bump
-        env:
-          CURRENT_VERSION: ${{ steps.current.outputs.version }}
-          BUMP_TYPE: ${{ inputs.bump }}
-        run: |
-          IFS='.' read -r major minor patch <<< "$CURRENT_VERSION"
-          case "$BUMP_TYPE" in
-            major) major=$((major + 1)); minor=0; patch=0 ;;
-            minor) minor=$((minor + 1)); patch=0 ;;
-            patch) patch=$((patch + 1)) ;;
-          esac
-          VERSION="${major}.${minor}.${patch}"
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
-          echo "New version: $VERSION"
-
-      - name: Update workspace Cargo.toml
-        env:
-          NEW_VERSION: ${{ steps.bump.outputs.version }}
-        run: |
-          # Update version in [workspace.package] section of root Cargo.toml
-          # Individual crates inherit via version.workspace = true
-          sed -i "/\[workspace.package\]/,/^\[/ s/^version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
-          echo "Updated workspace Cargo.toml to $NEW_VERSION"
-
-      - name: Update Chart.yaml
-        env:
-          NEW_VERSION: ${{ steps.bump.outputs.version }}
-        run: |
-          sed -i "s/^version:.*/version: $NEW_VERSION/" charts/freebsd-csi/Chart.yaml
-          sed -i "s/^appVersion:.*/appVersion: \"$NEW_VERSION\"/" charts/freebsd-csi/Chart.yaml
-          echo "Updated Chart.yaml to $NEW_VERSION"
-
-      - name: Show changes (dry run)
-        if: inputs.dry_run
-        run: |
-          echo "=== DRY RUN MODE ==="
-          echo "Would bump to version: ${{ steps.bump.outputs.version }}"
-          echo "Would create tag: ${{ steps.bump.outputs.tag }}"
-          echo ""
-          echo "=== Cargo.toml (workspace) changes ==="
-          git diff Cargo.toml
-          echo ""
-          echo "=== charts/freebsd-csi/Chart.yaml changes ==="
-          git diff charts/freebsd-csi/Chart.yaml
-
-      - name: Commit and tag
-        if: ${{ !inputs.dry_run }}
-        env:
-          TAG: ${{ steps.bump.outputs.tag }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml charts/freebsd-csi/Chart.yaml
-          git commit -m "Release $TAG"
-          git tag "$TAG"
-          git push origin HEAD --tags
+          echo "Tag: $TAG, Version: $VERSION"
 
   # Build csi-driver Linux binary and container image
   build-csi-driver:
@@ -116,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.dry_run && github.ref || needs.version.outputs.tag }}
+          ref: ${{ needs.version.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -135,7 +58,6 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Container Registry
-        if: ${{ !inputs.dry_run }}
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -156,7 +78,7 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
-          push: ${{ !inputs.dry_run }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -181,7 +103,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.dry_run && github.ref || needs.version.outputs.tag }}
+          ref: ${{ needs.version.outputs.tag }}
 
       - name: Install cross-compilation dependencies
         run: |
@@ -291,7 +213,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.dry_run && github.ref || needs.version.outputs.tag }}
+          ref: ${{ needs.version.outputs.tag }}
 
       - name: Download ctld-agent binary
         uses: actions/download-artifact@v4
@@ -369,7 +291,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.dry_run && github.ref || needs.version.outputs.tag }}
+          ref: ${{ needs.version.outputs.tag }}
 
       - name: Install Helm
         uses: azure/setup-helm@v4
@@ -382,7 +304,6 @@ jobs:
           ls -la helm-packages/
 
       - name: Log in to Container Registry
-        if: ${{ !inputs.dry_run }}
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -390,7 +311,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push Helm chart to OCI registry
-        if: ${{ !inputs.dry_run }}
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
@@ -406,7 +326,6 @@ jobs:
   release:
     name: Create Release
     needs: [version, build-csi-driver, build-ctld-agent-freebsd, package-freebsd, helm-chart]
-    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -460,29 +379,3 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
-
-  # Dry run summary
-  dry-run-summary:
-    name: Dry Run Summary
-    needs: [version, build-csi-driver, build-ctld-agent-freebsd, package-freebsd, helm-chart]
-    if: inputs.dry_run
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Summary
-        env:
-          VERSION: ${{ needs.version.outputs.version }}
-          TAG: ${{ needs.version.outputs.tag }}
-        run: |
-          echo "=== DRY RUN COMPLETE ==="
-          echo ""
-          echo "Version: $VERSION"
-          echo "Tag: $TAG"
-          echo ""
-          echo "Built artifacts:"
-          find artifacts -type f -exec ls -la {} \;
-          echo ""
-          echo "To perform a real release, run without dry_run checked."
