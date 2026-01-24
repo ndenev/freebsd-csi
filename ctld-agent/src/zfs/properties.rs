@@ -48,7 +48,6 @@ pub const METADATA_PROPERTY: &str = "user:csi:metadata";
 /// This property is set on snapshots to track them even after promotion moves them
 pub const SNAPSHOT_ID_PROPERTY: &str = "user:csi:snapshot_id";
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

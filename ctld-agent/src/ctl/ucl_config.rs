@@ -880,7 +880,6 @@ mod tests {
         assert!(auth_group.is_none());
     }
 
-
     #[test]
     fn test_auth_group_group_ref_returns_none() {
         // GroupRef means the auth-group already exists, so we don't create a new one

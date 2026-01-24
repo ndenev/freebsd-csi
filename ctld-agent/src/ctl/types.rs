@@ -603,7 +603,6 @@ mod tests {
         assert_eq!(target.volume_name(), Some("vol1"));
     }
 
-
     #[test]
     fn test_auth_config_has_credentials() {
         // None has no credentials
@@ -624,15 +623,24 @@ mod tests {
     #[test]
     fn test_auth_config_auth_group_name() {
         // None returns "no-authentication"
-        assert_eq!(AuthConfig::None.auth_group_name("vol1"), "no-authentication");
+        assert_eq!(
+            AuthConfig::None.auth_group_name("vol1"),
+            "no-authentication"
+        );
 
         // IscsiChap generates auth group name from volume
         let chap = IscsiChapAuth::new("user", "secret");
-        assert_eq!(AuthConfig::IscsiChap(chap).auth_group_name("vol1"), "ag-vol1");
+        assert_eq!(
+            AuthConfig::IscsiChap(chap).auth_group_name("vol1"),
+            "ag-vol1"
+        );
 
         // NvmeAuth generates auth group name from volume
         let nvme = NvmeAuth::new("nqn.host", "secret", "sha256");
-        assert_eq!(AuthConfig::NvmeAuth(nvme).auth_group_name("vol1"), "ag-vol1");
+        assert_eq!(
+            AuthConfig::NvmeAuth(nvme).auth_group_name("vol1"),
+            "ag-vol1"
+        );
 
         // GroupRef returns the stored name directly
         assert_eq!(

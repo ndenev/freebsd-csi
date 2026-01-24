@@ -1124,7 +1124,6 @@ mod tests {
         );
     }
 
-
     // ===== iSCSI CHAP Extraction Tests =====
 
     #[test]
@@ -1344,17 +1343,10 @@ mod tests {
     #[test]
     fn test_extract_auth_credentials_iscsi() {
         let mut secrets = HashMap::new();
-        secrets.insert(
-            "node.session.auth.username".to_string(),
-            "user".to_string(),
-        );
-        secrets.insert(
-            "node.session.auth.password".to_string(),
-            "pass".to_string(),
-        );
+        secrets.insert("node.session.auth.username".to_string(), "user".to_string());
+        secrets.insert("node.session.auth.password".to_string(), "pass".to_string());
 
-        let result =
-            ControllerService::extract_auth_credentials(&secrets, ExportType::Iscsi);
+        let result = ControllerService::extract_auth_credentials(&secrets, ExportType::Iscsi);
         assert!(result.is_some());
         assert!(matches!(
             result.unwrap().credentials,
@@ -1371,8 +1363,7 @@ mod tests {
         );
         secrets.insert("nvme.auth.secret".to_string(), "secret".to_string());
 
-        let result =
-            ControllerService::extract_auth_credentials(&secrets, ExportType::Nvmeof);
+        let result = ControllerService::extract_auth_credentials(&secrets, ExportType::Nvmeof);
         assert!(result.is_some());
         assert!(matches!(
             result.unwrap().credentials,
@@ -1383,34 +1374,25 @@ mod tests {
     #[test]
     fn test_extract_auth_credentials_unspecified() {
         let mut secrets = HashMap::new();
-        secrets.insert(
-            "node.session.auth.username".to_string(),
-            "user".to_string(),
-        );
-        secrets.insert(
-            "node.session.auth.password".to_string(),
-            "pass".to_string(),
-        );
+        secrets.insert("node.session.auth.username".to_string(), "user".to_string());
+        secrets.insert("node.session.auth.password".to_string(), "pass".to_string());
 
         // Even with valid iSCSI secrets, Unspecified export type returns None
-        let result =
-            ControllerService::extract_auth_credentials(&secrets, ExportType::Unspecified);
+        let result = ControllerService::extract_auth_credentials(&secrets, ExportType::Unspecified);
         assert!(result.is_none());
     }
 
     #[test]
     fn test_extract_auth_credentials_iscsi_no_secrets() {
         let secrets = HashMap::new();
-        let result =
-            ControllerService::extract_auth_credentials(&secrets, ExportType::Iscsi);
+        let result = ControllerService::extract_auth_credentials(&secrets, ExportType::Iscsi);
         assert!(result.is_none());
     }
 
     #[test]
     fn test_extract_auth_credentials_nvmeof_no_secrets() {
         let secrets = HashMap::new();
-        let result =
-            ControllerService::extract_auth_credentials(&secrets, ExportType::Nvmeof);
+        let result = ControllerService::extract_auth_credentials(&secrets, ExportType::Nvmeof);
         assert!(result.is_none());
     }
 }
