@@ -119,6 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let zfs = Arc::new(RwLock::new(zfs_manager));
 
     // Initialize unified CTL manager for iSCSI and NVMeoF exports
+    // Pass parent_dataset for device path validation (security: prevents privilege escalation)
     let ctl_manager = CtlManager::new(
         args.base_iqn.clone(),
         args.base_nqn.clone(),
@@ -126,6 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.ctl_config.to_string_lossy().to_string(),
         args.auth_group.clone(),
         args.transport_group_name.clone(),
+        args.zfs_parent.clone(),
     )?;
 
     // Note: We intentionally do NOT load from UCL config here.

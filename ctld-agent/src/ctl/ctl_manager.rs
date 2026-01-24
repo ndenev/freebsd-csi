@@ -48,6 +48,8 @@ pub struct CtlManager {
     portal_group_name: String,
     /// Transport group name for NVMeoF
     transport_group: String,
+    /// Parent ZFS dataset for device path validation (e.g., "tank/csi")
+    parent_dataset: String,
     /// In-memory cache of all exports, keyed by volume name
     exports: RwLock<HashMap<String, Export>>,
     /// UCL config manager for persistent configuration
@@ -64,6 +66,7 @@ impl CtlManager {
     /// * `config_path` - Path to the UCL config file
     /// * `auth_group` - Auth group name for UCL config
     /// * `transport_group` - Transport group name for NVMeoF
+    /// * `parent_dataset` - Parent ZFS dataset for device path validation (e.g., "tank/csi")
     pub fn new(
         base_iqn: String,
         base_nqn: String,
@@ -71,6 +74,7 @@ impl CtlManager {
         config_path: String,
         auth_group: String,
         transport_group: String,
+        parent_dataset: String,
     ) -> Result<Self> {
         // Validate base IQN/NQN format
         Iqn::parse(&base_iqn)
@@ -78,11 +82,18 @@ impl CtlManager {
         Nqn::parse(&base_nqn)
             .map_err(|_| CtlError::InvalidName(format!("invalid base NQN format: {}", base_nqn)))?;
 
+        // Validate parent_dataset is not empty
+        if parent_dataset.is_empty() {
+            return Err(CtlError::InvalidName(
+                "parent_dataset cannot be empty".to_string(),
+            ));
+        }
+
         let ucl_manager = UclConfigManager::new(config_path);
 
         info!(
-            "Initializing CtlManager with base_iqn={}, base_nqn={}, portal_group={}",
-            base_iqn, base_nqn, portal_group_name
+            "Initializing CtlManager with base_iqn={}, base_nqn={}, portal_group={}, parent_dataset={}",
+            base_iqn, base_nqn, portal_group_name, parent_dataset
         );
 
         Ok(Self {
@@ -91,6 +102,7 @@ impl CtlManager {
             auth_group,
             portal_group_name,
             transport_group,
+            parent_dataset,
             exports: RwLock::new(HashMap::new()),
             ucl_manager,
         })
@@ -211,6 +223,12 @@ impl CtlManager {
     ) -> Result<Export> {
         // Validate and parse inputs using newtypes
         let device_path = DevicePath::parse(device_path)?;
+
+        // SECURITY: Validate device path is under the configured parent dataset.
+        // This prevents privilege escalation by ensuring we can only export
+        // volumes within our managed ZFS dataset hierarchy.
+        device_path.validate_parent_dataset(&self.parent_dataset)?;
+
         let target_name: TargetName = match export_type {
             ExportType::Iscsi => self.generate_iqn(volume_name)?.into(),
             ExportType::Nvmeof => self.generate_nqn(volume_name)?.into(),
