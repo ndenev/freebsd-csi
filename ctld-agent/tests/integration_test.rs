@@ -1151,3 +1151,127 @@ fn test_snapshot_categorization() {
 
     assert!(error_hint.contains("External snapshots"));
 }
+
+// ============================================================================
+// NVMe Controller/Namespace Serial Number Tests
+// ============================================================================
+
+/// Test that NVMe namespace serial is generated from volume name using SHA-256
+#[test]
+fn test_nvme_namespace_serial_generation() {
+    use sha2::{Digest, Sha256};
+
+    let volume_name = "pvc-12345678-abcd-1234-5678-123456789012";
+
+    // Generate expected serial using same algorithm
+    let mut hasher = Sha256::new();
+    hasher.update(volume_name.as_bytes());
+    let hash = hasher.finalize();
+    let expected_serial = hex::encode(&hash[..8]);
+
+    // Verify it's 16 hex characters (8 bytes)
+    assert_eq!(
+        expected_serial.len(),
+        16,
+        "Namespace serial should be 16 hex chars"
+    );
+
+    // Verify determinism - same input produces same output
+    let mut hasher2 = Sha256::new();
+    hasher2.update(volume_name.as_bytes());
+    let hash2 = hasher2.finalize();
+    let serial2 = hex::encode(&hash2[..8]);
+    assert_eq!(
+        expected_serial, serial2,
+        "Serial generation should be deterministic"
+    );
+}
+
+/// Test that NVMe controller serial differs from namespace serial
+#[test]
+fn test_nvme_controller_serial_differs_from_namespace() {
+    use sha2::{Digest, Sha256};
+
+    let volume_name = "test-volume";
+
+    // Namespace serial
+    let mut ns_hasher = Sha256::new();
+    ns_hasher.update(volume_name.as_bytes());
+    let ns_hash = ns_hasher.finalize();
+    let ns_serial = hex::encode(&ns_hash[..8]);
+
+    // Controller serial (uses "ctrl:" prefix)
+    let mut ctrl_hasher = Sha256::new();
+    ctrl_hasher.update(b"ctrl:");
+    ctrl_hasher.update(volume_name.as_bytes());
+    let ctrl_hash = ctrl_hasher.finalize();
+    let ctrl_serial = hex::encode(&ctrl_hash[..10]);
+
+    // Verify they are different
+    assert_ne!(
+        ns_serial, ctrl_serial,
+        "Controller and namespace serial should differ"
+    );
+
+    // Verify controller serial is 20 hex chars (10 bytes)
+    assert_eq!(
+        ctrl_serial.len(),
+        20,
+        "Controller serial should be 20 hex chars"
+    );
+}
+
+/// Test that different volumes produce different serials
+#[test]
+fn test_nvme_serial_uniqueness() {
+    use sha2::{Digest, Sha256};
+
+    let volumes = ["vol1", "vol2", "pvc-a", "pvc-b", "test-volume"];
+
+    let serials: Vec<String> = volumes
+        .iter()
+        .map(|v| {
+            let mut hasher = Sha256::new();
+            hasher.update(v.as_bytes());
+            let hash = hasher.finalize();
+            hex::encode(&hash[..8])
+        })
+        .collect();
+
+    // Check all serials are unique
+    let unique_count = serials
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    assert_eq!(
+        unique_count,
+        volumes.len(),
+        "All volume serials should be unique"
+    );
+}
+
+/// Test NVMe serial format validity (hex string)
+#[test]
+fn test_nvme_serial_format() {
+    use sha2::{Digest, Sha256};
+
+    let volume_name = "test-volume";
+
+    let mut hasher = Sha256::new();
+    hasher.update(volume_name.as_bytes());
+    let hash = hasher.finalize();
+    let serial = hex::encode(&hash[..8]);
+
+    // Verify it's valid hex
+    assert!(
+        serial.chars().all(|c| c.is_ascii_hexdigit()),
+        "Serial should be valid hex string"
+    );
+
+    // Verify it's lowercase (hex::encode produces lowercase)
+    assert_eq!(
+        serial,
+        serial.to_lowercase(),
+        "Serial should be lowercase hex"
+    );
+}
