@@ -125,7 +125,7 @@ impl CtlManager {
             .filter_map(|(iqn_str, target)| {
                 let volume_name = iqn_str.rsplit(':').next()?;
                 let (lun_id_str, lun) = target.lun.iter().next()?;
-                let lun_id = lun_id_str.parse::<u32>().unwrap_or(0);
+                let lun_id = lun_id_str.parse::<u32>().ok()?;
                 let iqn = Iqn::parse(iqn_str).ok()?;
                 let device_path = DevicePath::parse(&lun.path).ok()?;
 
@@ -152,7 +152,7 @@ impl CtlManager {
             .filter_map(|(nqn_str, controller)| {
                 let volume_name = nqn_str.rsplit(':').next()?;
                 let (ns_id_str, ns) = controller.namespace.iter().next()?;
-                let ns_id = ns_id_str.parse::<u32>().unwrap_or(0);
+                let ns_id = ns_id_str.parse::<u32>().ok()?;
                 let nqn = Nqn::parse(nqn_str).ok()?;
                 let device_path = DevicePath::parse(&ns.path).ok()?;
 
