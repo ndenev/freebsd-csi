@@ -119,21 +119,13 @@ class ResourceTracker:
 
         for _, resource in sorted_resources:
             try:
-                if resource.kind == "pvc":
-                    # For PVCs, wait for PV deletion to ensure CSI DeleteVolume completes
-                    self.k8s.delete_pvc_and_wait_pv(
-                        resource.name,
-                        timeout=timeout * 2,  # Extra time for PV cleanup
-                        ignore_not_found=True,
-                    )
-                else:
-                    self.k8s.delete(
-                        resource.kind,
-                        resource.name,
-                        wait=True,
-                        timeout=timeout,
-                        ignore_not_found=True,
-                    )
+                self.k8s.delete(
+                    resource.kind,
+                    resource.name,
+                    wait=True,
+                    timeout=timeout,
+                    ignore_not_found=True,
+                )
             except Exception as e:
                 msg = f"Failed to delete {resource.kind} {resource.name}: {e}"
                 warnings.append(msg)
