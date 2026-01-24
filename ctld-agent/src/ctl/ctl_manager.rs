@@ -114,7 +114,9 @@ impl CtlManager {
         let config_path = &self.ucl_manager.config_path;
         let config = CtlConfig::from_file(config_path)?;
 
-        let mut exports = self.exports.write()
+        let mut exports = self
+            .exports
+            .write()
             .map_err(|e| CtlError::ConfigError(format!("Lock poisoned: {}", e)))?;
         let mut loaded_iscsi = 0;
         let mut loaded_nvmeof = 0;
@@ -224,7 +226,9 @@ impl CtlManager {
         };
 
         // Use Entry API for atomic check-and-insert
-        let mut exports = self.exports.write()
+        let mut exports = self
+            .exports
+            .write()
             .map_err(|e| CtlError::ConfigError(format!("Lock poisoned: {}", e)))?;
         match exports.entry(volume_name.to_string()) {
             Entry::Occupied(_) => {
@@ -246,7 +250,9 @@ impl CtlManager {
     pub fn unexport_volume(&self, volume_name: &str) -> Result<()> {
         debug!("Unexporting volume {}", volume_name);
 
-        let mut exports = self.exports.write()
+        let mut exports = self
+            .exports
+            .write()
             .map_err(|e| CtlError::ConfigError(format!("Lock poisoned: {}", e)))?;
         if exports.remove(volume_name).is_none() {
             return Err(CtlError::TargetNotFound(volume_name.to_string()));
