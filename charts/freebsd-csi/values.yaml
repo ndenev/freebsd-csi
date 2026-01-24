@@ -122,15 +122,15 @@ node:
 # CSI sidecar container images
 sidecars:
   provisioner:
-    image: registry.k8s.io/sig-storage/csi-provisioner:v4.0.0
+    image: registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
   attacher:
-    image: registry.k8s.io/sig-storage/csi-attacher:v4.5.0
+    image: registry.k8s.io/sig-storage/csi-attacher:v4.8.0
   resizer:
-    image: registry.k8s.io/sig-storage/csi-resizer:v1.10.0
+    image: registry.k8s.io/sig-storage/csi-resizer:v1.12.0
   snapshotter:
-    image: registry.k8s.io/sig-storage/csi-snapshotter:v7.0.1
+    image: registry.k8s.io/sig-storage/csi-snapshotter:v8.2.0
   registrar:
-    image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.10.0
+    image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0
   # Resources for all sidecar containers
   resources:
     requests:
