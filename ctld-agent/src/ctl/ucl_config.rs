@@ -329,40 +329,55 @@ pub struct ChapCredential {
 
 impl AuthGroup {
     /// Create an AuthGroup from an AuthConfig.
-    /// Returns None if no authentication is configured or if the config
+    ///
+    /// Returns `Ok(None)` if no authentication is configured or if the config
     /// is a GroupRef (referencing an existing auth-group).
-    pub fn from_auth_config(auth: &AuthConfig, _volume_name: &str) -> Option<Self> {
+    ///
+    /// Returns `Err` if CHAP credentials contain characters that would corrupt
+    /// UCL syntax (e.g., `"`, `{`, `}`, `\`).
+    pub fn from_auth_config(auth: &AuthConfig, _volume_name: &str) -> Result<Option<Self>> {
         match auth {
-            AuthConfig::None => None,
-            AuthConfig::IscsiChap(chap) => Some(Self::from_iscsi_chap(chap)),
-            AuthConfig::NvmeAuth(nvme) => Some(Self::from_nvme_auth(nvme)),
+            AuthConfig::None => Ok(None),
+            AuthConfig::IscsiChap(chap) => Ok(Some(Self::from_iscsi_chap(chap)?)),
+            AuthConfig::NvmeAuth(nvme) => Ok(Some(Self::from_nvme_auth(nvme))),
             // GroupRef means the auth-group already exists in the config,
             // so we don't need to create a new one
-            AuthConfig::GroupRef(_) => None,
+            AuthConfig::GroupRef(_) => Ok(None),
         }
     }
 
-    /// Create from iSCSI CHAP credentials
-    fn from_iscsi_chap(chap: &IscsiChapAuth) -> Self {
+    /// Create from iSCSI CHAP credentials.
+    ///
+    /// Validates that all credential strings are safe for UCL output.
+    fn from_iscsi_chap(chap: &IscsiChapAuth) -> Result<Self> {
+        // Validate forward CHAP credentials
+        validate_ucl_string(&chap.username, "CHAP username")?;
+        validate_ucl_string(&chap.secret, "CHAP secret")?;
+
         let chap_cred = ChapCredential {
             username: chap.username.clone(),
             secret: chap.secret.clone(),
         };
 
+        // Validate and create mutual CHAP credentials if present
         let chap_mutual = if chap.has_mutual() {
+            let mutual_user = chap.mutual_username.clone().unwrap_or_default();
+            let mutual_secret = chap.mutual_secret.clone().unwrap_or_default();
+            validate_ucl_string(&mutual_user, "mutual CHAP username")?;
+            validate_ucl_string(&mutual_secret, "mutual CHAP secret")?;
             Some(ChapCredential {
-                username: chap.mutual_username.clone().unwrap_or_default(),
-                secret: chap.mutual_secret.clone().unwrap_or_default(),
+                username: mutual_user,
+                secret: mutual_secret,
             })
         } else {
             None
         };
 
-        Self {
+        Ok(Self {
             chap: Some(chap_cred),
             chap_mutual,
             host_nqn: None,
-        }
+        })
     }
 
     /// Create from NVMeoF auth credentials
@@ -606,7 +621,6 @@ impl UclConfigManager {
 // ============================================================================
 
 /// Validate a string for safe use in UCL configuration.
-#[allow(dead_code)]
 pub fn validate_ucl_string(value: &str, field_name: &str) -> Result<()> {
     if value.is_empty() {
         return Err(CtlError::ConfigError(format!(
@@ -823,7 +837,8 @@ mod tests {
         // Test basic CHAP
         let chap = IscsiChapAuth::new("user1", "secret1");
         let auth_config = AuthConfig::IscsiChap(chap);
-        let auth_group = AuthGroup::from_auth_config(&auth_config, "test-volume");
+        let auth_group = AuthGroup::from_auth_config(&auth_config, "test-volume")
+            .expect("validation should pass");
 
         assert!(auth_group.is_some());
         let ag = auth_group.unwrap();
@@ -840,7 +855,8 @@ mod tests {
         // Test mutual CHAP
         let chap = IscsiChapAuth::with_mutual("user1", "secret1", "target1", "tsecret1");
         let auth_config = AuthConfig::IscsiChap(chap);
-        let auth_group = AuthGroup::from_auth_config(&auth_config, "test-volume");
+        let auth_group = AuthGroup::from_auth_config(&auth_config, "test-volume")
+            .expect("validation should pass");
 
         assert!(auth_group.is_some());
         let ag = auth_group.unwrap();
@@ -860,7 +876,8 @@ mod tests {
             "SHA-256",
         );
         let auth_config = AuthConfig::NvmeAuth(nvme);
-        let auth_group = AuthGroup::from_auth_config(&auth_config, "test-volume");
+        let auth_group = AuthGroup::from_auth_config(&auth_config, "test-volume")
+            .expect("validation should pass");
 
         assert!(auth_group.is_some());
         let ag = auth_group.unwrap();
@@ -876,7 +893,8 @@ mod tests {
     #[test]
     fn test_auth_group_none_returns_none() {
         let auth_config = AuthConfig::None;
-        let auth_group = AuthGroup::from_auth_config(&auth_config, "test-volume");
+        let auth_group = AuthGroup::from_auth_config(&auth_config, "test-volume")
+            .expect("validation should pass");
         assert!(auth_group.is_none());
     }
 
@@ -884,7 +902,111 @@ mod tests {
     fn test_auth_group_group_ref_returns_none() {
         // GroupRef means the auth-group already exists, so we don't create a new one
         let auth_config = AuthConfig::GroupRef("ag-existing-vol".to_string());
-        let auth_group = AuthGroup::from_auth_config(&auth_config, "test-volume");
+        let auth_group = AuthGroup::from_auth_config(&auth_config, "test-volume")
+            .expect("validation should pass");
         assert!(auth_group.is_none());
+    }
+
+    // ============================================================================
+    // UCL validation tests
+    // ============================================================================
+
+    #[test]
+    fn test_validate_ucl_string_rejects_double_quote() {
+        use super::super::types::IscsiChapAuth;
+
+        let chap = IscsiChapAuth::new("user", "pass\"word");
+        let auth_config = AuthConfig::IscsiChap(chap);
+        let result = AuthGroup::from_auth_config(&auth_config, "test-volume");
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("forbidden character"),
+            "Error should mention forbidden character: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_validate_ucl_string_rejects_curly_braces() {
+        use super::super::types::IscsiChapAuth;
+
+        let chap = IscsiChapAuth::new("user{name}", "secret");
+        let auth_config = AuthConfig::IscsiChap(chap);
+        let result = AuthGroup::from_auth_config(&auth_config, "test-volume");
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("forbidden character"),
+            "Error should mention forbidden character: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_validate_ucl_string_rejects_backslash() {
+        use super::super::types::IscsiChapAuth;
+
+        let chap = IscsiChapAuth::new("user", "pass\\word");
+        let auth_config = AuthConfig::IscsiChap(chap);
+        let result = AuthGroup::from_auth_config(&auth_config, "test-volume");
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("forbidden character"),
+            "Error should mention forbidden character: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_validate_ucl_string_rejects_empty() {
+        use super::super::types::IscsiChapAuth;
+
+        let chap = IscsiChapAuth::new("", "secret");
+        let auth_config = AuthConfig::IscsiChap(chap);
+        let result = AuthGroup::from_auth_config(&auth_config, "test-volume");
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("cannot be empty"),
+            "Error should mention empty: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_validate_ucl_string_accepts_safe_special_chars() {
+        use super::super::types::IscsiChapAuth;
+
+        // These special characters should be allowed
+        let chap = IscsiChapAuth::new("user@domain.com", "p@ss!w0rd#$%^&*()");
+        let auth_config = AuthConfig::IscsiChap(chap);
+        let result = AuthGroup::from_auth_config(&auth_config, "test-volume");
+
+        assert!(result.is_ok(), "Safe special chars should be allowed");
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_validate_ucl_string_mutual_chap_credentials() {
+        use super::super::types::IscsiChapAuth;
+
+        // Test that mutual CHAP credentials are also validated
+        let chap = IscsiChapAuth::with_mutual("user1", "secret1", "target\"name", "tsecret");
+        let auth_config = AuthConfig::IscsiChap(chap);
+        let result = AuthGroup::from_auth_config(&auth_config, "test-volume");
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("mutual CHAP username"),
+            "Error should mention mutual CHAP username: {}",
+            err_msg
+        );
     }
 }

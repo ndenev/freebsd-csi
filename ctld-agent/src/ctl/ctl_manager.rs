@@ -277,7 +277,8 @@ impl CtlManager {
             let auth_group_name = export.auth.auth_group_name(&export.volume_name);
 
             // If this export has authentication, create an auth group entry
-            if let Some(ag) = AuthGroup::from_auth_config(&export.auth, &export.volume_name) {
+            // This validates CHAP credentials don't contain characters that would corrupt UCL
+            if let Some(ag) = AuthGroup::from_auth_config(&export.auth, &export.volume_name)? {
                 auth_groups.push((auth_group_name.clone(), ag));
             }
 
