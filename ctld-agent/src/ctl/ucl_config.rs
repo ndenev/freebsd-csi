@@ -131,26 +131,45 @@ impl ToUcl for Lun {
 pub struct Namespace {
     /// Path to the backing device
     pub path: String,
+    /// Serial number for unique namespace identification (used by multipath)
+    #[ucl(default)]
+    pub serial: Option<String>,
     /// Device ID for unique namespace identification
     #[ucl(path = "device-id", default)]
     pub device_id: Option<String>,
 }
 
 impl Namespace {
-    /// Create a new namespace with a unique device ID based on volume name
+    /// Create a new namespace with unique serial and device ID based on volume name
     pub fn new(path: String, volume_name: &str) -> Self {
+        // Generate unique identifiers from volume name for multipath support
+        let serial = Self::generate_serial(volume_name);
         let device_id = Self::generate_device_id(volume_name);
         Self {
             path,
+            serial: Some(serial),
             device_id: Some(device_id),
         }
     }
 
-    /// Generate a device ID for NVMe namespace
-    /// NVMe uses NGUID/EUI64 for unique identification
+    /// Generate a unique serial number from volume name.
+    /// Uses SHA-256 hash to ensure uniqueness across the full volume name.
+    /// This is consistent with the iSCSI LUN serial generation.
+    fn generate_serial(volume_name: &str) -> String {
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        hasher.update(volume_name.as_bytes());
+        let hash = hasher.finalize();
+        // Take first 8 bytes (16 hex chars) of SHA-256 hash
+        // This matches the iSCSI LUN serial format for consistency
+        hex::encode(&hash[..8])
+    }
+
+    /// Generate a device ID for NVMe namespace using T10 vendor format
     fn generate_device_id(volume_name: &str) -> String {
-        // Use the volume name as a unique identifier
-        // CTL will use this for the namespace's device-id
+        // T10 vendor format: "FreeBSD <volume_name>"
+        // Consistent with iSCSI LUN device-id
         format!("FreeBSD {}", volume_name)
     }
 }
@@ -160,6 +179,9 @@ impl ToUcl for Namespace {
         let mut s = String::new();
         let ind = indent(level);
         writeln!(s, "{}path = {};", ind, ucl_quote(&self.path)).unwrap();
+        if let Some(ref serial) = self.serial {
+            writeln!(s, "{}serial = {};", ind, ucl_quote(serial)).unwrap();
+        }
         if let Some(ref device_id) = self.device_id {
             writeln!(s, "{}device-id = {};", ind, ucl_quote(device_id)).unwrap();
         }
@@ -243,6 +265,9 @@ pub struct Controller {
     /// Transport group name
     #[ucl(path = "transport-group")]
     pub transport_group: String,
+    /// Controller serial number for multipath identification
+    #[ucl(default)]
+    pub serial: Option<String>,
     /// Namespaces indexed by ID
     #[ucl(default)]
     pub namespace: HashMap<String, Namespace>,
@@ -257,13 +282,31 @@ impl Controller {
         device_path: String,
         volume_name: &str,
     ) -> Self {
+        let serial = Self::generate_serial(volume_name);
         let mut namespace = HashMap::new();
         namespace.insert(ns_id.to_string(), Namespace::new(device_path, volume_name));
         Self {
             auth_group,
             transport_group,
+            serial: Some(serial),
             namespace,
         }
+    }
+
+    /// Generate a unique serial number for the controller from volume name.
+    /// Uses SHA-256 hash with a different prefix to ensure uniqueness from namespace serial.
+    /// This serial identifies the controller for multipath purposes.
+    fn generate_serial(volume_name: &str) -> String {
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        // Use "ctrl:" prefix to differentiate from namespace serial
+        hasher.update(b"ctrl:");
+        hasher.update(volume_name.as_bytes());
+        let hash = hasher.finalize();
+        // Take first 10 bytes (20 hex chars) for controller serial
+        // NVMe controller serial can be up to 20 bytes (40 hex chars)
+        hex::encode(&hash[..10])
     }
 }
 
@@ -280,6 +323,9 @@ impl ToUcl for Controller {
             ucl_quote(&self.transport_group)
         )
         .unwrap();
+        if let Some(ref serial) = self.serial {
+            writeln!(s, "{}serial = {};", ind, ucl_quote(serial)).unwrap();
+        }
 
         // Sort namespace IDs for consistent output
         let mut ns_ids: Vec<_> = self.namespace.keys().collect();
