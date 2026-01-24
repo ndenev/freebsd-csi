@@ -882,52 +882,6 @@ pub fn default_fs_type() -> &'static str {
     DEFAULT_FS_TYPE
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_validate_fs_type_valid() {
-        assert_eq!(validate_fs_type("ext4").unwrap(), "ext4");
-        assert_eq!(validate_fs_type("xfs").unwrap(), "xfs");
-        assert_eq!(validate_fs_type("").unwrap(), "ext4");
-        assert_eq!(validate_fs_type("EXT4").unwrap(), "ext4");
-    }
-
-    #[test]
-    fn test_validate_fs_type_invalid() {
-        assert!(validate_fs_type("ufs").is_err());
-        assert!(validate_fs_type("ffs").is_err());
-        assert!(validate_fs_type("zfs").is_err());
-        assert!(validate_fs_type("ntfs").is_err());
-    }
-
-    #[test]
-    fn test_default_fs_type() {
-        assert_eq!(default_fs_type(), "ext4");
-    }
-
-    #[test]
-    fn test_is_nvme_namespace_device() {
-        // Valid namespace devices
-        assert!(is_nvme_namespace_device("/dev/nvme0n1"));
-        assert!(is_nvme_namespace_device("/dev/nvme1n2"));
-        assert!(is_nvme_namespace_device("/dev/nvme10n15"));
-        assert!(is_nvme_namespace_device("nvme0n1")); // Without /dev/ prefix
-
-        // Invalid - controller devices (not namespaces)
-        assert!(!is_nvme_namespace_device("/dev/nvme0"));
-        assert!(!is_nvme_namespace_device("/dev/nvme1"));
-        assert!(!is_nvme_namespace_device("nvme0"));
-
-        // Invalid - other formats
-        assert!(!is_nvme_namespace_device("/dev/sda"));
-        assert!(!is_nvme_namespace_device("/dev/nvme"));
-        assert!(!is_nvme_namespace_device(""));
-        assert!(!is_nvme_namespace_device("/dev/nvme0n")); // Missing namespace number
-    }
-}
-
 // ============================================================================
 // StorageOps trait implementation
 // ============================================================================
@@ -1002,5 +956,51 @@ impl StorageOps for LinuxPlatform {
 
     fn default_fs_type() -> &'static str {
         default_fs_type()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_fs_type_valid() {
+        assert_eq!(validate_fs_type("ext4").unwrap(), "ext4");
+        assert_eq!(validate_fs_type("xfs").unwrap(), "xfs");
+        assert_eq!(validate_fs_type("").unwrap(), "ext4");
+        assert_eq!(validate_fs_type("EXT4").unwrap(), "ext4");
+    }
+
+    #[test]
+    fn test_validate_fs_type_invalid() {
+        assert!(validate_fs_type("ufs").is_err());
+        assert!(validate_fs_type("ffs").is_err());
+        assert!(validate_fs_type("zfs").is_err());
+        assert!(validate_fs_type("ntfs").is_err());
+    }
+
+    #[test]
+    fn test_default_fs_type() {
+        assert_eq!(default_fs_type(), "ext4");
+    }
+
+    #[test]
+    fn test_is_nvme_namespace_device() {
+        // Valid namespace devices
+        assert!(is_nvme_namespace_device("/dev/nvme0n1"));
+        assert!(is_nvme_namespace_device("/dev/nvme1n2"));
+        assert!(is_nvme_namespace_device("/dev/nvme10n15"));
+        assert!(is_nvme_namespace_device("nvme0n1")); // Without /dev/ prefix
+
+        // Invalid - controller devices (not namespaces)
+        assert!(!is_nvme_namespace_device("/dev/nvme0"));
+        assert!(!is_nvme_namespace_device("/dev/nvme1"));
+        assert!(!is_nvme_namespace_device("nvme0"));
+
+        // Invalid - other formats
+        assert!(!is_nvme_namespace_device("/dev/sda"));
+        assert!(!is_nvme_namespace_device("/dev/nvme"));
+        assert!(!is_nvme_namespace_device(""));
+        assert!(!is_nvme_namespace_device("/dev/nvme0n")); // Missing namespace number
     }
 }
