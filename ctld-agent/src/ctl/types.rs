@@ -344,7 +344,7 @@ impl AsRef<Path> for DevicePath {
 ///
 /// Supports both forward CHAP (initiator authenticates to target) and
 /// mutual CHAP (bidirectional authentication).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IscsiChapAuth {
     /// Forward CHAP username (initiator → target)
     pub username: String,
@@ -392,7 +392,7 @@ impl IscsiChapAuth {
 ///
 /// Implements NVMe-oF in-band authentication per the NVMe specification.
 /// Requires FreeBSD 15+ with NVMeoF controller auth support.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NvmeAuth {
     /// Host NQN for authentication
     pub host_nqn: String,
@@ -429,7 +429,7 @@ impl NvmeAuth {
 /// Authentication configuration for a CTL export.
 ///
 /// Wraps protocol-specific authentication credentials.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AuthConfig {
     /// No authentication required
     #[default]

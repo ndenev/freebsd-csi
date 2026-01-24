@@ -140,6 +140,8 @@ struct VolumeMetadata {
     lun_id: i32,
     /// Additional parameters
     parameters: HashMap<String, String>,
+    /// Authentication configuration
+    auth: AuthConfig,
 }
 
 /// Internal tracking of snapshot metadata
@@ -254,6 +256,7 @@ impl StorageService {
                 target_name: zfs_meta.target_name.clone(),
                 lun_id: zfs_meta.lun_id.unwrap_or(0) as i32,
                 parameters: zfs_meta.parameters.clone(),
+                auth: zfs_meta.auth.clone(),
             };
 
             volumes.insert(vol_name.clone(), metadata);
@@ -308,15 +311,14 @@ impl StorageService {
             };
 
             let ctl = self.ctl.read().await;
-            // Note: Auth credentials are not persisted, so reconciliation
-            // re-exports without authentication. This is acceptable as the
-            // CSI driver will need to recreate volumes if auth is required.
+            // Auth credentials are persisted in ZFS metadata, so reconciliation
+            // restores the original authentication configuration.
             match ctl.export_volume(
                 vol_name,
                 &device_path,
                 ctl_export_type,
                 metadata.lun_id as u32,
-                AuthConfig::None,
+                metadata.auth.clone(),
             ) {
                 Ok(_) => {
                     info!(
@@ -475,6 +477,9 @@ impl StorageAgent for StorageService {
             }
         };
 
+        // Extract auth config early so it can be stored in ZFS metadata
+        let auth_config = proto_to_ctl_auth(req.auth.as_ref());
+
         // Build ZFS metadata to set atomically during volume creation
         let zfs_metadata = ZfsVolumeMetadata {
             export_type: ctl_export_type,
@@ -483,6 +488,7 @@ impl StorageAgent for StorageService {
             namespace_id: None,
             parameters: req.parameters.clone(),
             created_at: unix_timestamp_now(),
+            auth: auth_config.clone(),
         };
 
         // Create ZFS volume - either fresh or from content source (snapshot/volume)
@@ -660,8 +666,7 @@ impl StorageAgent for StorageService {
             zfs.get_device_path(&req.name)
         };
 
-        // Convert auth credentials from proto to CTL format
-        let auth_config = proto_to_ctl_auth(req.auth.as_ref());
+        // auth_config was extracted earlier for ZFS metadata persistence
         let has_auth = auth_config.is_some();
 
         // Export the volume via unified CTL manager
@@ -672,7 +677,7 @@ impl StorageAgent for StorageService {
                 &device_path,
                 ctl_export_type,
                 lun_id,
-                auth_config,
+                auth_config.clone(),
             ) {
                 warn!("Failed to export volume: {}", e);
                 timer.failure("export_error");
@@ -704,6 +709,7 @@ impl StorageAgent for StorageService {
             target_name: target_name.clone(),
             lun_id: lun_id as i32,
             parameters: req.parameters.clone(),
+            auth: auth_config,
         };
 
         {

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::ctl::ExportType;
+use crate::ctl::{AuthConfig, ExportType};
 
 /// Metadata stored as ZFS user property for each volume
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +23,10 @@ pub struct VolumeMetadata {
     pub parameters: HashMap<String, String>,
     /// Creation timestamp (Unix epoch)
     pub created_at: i64,
+    /// Authentication configuration for the export
+    /// Uses default (None) for backward compatibility with existing volumes
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 /// ZFS user property name for CSI metadata
