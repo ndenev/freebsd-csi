@@ -744,4 +744,135 @@ mod tests {
         assert!(validate_ucl_string("test\"value", "test").is_err());
         assert!(validate_ucl_string("test{value", "test").is_err());
     }
+
+    #[test]
+    fn test_auth_group_chap_only() {
+        let auth_group = AuthGroup {
+            chap: Some(ChapCredential {
+                username: "testuser".to_string(),
+                secret: "testsecret".to_string(),
+            }),
+            chap_mutual: None,
+            host_nqn: None,
+        };
+        let ucl = auth_group.to_ucl(0);
+
+        assert!(ucl.contains("chap \"testuser\" \"testsecret\";"));
+        assert!(!ucl.contains("chap-mutual"));
+        assert!(!ucl.contains("host-nqn"));
+    }
+
+    #[test]
+    fn test_auth_group_chap_with_mutual() {
+        let auth_group = AuthGroup {
+            chap: Some(ChapCredential {
+                username: "initiator".to_string(),
+                secret: "initsecret".to_string(),
+            }),
+            chap_mutual: Some(ChapCredential {
+                username: "target".to_string(),
+                secret: "targetsecret".to_string(),
+            }),
+            host_nqn: None,
+        };
+        let ucl = auth_group.to_ucl(0);
+
+        assert!(ucl.contains("chap \"initiator\" \"initsecret\";"));
+        assert!(ucl.contains("chap-mutual \"target\" \"targetsecret\";"));
+        assert!(!ucl.contains("host-nqn"));
+    }
+
+    #[test]
+    fn test_auth_group_nvme_host_nqn() {
+        let auth_group = AuthGroup {
+            chap: None,
+            chap_mutual: None,
+            host_nqn: Some("nqn.2024-01.org.freebsd:initiator".to_string()),
+        };
+        let ucl = auth_group.to_ucl(0);
+
+        assert!(ucl.contains("host-nqn = \"nqn.2024-01.org.freebsd:initiator\";"));
+        assert!(!ucl.contains("chap "));
+        assert!(!ucl.contains("chap-mutual"));
+    }
+
+    #[test]
+    fn test_auth_group_indentation() {
+        let auth_group = AuthGroup {
+            chap: Some(ChapCredential {
+                username: "user".to_string(),
+                secret: "pass".to_string(),
+            }),
+            chap_mutual: None,
+            host_nqn: None,
+        };
+
+        // Test with indentation level 1 (inside auth-group block)
+        let ucl = auth_group.to_ucl(1);
+        assert!(ucl.starts_with("    chap"), "Should be indented: {}", ucl);
+    }
+
+    #[test]
+    fn test_auth_group_from_iscsi_chap() {
+        use super::super::types::IscsiChapAuth;
+
+        // Test basic CHAP
+        let chap = IscsiChapAuth::new("user1", "secret1");
+        let auth_config = AuthConfig::IscsiChap(chap);
+        let auth_group = AuthGroup::from_auth_config(&auth_config, "test-volume");
+
+        assert!(auth_group.is_some());
+        let ag = auth_group.unwrap();
+        assert!(ag.chap.is_some());
+        assert_eq!(ag.chap.as_ref().unwrap().username, "user1");
+        assert_eq!(ag.chap.as_ref().unwrap().secret, "secret1");
+        assert!(ag.chap_mutual.is_none());
+    }
+
+    #[test]
+    fn test_auth_group_from_iscsi_chap_mutual() {
+        use super::super::types::IscsiChapAuth;
+
+        // Test mutual CHAP
+        let chap = IscsiChapAuth::with_mutual("user1", "secret1", "target1", "tsecret1");
+        let auth_config = AuthConfig::IscsiChap(chap);
+        let auth_group = AuthGroup::from_auth_config(&auth_config, "test-volume");
+
+        assert!(auth_group.is_some());
+        let ag = auth_group.unwrap();
+        assert!(ag.chap.is_some());
+        assert!(ag.chap_mutual.is_some());
+        assert_eq!(ag.chap_mutual.as_ref().unwrap().username, "target1");
+        assert_eq!(ag.chap_mutual.as_ref().unwrap().secret, "tsecret1");
+    }
+
+    #[test]
+    fn test_auth_group_from_nvme_auth() {
+        use super::super::types::NvmeAuth;
+
+        let nvme = NvmeAuth::new(
+            "nqn.2024-01.org.example:host1",
+            "test-secret-key-base64",
+            "SHA-256",
+        );
+        let auth_config = AuthConfig::NvmeAuth(nvme);
+        let auth_group = AuthGroup::from_auth_config(&auth_config, "test-volume");
+
+        assert!(auth_group.is_some());
+        let ag = auth_group.unwrap();
+        assert!(ag.chap.is_none());
+        assert!(ag.chap_mutual.is_none());
+        // Note: only host_nqn is used from NvmeAuth (FreeBSD 15 doesn't support DH-HMAC-CHAP yet)
+        assert_eq!(
+            ag.host_nqn.as_ref().unwrap(),
+            "nqn.2024-01.org.example:host1"
+        );
+    }
+
+    #[test]
+    fn test_auth_group_none_returns_none() {
+        let auth_config = AuthConfig::None;
+        let auth_group = AuthGroup::from_auth_config(&auth_config, "test-volume");
+        assert!(auth_group.is_none());
+    }
 }
