@@ -567,6 +567,95 @@ class K8sClient:
         return []
 
     # -------------------------------------------------------------------------
+    # Secret Operations
+    # -------------------------------------------------------------------------
+
+    def create_secret(
+        self,
+        name: str,
+        data: dict[str, str],
+        secret_type: str = "Opaque",
+    ) -> dict:
+        """Create a Kubernetes Secret.
+
+        Args:
+            name: Secret name
+            data: String data (will be stored as stringData, not base64 encoded)
+            secret_type: Secret type (default: Opaque)
+
+        Returns:
+            Created Secret resource
+        """
+        secret = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": name, "namespace": self.namespace},
+            "type": secret_type,
+            "stringData": data,
+        }
+        return self.apply(secret)
+
+    def get_secret(self, name: str) -> dict | None:
+        """Get a Secret by name.
+
+        Args:
+            name: Secret name
+
+        Returns:
+            Secret dict or None if not found
+        """
+        return self._kubectl_json(["-n", self.namespace, "get", "secret", name])
+
+    def delete_secret(
+        self,
+        name: str,
+        ignore_not_found: bool = True,
+    ) -> bool:
+        """Delete a Secret.
+
+        Args:
+            name: Secret name
+            ignore_not_found: Don't error if secret doesn't exist
+
+        Returns:
+            True if deleted, False if not found
+        """
+        return self.delete("secret", name, wait=False, ignore_not_found=ignore_not_found)
+
+    def create_chap_secret(
+        self,
+        name: str,
+        username: str,
+        password: str,
+        mutual_username: str | None = None,
+        mutual_password: str | None = None,
+    ) -> dict:
+        """Create a CHAP authentication secret for iSCSI.
+
+        Uses the standard CSI secret key names for CHAP credentials.
+
+        Args:
+            name: Secret name
+            username: CHAP username (initiator authenticates to target)
+            password: CHAP password
+            mutual_username: Mutual CHAP username (target authenticates to initiator)
+            mutual_password: Mutual CHAP password
+
+        Returns:
+            Created Secret resource
+        """
+        data = {
+            "node.session.auth.username": username,
+            "node.session.auth.password": password,
+        }
+
+        if mutual_username and mutual_password:
+            data["node.session.auth.username_in"] = mutual_username
+            data["node.session.auth.password_in"] = mutual_password
+
+        return self.create_secret(name, data)
+
+    # -------------------------------------------------------------------------
     # Utility Methods
     # -------------------------------------------------------------------------
 

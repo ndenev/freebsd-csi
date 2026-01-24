@@ -1,0 +1,29 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: freebsd-e2e-iscsi-chap-mutual
+  labels:
+    app.kubernetes.io/component: e2e-testing
+    app.kubernetes.io/part-of: freebsd-csi
+provisioner: csi.freebsd.org
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+parameters:
+  # Export volume via iSCSI
+  exportType: iscsi
+  # iSCSI portal addresses (required for Linux initiators)
+  portal: "10.0.0.10:3260,10.0.0.11:3260"
+  # Filesystem type
+  fsType: ext4
+  # Use LINKED clone mode (fast, copy-on-write)
+  cloneMode: linked
+# Mutual CHAP secret references for provisioner (controller)
+# Secret must contain both initiator and target credentials:
+#   node.session.auth.username / password (initiator)
+#   node.session.auth.username_in / password_in (target)
+csi.storage.k8s.io/provisioner-secret-name: ${pvc.name}-mutual-chap
+csi.storage.k8s.io/provisioner-secret-namespace: ${pvc.namespace}
+# Mutual CHAP secret references for node staging
+csi.storage.k8s.io/node-stage-secret-name: ${pvc.name}-mutual-chap
+csi.storage.k8s.io/node-stage-secret-namespace: ${pvc.namespace}
