@@ -18,11 +18,11 @@ jobs:
     name: Create Release PR
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/master'
-    permissions:
-      contents: write
-      pull-requests: write
     steps:
+      # Use PAT for checkout to enable push and PR creation
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.RELEASE_PAT }}
 
       - name: Get current version
         id: current
@@ -86,7 +86,7 @@ jobs:
 
       - name: Create Pull Request
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
           TAG: ${{ steps.bump.outputs.tag }}
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
