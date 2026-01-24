@@ -455,13 +455,6 @@ impl AuthConfig {
         !matches!(self, AuthConfig::None)
     }
 
-    /// Check if this config contains actual credentials (not a reference).
-    ///
-    /// Returns true for `IscsiChap` and `NvmeAuth`, false for `None` and `GroupRef`.
-    pub fn has_credentials(&self) -> bool {
-        matches!(self, AuthConfig::IscsiChap(_) | AuthConfig::NvmeAuth(_))
-    }
-
     /// Get the auth group name for UCL config.
     ///
     /// Returns "no-authentication" if no auth is configured,
@@ -601,23 +594,6 @@ mod tests {
         let iqn = Iqn::new("iqn.2024-01.org.freebsd.csi", "vol1").unwrap();
         let target: TargetName = iqn.into();
         assert_eq!(target.volume_name(), Some("vol1"));
-    }
-
-    #[test]
-    fn test_auth_config_has_credentials() {
-        // None has no credentials
-        assert!(!AuthConfig::None.has_credentials());
-
-        // IscsiChap has credentials
-        let chap = IscsiChapAuth::new("user", "secret");
-        assert!(AuthConfig::IscsiChap(chap).has_credentials());
-
-        // NvmeAuth has credentials
-        let nvme = NvmeAuth::new("nqn.host", "secret", "sha256");
-        assert!(AuthConfig::NvmeAuth(nvme).has_credentials());
-
-        // GroupRef does not have credentials (it's a reference)
-        assert!(!AuthConfig::GroupRef("ag-vol1".to_string()).has_credentials());
     }
 
     #[test]
