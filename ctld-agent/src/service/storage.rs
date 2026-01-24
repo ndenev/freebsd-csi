@@ -47,15 +47,6 @@ fn to_ctl_export_type(export_type: ExportType) -> Option<CtlExportType> {
     }
 }
 
-/// Convert proto ExportType to CTL ExportType (for ZFS metadata storage)
-fn proto_to_ctl_export_type(export_type: ExportType) -> Option<CtlExportType> {
-    match export_type {
-        ExportType::Iscsi => Some(CtlExportType::Iscsi),
-        ExportType::Nvmeof => Some(CtlExportType::Nvmeof),
-        ExportType::Unspecified => None,
-    }
-}
-
 /// Convert CTL ExportType to proto ExportType
 fn ctl_to_proto_export_type(export_type: CtlExportType) -> ExportType {
     match export_type {
@@ -371,12 +362,14 @@ impl StorageService {
     ///
     /// Returns Ok(Dataset) on success, or Err(Status) on failure.
     /// Caller is responsible for calling timer.failure() on error.
+    /// Metadata is set atomically during creation to ensure crash safety.
     async fn create_volume_from_snapshot(
         &self,
         target_name: &str,
         source_volume: &str,
         snap_name: &str,
         clone_mode: CloneMode,
+        metadata: &crate::zfs::VolumeMetadata,
     ) -> Result<crate::zfs::Dataset, Status> {
         let zfs = self.zfs.read().await;
 
@@ -389,7 +382,7 @@ impl StorageService {
                     snapshot = %snap_name,
                     "Creating volume using COPY mode (zfs send/recv)"
                 );
-                zfs.copy_from_snapshot(source_volume, snap_name, target_name)
+                zfs.copy_from_snapshot(source_volume, snap_name, target_name, metadata)
                     .map_err(|e| {
                         Status::internal(format!("failed to copy volume from snapshot: {}", e))
                     })
@@ -402,7 +395,7 @@ impl StorageService {
                     snapshot = %snap_name,
                     "Creating volume using LINKED mode (zfs clone)"
                 );
-                zfs.clone_from_snapshot(source_volume, snap_name, target_name)
+                zfs.clone_from_snapshot(source_volume, snap_name, target_name, metadata)
                     .map_err(|e| {
                         Status::internal(format!("failed to clone volume from snapshot: {}", e))
                     })
@@ -448,6 +441,42 @@ impl StorageAgent for StorageService {
             ));
         }
 
+        // Compute export parameters before volume creation so we can set metadata atomically
+        // Default LUN/Namespace ID
+        // Note: iSCSI LUN IDs can start at 0, but NVMeoF namespace IDs must start at 1
+        // (NSID 0 is reserved per NVMe spec)
+        let lun_id: u32 = match export_type {
+            ExportType::Iscsi => 0,
+            ExportType::Nvmeof => 1,
+            _ => 0,
+        };
+
+        // Generate target name (IQN/NQN) before volume creation
+        let ctl_export_type = to_ctl_export_type(export_type).expect("already validated");
+        let target_name = {
+            let ctl = self.ctl.read().await;
+            match ctl_export_type {
+                crate::ctl::ExportType::Iscsi => ctl
+                    .generate_iqn(&req.name)
+                    .map(|iqn| iqn.to_string())
+                    .map_err(|e| Status::internal(format!("failed to generate IQN: {}", e)))?,
+                crate::ctl::ExportType::Nvmeof => ctl
+                    .generate_nqn(&req.name)
+                    .map(|nqn| nqn.to_string())
+                    .map_err(|e| Status::internal(format!("failed to generate NQN: {}", e)))?,
+            }
+        };
+
+        // Build ZFS metadata to set atomically during volume creation
+        let zfs_metadata = ZfsVolumeMetadata {
+            export_type: ctl_export_type,
+            target_name: target_name.clone(),
+            lun_id: Some(lun_id),
+            namespace_id: None,
+            parameters: req.parameters.clone(),
+            created_at: unix_timestamp_now(),
+        };
+
         // Create ZFS volume - either fresh or from content source (snapshot/volume)
         let dataset = if let Some(ref content_source) = req.content_source {
             use proto::volume_content_source::Source;
@@ -485,6 +514,7 @@ impl StorageAgent for StorageService {
                             source_volume,
                             snap_name,
                             clone_mode,
+                            &zfs_metadata,
                         )
                         .await
                     {
@@ -546,6 +576,7 @@ impl StorageAgent for StorageService {
                             source_volume_id,
                             &temp_snap_name,
                             clone_mode,
+                            &zfs_metadata,
                         )
                         .await;
 
@@ -601,9 +632,9 @@ impl StorageAgent for StorageService {
                 }
             }
         } else {
-            // Fresh volume creation
+            // Fresh volume creation with metadata set atomically
             let zfs = self.zfs.read().await;
-            match zfs.create_volume(&req.name, req.size_bytes as u64) {
+            match zfs.create_volume(&req.name, req.size_bytes as u64, &zfs_metadata) {
                 Ok(d) => d,
                 Err(e) => {
                     timer.failure("zfs_error");
@@ -621,39 +652,25 @@ impl StorageAgent for StorageService {
             zfs.get_device_path(&req.name)
         };
 
-        // Default LUN/Namespace ID
-        // Note: iSCSI LUN IDs can start at 0, but NVMeoF namespace IDs must start at 1
-        // (NSID 0 is reserved per NVMe spec)
-        let lun_id: i32 = match export_type {
-            ExportType::Iscsi => 0,
-            ExportType::Nvmeof => 1,
-            _ => 0,
-        };
-
-        // Export the volume via unified CTL manager
-        let ctl_export_type = to_ctl_export_type(export_type).expect("already validated");
-
         // Convert auth credentials from proto to CTL format
         let auth_config = proto_to_ctl_auth(req.auth.as_ref());
         let has_auth = auth_config.is_some();
 
-        let target_name = {
+        // Export the volume via unified CTL manager
+        {
             let ctl = self.ctl.read().await;
-            match ctl.export_volume(
+            if let Err(e) = ctl.export_volume(
                 &req.name,
                 &device_path,
                 ctl_export_type,
-                lun_id as u32,
+                lun_id,
                 auth_config,
             ) {
-                Ok(export) => export.target_name.to_string(),
-                Err(e) => {
-                    warn!("Failed to export volume: {}", e);
-                    timer.failure("export_error");
-                    return Err(Status::internal(format!("failed to export volume: {}", e)));
-                }
+                warn!("Failed to export volume: {}", e);
+                timer.failure("export_error");
+                return Err(Status::internal(format!("failed to export volume: {}", e)));
             }
-        };
+        }
 
         if has_auth {
             info!("Exported volume {} with authentication enabled", req.name);
@@ -674,39 +691,19 @@ impl StorageAgent for StorageService {
             }
         }
 
-        // Store metadata
+        // Store in-memory metadata (ZFS metadata was set atomically during creation)
         let metadata = VolumeMetadata {
             id: req.name.clone(),
             name: req.name.clone(),
             export_type,
             target_name: target_name.clone(),
-            lun_id,
+            lun_id: lun_id as i32,
             parameters: req.parameters.clone(),
         };
 
         {
             let mut volumes = self.volumes.write().await;
             volumes.insert(req.name.clone(), metadata.clone());
-        }
-
-        // Persist metadata to ZFS user property
-        let ctl_export_type_for_zfs =
-            proto_to_ctl_export_type(export_type).expect("already validated");
-        let zfs_metadata = ZfsVolumeMetadata {
-            export_type: ctl_export_type_for_zfs,
-            target_name: target_name.clone(),
-            lun_id: Some(lun_id as u32),
-            namespace_id: None,
-            parameters: req.parameters.clone(),
-            created_at: unix_timestamp_now(),
-        };
-
-        {
-            let zfs = self.zfs.read().await;
-            if let Err(e) = zfs.set_volume_metadata(&req.name, &zfs_metadata) {
-                warn!("Failed to persist volume metadata to ZFS: {}", e);
-                // Continue anyway - the volume is created, metadata is in memory
-            }
         }
 
         let volume = self.dataset_to_volume(&dataset, &metadata);

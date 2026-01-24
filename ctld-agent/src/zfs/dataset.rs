@@ -124,16 +124,30 @@ impl ZfsManager {
         format!("{}/{}", self.parent_dataset, name)
     }
 
-    /// Create a new ZFS volume (zvol)
-    #[instrument(skip(self))]
-    pub fn create_volume(&self, name: &str, size_bytes: u64) -> Result<Dataset> {
+    /// Create a new ZFS volume (zvol) with metadata set atomically
+    ///
+    /// The metadata is set as a ZFS user property during creation, ensuring
+    /// that volumes always have metadata even if the agent crashes after creation.
+    #[instrument(skip(self, metadata))]
+    pub fn create_volume(
+        &self,
+        name: &str,
+        size_bytes: u64,
+        metadata: &VolumeMetadata,
+    ) -> Result<Dataset> {
         // Validate name for command injection prevention
         validate_name(name)?;
 
         let full_name = self.full_path(name);
-        info!(volume = %full_name, size_bytes, "Creating ZFS volume");
 
-        // Create the volume with volmode=dev
+        // Serialize metadata for ZFS property
+        let metadata_json = serde_json::to_string(metadata)
+            .map_err(|e| ZfsError::ParseError(format!("failed to serialize metadata: {}", e)))?;
+        let metadata_property = format!("{}={}", METADATA_PROPERTY, metadata_json);
+
+        info!(volume = %full_name, size_bytes, "Creating ZFS volume with metadata");
+
+        // Create the volume with volmode=dev and metadata set atomically
         // Let zfs create fail if already exists (avoids TOCTOU race)
         let output = Command::new("zfs")
             .args([
@@ -142,6 +156,8 @@ impl ZfsManager {
                 &size_bytes.to_string(),
                 "-o",
                 "volmode=dev",
+                "-o",
+                &metadata_property,
                 &full_name,
             ])
             .output()?;
@@ -151,7 +167,7 @@ impl ZfsManager {
             return Err(e);
         }
 
-        info!(volume = %full_name, size_bytes, "ZFS volume created successfully");
+        info!(volume = %full_name, size_bytes, "ZFS volume created successfully with metadata");
         // Return the created dataset info
         self.get_dataset(name)
     }
@@ -484,6 +500,10 @@ impl ZfsManager {
     }
 
     /// Save volume metadata to ZFS user property
+    ///
+    /// Note: This is primarily for recovery/repair scenarios. Normal volume creation
+    /// sets metadata atomically via create_volume/clone_from_snapshot/copy_from_snapshot.
+    #[allow(dead_code)]
     #[instrument(skip(self, metadata))]
     pub fn set_volume_metadata(&self, name: &str, metadata: &VolumeMetadata) -> Result<()> {
         validate_name(name)?;
@@ -606,12 +626,15 @@ impl ZfsManager {
     /// This creates a new volume that shares data blocks with the snapshot.
     /// The clone depends on the snapshot, which depends on the source volume.
     /// Use `promote_clone()` to reverse the dependency if needed.
-    #[instrument(skip(self))]
+    ///
+    /// Metadata is set atomically during clone creation to ensure crash safety.
+    #[instrument(skip(self, metadata))]
     pub fn clone_from_snapshot(
         &self,
         source_volume: &str,
         snap_name: &str,
         target_volume: &str,
+        metadata: &VolumeMetadata,
     ) -> Result<Dataset> {
         validate_name(source_volume)?;
         validate_name(snap_name)?;
@@ -620,10 +643,15 @@ impl ZfsManager {
         let snapshot_full = format!("{}@{}", self.full_path(source_volume), snap_name);
         let target_full = self.full_path(target_volume);
 
+        // Serialize metadata for ZFS property
+        let metadata_json = serde_json::to_string(metadata)
+            .map_err(|e| ZfsError::ParseError(format!("failed to serialize metadata: {}", e)))?;
+        let metadata_property = format!("{}={}", METADATA_PROPERTY, metadata_json);
+
         info!(
             snapshot = %snapshot_full,
             target = %target_full,
-            "Cloning volume from snapshot"
+            "Cloning volume from snapshot with metadata"
         );
 
         // Verify snapshot exists
@@ -636,9 +664,15 @@ impl ZfsManager {
             return Err(ZfsError::DatasetNotFound(snapshot_full));
         }
 
-        // Create the clone
+        // Create the clone with metadata set atomically
         let output = Command::new("zfs")
-            .args(["clone", &snapshot_full, &target_full])
+            .args([
+                "clone",
+                "-o",
+                &metadata_property,
+                &snapshot_full,
+                &target_full,
+            ])
             .output()?;
 
         if let Err(e) = check_command_result(&output, &target_full) {
@@ -654,7 +688,7 @@ impl ZfsManager {
         info!(
             snapshot = %snapshot_full,
             target = %target_full,
-            "Clone created successfully"
+            "Clone created successfully with metadata"
         );
 
         self.get_dataset(target_volume)
@@ -664,12 +698,15 @@ impl ZfsManager {
     ///
     /// This creates a fully independent volume with no dependencies.
     /// The data is physically copied, so this takes time proportional to volume size.
-    #[instrument(skip(self))]
+    ///
+    /// Metadata is set atomically during receive to ensure crash safety.
+    #[instrument(skip(self, metadata))]
     pub fn copy_from_snapshot(
         &self,
         source_volume: &str,
         snap_name: &str,
         target_volume: &str,
+        metadata: &VolumeMetadata,
     ) -> Result<Dataset> {
         validate_name(source_volume)?;
         validate_name(snap_name)?;
@@ -678,10 +715,15 @@ impl ZfsManager {
         let snapshot_full = format!("{}@{}", self.full_path(source_volume), snap_name);
         let target_full = self.full_path(target_volume);
 
+        // Serialize metadata for ZFS property
+        let metadata_json = serde_json::to_string(metadata)
+            .map_err(|e| ZfsError::ParseError(format!("failed to serialize metadata: {}", e)))?;
+        let metadata_property = format!("{}={}", METADATA_PROPERTY, metadata_json);
+
         info!(
             snapshot = %snapshot_full,
             target = %target_full,
-            "Copying volume from snapshot via send/recv"
+            "Copying volume from snapshot via send/recv with metadata"
         );
 
         // Verify snapshot exists
@@ -694,11 +736,13 @@ impl ZfsManager {
             return Err(ZfsError::DatasetNotFound(snapshot_full));
         }
 
-        // Use zfs send | zfs recv pipeline
+        // Use zfs send | zfs recv pipeline with metadata property
         // We use sh -c to pipe the commands together
+        // Note: zfs recv -o sets properties on the received dataset
         let pipeline = format!(
-            "zfs send {} | zfs recv {}",
+            "zfs send {} | zfs recv -o {} {}",
             shell_escape(&snapshot_full),
+            shell_escape(&metadata_property),
             shell_escape(&target_full)
         );
 
