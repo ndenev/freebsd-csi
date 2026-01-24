@@ -152,17 +152,23 @@ impl ToUcl for Lun {
         if let Some(bs) = self.blocksize {
             writeln!(s, "{}blocksize = {};", ind, bs).unwrap();
         }
-        if let Some(pbs) = self.pblocksize {
-            writeln!(s, "{}pblocksize = {};", ind, pbs).unwrap();
-        }
-        if let Some(ref unmap) = self.unmap {
-            writeln!(s, "{}unmap = {};", ind, ucl_quote(unmap)).unwrap();
-        }
         if let Some(ref serial) = self.serial {
             writeln!(s, "{}serial = {};", ind, ucl_quote(serial)).unwrap();
         }
         if let Some(ref device_id) = self.device_id {
             writeln!(s, "{}device-id = {};", ind, ucl_quote(device_id)).unwrap();
+        }
+        // CTL backend options go in an options { } block
+        if self.pblocksize.is_some() || self.unmap.is_some() {
+            writeln!(s, "{}options {{", ind).unwrap();
+            let opts_ind = indent(level + 1);
+            if let Some(pbs) = self.pblocksize {
+                writeln!(s, "{}pblocksize = {};", opts_ind, pbs).unwrap();
+            }
+            if let Some(ref unmap) = self.unmap {
+                writeln!(s, "{}unmap = {};", opts_ind, ucl_quote(unmap)).unwrap();
+            }
+            writeln!(s, "{}}}", ind).unwrap();
         }
         s
     }
@@ -250,17 +256,23 @@ impl ToUcl for Namespace {
         if let Some(bs) = self.blocksize {
             writeln!(s, "{}blocksize = {};", ind, bs).unwrap();
         }
-        if let Some(pbs) = self.pblocksize {
-            writeln!(s, "{}pblocksize = {};", ind, pbs).unwrap();
-        }
-        if let Some(ref unmap) = self.unmap {
-            writeln!(s, "{}unmap = {};", ind, ucl_quote(unmap)).unwrap();
-        }
         if let Some(ref serial) = self.serial {
             writeln!(s, "{}serial = {};", ind, ucl_quote(serial)).unwrap();
         }
         if let Some(ref device_id) = self.device_id {
             writeln!(s, "{}device-id = {};", ind, ucl_quote(device_id)).unwrap();
+        }
+        // CTL backend options go in an options { } block
+        if self.pblocksize.is_some() || self.unmap.is_some() {
+            writeln!(s, "{}options {{", ind).unwrap();
+            let opts_ind = indent(level + 1);
+            if let Some(pbs) = self.pblocksize {
+                writeln!(s, "{}pblocksize = {};", opts_ind, pbs).unwrap();
+            }
+            if let Some(ref unmap) = self.unmap {
+                writeln!(s, "{}unmap = {};", opts_ind, ucl_quote(unmap)).unwrap();
+            }
+            writeln!(s, "{}}}", ind).unwrap();
         }
         s
     }
@@ -1200,6 +1212,7 @@ mod tests {
         let ucl = lun.to_ucl(0);
 
         assert!(ucl.contains("blocksize = 4096;"), "UCL: {}", ucl);
+        assert!(ucl.contains("options {"), "UCL should have options block: {}", ucl);
         assert!(ucl.contains("pblocksize = 4096;"), "UCL: {}", ucl);
         assert!(ucl.contains("unmap = \"on\";"), "UCL: {}", ucl);
         assert!(ucl.contains("serial ="), "UCL: {}", ucl);
@@ -1216,8 +1229,9 @@ mod tests {
         let lun = Lun::with_options("/dev/zvol/tank/csi/vol1".to_string(), "pvc-test", &opts);
         let ucl = lun.to_ucl(0);
 
-        assert!(!ucl.contains("blocksize"), "UCL: {}", ucl);
-        assert!(!ucl.contains("pblocksize"), "UCL: {}", ucl);
+        assert!(!ucl.contains("blocksize ="), "UCL should not have blocksize: {}", ucl);
+        assert!(ucl.contains("options {"), "UCL should have options block: {}", ucl);
+        assert!(!ucl.contains("pblocksize"), "UCL should not have pblocksize: {}", ucl);
         assert!(ucl.contains("unmap = \"off\";"), "UCL: {}", ucl);
     }
 
@@ -1232,6 +1246,7 @@ mod tests {
         let ucl = ns.to_ucl(0);
 
         assert!(ucl.contains("blocksize = 4096;"), "UCL: {}", ucl);
+        assert!(ucl.contains("options {"), "UCL should have options block: {}", ucl);
         assert!(ucl.contains("pblocksize = 4096;"), "UCL: {}", ucl);
         assert!(ucl.contains("unmap = \"on\";"), "UCL: {}", ucl);
         assert!(ucl.contains("serial ="), "UCL: {}", ucl);
@@ -1259,6 +1274,7 @@ mod tests {
         assert!(ucl.contains("portal-group = \"pg0\";"), "UCL: {}", ucl);
         assert!(ucl.contains("lun 0 {"), "UCL: {}", ucl);
         assert!(ucl.contains("blocksize = 4096;"), "UCL: {}", ucl);
+        assert!(ucl.contains("options {"), "UCL should have options block: {}", ucl);
         assert!(ucl.contains("pblocksize = 4096;"), "UCL: {}", ucl);
         assert!(ucl.contains("unmap = \"on\";"), "UCL: {}", ucl);
     }
@@ -1284,7 +1300,22 @@ mod tests {
         assert!(ucl.contains("transport-group = \"tg0\";"), "UCL: {}", ucl);
         assert!(ucl.contains("namespace 1 {"), "UCL: {}", ucl);
         assert!(ucl.contains("blocksize = 4096;"), "UCL: {}", ucl);
+        assert!(ucl.contains("options {"), "UCL should have options block: {}", ucl);
         assert!(ucl.contains("pblocksize = 4096;"), "UCL: {}", ucl);
         assert!(ucl.contains("unmap = \"on\";"), "UCL: {}", ucl);
+    }
+
+    #[test]
+    fn test_lun_no_options_block_when_empty() {
+        let opts = CtlOptions {
+            blocksize: Some(4096),
+            pblocksize: None,
+            unmap: None,
+        };
+        let lun = Lun::with_options("/dev/zvol/tank/csi/vol1".to_string(), "pvc-test", &opts);
+        let ucl = lun.to_ucl(0);
+
+        assert!(ucl.contains("blocksize = 4096;"), "UCL: {}", ucl);
+        assert!(!ucl.contains("options {"), "UCL should not have options block: {}", ucl);
     }
 }
