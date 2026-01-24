@@ -1,4 +1,0 @@
-NAME                 USED  AVAIL  REFER  MOUNTPOINT
-tank/csi             140K  16.5T   140K  /tank/csi
-tank/csi@2daysago      0B      -   140K  -
-tank/csi@yesterday     0B      -   140K  -

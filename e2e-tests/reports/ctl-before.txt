@@ -1,7 +1,0 @@
-(7:1:0/0): <FREEBSD CTLDISK 0001> Fixed Direct Access SPC-5 SCSI device
-(7:1:1/1): <FREEBSD CTLDISK 0001> Fixed Direct Access SPC-5 SCSI device
-(7:1:2/2): <FREEBSD CTLDISK 0001> Fixed Direct Access SPC-5 SCSI device
-(7:1:3/3): <FREEBSD CTLDISK 0001> Fixed Direct Access SPC-5 SCSI device
-(7:1:4/4): <FREEBSD CTLDISK 0001> Fixed Direct Access SPC-5 SCSI device
-(7:1:5/5): <FREEBSD CTLDISK 0001> Fixed Direct Access SPC-5 SCSI device
-(7:1:6/6): <FREEBSD CTLDISK 0001> Fixed Direct Access SPC-5 SCSI device
