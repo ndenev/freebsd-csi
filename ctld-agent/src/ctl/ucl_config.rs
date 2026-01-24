@@ -329,12 +329,16 @@ pub struct ChapCredential {
 
 impl AuthGroup {
     /// Create an AuthGroup from an AuthConfig.
-    /// Returns None if no authentication is configured.
+    /// Returns None if no authentication is configured or if the config
+    /// is a GroupRef (referencing an existing auth-group).
     pub fn from_auth_config(auth: &AuthConfig, _volume_name: &str) -> Option<Self> {
         match auth {
             AuthConfig::None => None,
             AuthConfig::IscsiChap(chap) => Some(Self::from_iscsi_chap(chap)),
             AuthConfig::NvmeAuth(nvme) => Some(Self::from_nvme_auth(nvme)),
+            // GroupRef means the auth-group already exists in the config,
+            // so we don't need to create a new one
+            AuthConfig::GroupRef(_) => None,
         }
     }
 
@@ -872,6 +876,15 @@ mod tests {
     #[test]
     fn test_auth_group_none_returns_none() {
         let auth_config = AuthConfig::None;
+        let auth_group = AuthGroup::from_auth_config(&auth_config, "test-volume");
+        assert!(auth_group.is_none());
+    }
+
+
+    #[test]
+    fn test_auth_group_group_ref_returns_none() {
+        // GroupRef means the auth-group already exists, so we don't create a new one
+        let auth_config = AuthConfig::GroupRef("ag-existing-vol".to_string());
         let auth_group = AuthGroup::from_auth_config(&auth_config, "test-volume");
         assert!(auth_group.is_none());
     }

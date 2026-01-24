@@ -245,9 +245,37 @@ impl StorageService {
         let mut restored_count = 0;
         let mut volumes = self.volumes.write().await;
 
+        // Collect volumes that need credential migration (remove plaintext secrets from ZFS)
+        let mut volumes_to_migrate: Vec<(String, ZfsVolumeMetadata)> = Vec::new();
+
         for (vol_name, zfs_meta) in volumes_with_metadata {
             // Convert CTL ExportType to proto ExportType
             let export_type = ctl_to_proto_export_type(zfs_meta.export_type);
+
+            // Reconstruct auth config from ZFS metadata.
+            // We only store the auth-group NAME in ZFS, not credentials.
+            // Credentials are in /etc/ctl.conf and persisted by ctld.
+            let (auth, needs_migration) = if let Some(ref auth_group) = zfs_meta.auth_group {
+                // New format: auth_group name stored directly
+                (AuthConfig::GroupRef(auth_group.clone()), false)
+            } else if zfs_meta.auth.has_credentials() {
+                // Legacy migration: old metadata had full credentials.
+                // Derive auth-group name and use GroupRef.
+                // Credentials already exist in ctl.conf from previous runs.
+                let auth_group_name = zfs_meta.auth.auth_group_name(&vol_name);
+                info!(
+                    "Migrating legacy auth for volume '{}' to auth_group '{}' (removing plaintext credentials from ZFS)",
+                    vol_name, auth_group_name
+                );
+                (AuthConfig::GroupRef(auth_group_name), true)
+            } else {
+                (AuthConfig::None, false)
+            };
+
+            // Mark for migration if we need to remove credentials from ZFS
+            if needs_migration {
+                volumes_to_migrate.push((vol_name.clone(), zfs_meta.clone()));
+            }
 
             let metadata = VolumeMetadata {
                 id: vol_name.clone(),
@@ -256,7 +284,7 @@ impl StorageService {
                 target_name: zfs_meta.target_name.clone(),
                 lun_id: zfs_meta.lun_id.unwrap_or(0) as i32,
                 parameters: zfs_meta.parameters.clone(),
-                auth: zfs_meta.auth.clone(),
+                auth,
             };
 
             volumes.insert(vol_name.clone(), metadata);
@@ -265,6 +293,44 @@ impl StorageService {
                 "Restored volume '{}' (export_type={}, target={})",
                 vol_name, zfs_meta.export_type, zfs_meta.target_name
             );
+        }
+
+        drop(volumes);
+
+        // Migrate volumes: re-write ZFS metadata without credentials
+        if !volumes_to_migrate.is_empty() {
+            info!(
+                "Migrating {} volume(s) to remove plaintext credentials from ZFS metadata",
+                volumes_to_migrate.len()
+            );
+
+            let zfs = self.zfs.read().await;
+            for (vol_name, old_meta) in volumes_to_migrate {
+                // Create new metadata with only auth_group (no credentials)
+                let auth_group_name = old_meta.auth.auth_group_name(&vol_name);
+                let migrated_meta = ZfsVolumeMetadata {
+                    export_type: old_meta.export_type,
+                    target_name: old_meta.target_name,
+                    lun_id: old_meta.lun_id,
+                    namespace_id: old_meta.namespace_id,
+                    parameters: old_meta.parameters,
+                    created_at: old_meta.created_at,
+                    auth_group: Some(auth_group_name),
+                    auth: AuthConfig::None, // Clear credentials
+                };
+
+                if let Err(e) = zfs.set_volume_metadata(&vol_name, &migrated_meta) {
+                    warn!(
+                        "Failed to migrate ZFS metadata for volume '{}': {}. Credentials may still be present.",
+                        vol_name, e
+                    );
+                } else {
+                    info!(
+                        "Successfully migrated volume '{}': removed plaintext credentials from ZFS",
+                        vol_name
+                    );
+                }
+            }
         }
 
         info!(
@@ -311,8 +377,9 @@ impl StorageService {
             };
 
             let ctl = self.ctl.read().await;
-            // Auth credentials are persisted in ZFS metadata, so reconciliation
-            // restores the original authentication configuration.
+            // Auth-group NAME is stored in ZFS metadata; credentials are in ctl.conf.
+            // GroupRef tells write_config() to reference the existing auth-group
+            // without creating a new one (credentials already persisted in ctl.conf).
             match ctl.export_volume(
                 vol_name,
                 &device_path,
@@ -477,10 +544,19 @@ impl StorageAgent for StorageService {
             }
         };
 
-        // Extract auth config early so it can be stored in ZFS metadata
+        // Extract auth config for CTL export (credentials used in ctl.conf)
         let auth_config = proto_to_ctl_auth(req.auth.as_ref());
 
+        // Compute auth-group name for ZFS metadata (credentials NOT stored in ZFS)
+        let auth_group_name = if auth_config.is_some() {
+            Some(auth_config.auth_group_name(&req.name))
+        } else {
+            None
+        };
+
         // Build ZFS metadata to set atomically during volume creation
+        // SECURITY: Only the auth-group NAME is stored, not credentials.
+        // Credentials are persisted in /etc/ctl.conf (root-only).
         let zfs_metadata = ZfsVolumeMetadata {
             export_type: ctl_export_type,
             target_name: target_name.clone(),
@@ -488,7 +564,8 @@ impl StorageAgent for StorageService {
             namespace_id: None,
             parameters: req.parameters.clone(),
             created_at: unix_timestamp_now(),
-            auth: auth_config.clone(),
+            auth_group: auth_group_name,
+            auth: AuthConfig::None, // Credentials stay in ctl.conf only
         };
 
         // Create ZFS volume - either fresh or from content source (snapshot/volume)

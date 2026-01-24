@@ -233,6 +233,30 @@ implement this authentication mechanism for NVMeoF controllers.
 
 - **iSCSI CHAP**: ✅ Fully supported
 - **NVMeoF DH-HMAC-CHAP**: ❌ Not supported by FreeBSD ctld
+- **NVMeoF NQN Allowlists**: ⚠️ Available but has mobility issues (see below)
+
+### NQN Allowlist Limitations
+
+> **⚠️ Warning: NQN-based security has pod mobility issues**
+>
+> NVMeoF can restrict access using NQN (NVMe Qualified Name) allowlists,
+> where only specific host NQNs can connect. However, this approach has
+> significant limitations in Kubernetes environments:
+>
+> - **Pod mobility problem**: When a pod is rescheduled to a different node,
+>   the new node's NQN won't be in the existing allowlist
+> - **Connection denied**: The pod will fail to mount the volume on the new node
+> - **Manual intervention required**: Allowlists must be updated with every
+>   possible node NQN, or dynamically updated on pod migration
+>
+> **Recommendations:**
+>
+> 1. **For production NVMeoF**: Use network isolation (VLANs, firewall rules)
+>    until DH-HMAC-CHAP is supported by FreeBSD ctld
+> 2. **For testing only**: NQN allowlists can be used in static environments
+>    where pods don't migrate between nodes
+> 3. **Future improvement**: The CSI driver may implement dynamic NQN updates
+>    at NodeStageVolume time (not yet available)
 
 ### Workarounds
 
@@ -263,6 +287,21 @@ stringData:
 ---
 
 ## Security Best Practices
+
+### Credential Storage
+
+The CSI driver stores CHAP credentials securely:
+
+- **Credentials are stored in `/etc/ctl.conf`** (FreeBSD's ctld configuration)
+  - File is root-owned with 0600 permissions
+  - This is ctld's native credential store
+  
+- **ZFS metadata does NOT contain credentials**
+  - Only the auth-group NAME is stored in ZFS user properties
+  - This prevents credential exposure via `zfs get user:csi:metadata`
+  
+- **On ctld-agent restart**: Credentials persist in `/etc/ctl.conf`, and the
+  agent references them by auth-group name from ZFS metadata
 
 ### 1. Use Strong Passwords
 

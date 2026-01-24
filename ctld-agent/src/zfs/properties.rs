@@ -6,6 +6,12 @@ use std::collections::HashMap;
 use crate::ctl::{AuthConfig, ExportType};
 
 /// Metadata stored as ZFS user property for each volume
+///
+/// # Security Note
+/// This struct is serialized to ZFS user properties which are readable
+/// by anyone with root access. Authentication credentials must NOT be
+/// stored here. Only the auth-group NAME is stored; actual credentials
+/// are persisted in `/etc/ctl.conf` (root-only, managed by ctld).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumeMetadata {
     /// Export type (iSCSI or NVMeoF)
@@ -23,9 +29,15 @@ pub struct VolumeMetadata {
     pub parameters: HashMap<String, String>,
     /// Creation timestamp (Unix epoch)
     pub created_at: i64,
-    /// Authentication configuration for the export
-    /// Uses default (None) for backward compatibility with existing volumes
-    #[serde(default)]
+    /// Auth-group name for authentication (e.g., "ag-vol-xyz").
+    /// Credentials are stored in /etc/ctl.conf, not here.
+    /// None means "no-authentication".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_group: Option<String>,
+    /// DEPRECATED: Legacy field for backward compatibility with existing volumes.
+    /// Only used during deserialization to migrate old credentials.
+    /// Never serialized - credentials stay in ctl.conf only.
+    #[serde(default, skip_serializing)]
     pub auth: AuthConfig,
 }
 
@@ -35,3 +47,128 @@ pub const METADATA_PROPERTY: &str = "user:csi:metadata";
 /// ZFS user property name for CSI snapshot ID
 /// This property is set on snapshots to track them even after promotion moves them
 pub const SNAPSHOT_ID_PROPERTY: &str = "user:csi:snapshot_id";
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ctl::IscsiChapAuth;
+
+    #[test]
+    fn test_volume_metadata_serialization_without_credentials() {
+        let metadata = VolumeMetadata {
+            export_type: ExportType::Iscsi,
+            target_name: "iqn.2024-01.org.freebsd.csi:vol1".to_string(),
+            lun_id: Some(0),
+            namespace_id: None,
+            parameters: HashMap::new(),
+            created_at: 1234567890,
+            auth_group: Some("ag-vol1".to_string()),
+            auth: AuthConfig::None, // Should not be serialized
+        };
+
+        let json = serde_json::to_string(&metadata).unwrap();
+
+        // Verify auth_group is present
+        assert!(json.contains("ag-vol1"));
+        // Verify 'auth' is NOT present in serialized output
+        assert!(!json.contains(r#""auth":"#));
+        // Verify no credential-like content
+        assert!(!json.contains("IscsiChap"));
+        assert!(!json.contains("secret"));
+    }
+
+    #[test]
+    fn test_volume_metadata_deserialization_with_legacy_auth() {
+        // Legacy format: auth field with credentials
+        let legacy_json = r#"{
+            "export_type": "ISCSI",
+            "target_name": "iqn.2024-01.org.freebsd.csi:vol1",
+            "lun_id": 0,
+            "parameters": {},
+            "created_at": 1234567890,
+            "auth": {
+                "IscsiChap": {
+                    "username": "user1",
+                    "secret": "mysecret",
+                    "mutual_username": null,
+                    "mutual_secret": null
+                }
+            }
+        }"#;
+
+        let metadata: VolumeMetadata = serde_json::from_str(legacy_json).unwrap();
+
+        // Auth field should be deserialized for migration
+        assert!(metadata.auth.has_credentials());
+        // auth_group should be None (not present in legacy format)
+        assert!(metadata.auth_group.is_none());
+
+        // Migration: derive auth_group from auth
+        let auth_group_name = metadata.auth.auth_group_name("vol1");
+        assert_eq!(auth_group_name, "ag-vol1");
+    }
+
+    #[test]
+    fn test_volume_metadata_deserialization_with_new_format() {
+        // New format: auth_group name only, no credentials
+        let new_json = r#"{
+            "export_type": "ISCSI",
+            "target_name": "iqn.2024-01.org.freebsd.csi:vol1",
+            "lun_id": 0,
+            "parameters": {},
+            "created_at": 1234567890,
+            "auth_group": "ag-vol1"
+        }"#;
+
+        let metadata: VolumeMetadata = serde_json::from_str(new_json).unwrap();
+
+        // auth_group should be set
+        assert_eq!(metadata.auth_group, Some("ag-vol1".to_string()));
+        // auth should be default (None)
+        assert!(!metadata.auth.has_credentials());
+    }
+
+    #[test]
+    fn test_volume_metadata_roundtrip_excludes_credentials() {
+        // Create metadata with IscsiChap (credentials) - shouldn't happen in practice
+        // but ensures auth is not serialized even if set
+        let metadata = VolumeMetadata {
+            export_type: ExportType::Iscsi,
+            target_name: "iqn.2024-01.org.freebsd.csi:vol1".to_string(),
+            lun_id: Some(0),
+            namespace_id: None,
+            parameters: HashMap::new(),
+            created_at: 1234567890,
+            auth_group: Some("ag-vol1".to_string()),
+            auth: AuthConfig::IscsiChap(IscsiChapAuth::new("user", "secret")),
+        };
+
+        // Serialize
+        let json = serde_json::to_string(&metadata).unwrap();
+
+        // auth field with credentials should NOT be in serialized output
+        assert!(!json.contains("IscsiChap"));
+        assert!(!json.contains("secret"));
+        assert!(!json.contains("user"));
+
+        // Only auth_group should be present
+        assert!(json.contains("ag-vol1"));
+    }
+
+    #[test]
+    fn test_volume_metadata_no_auth() {
+        // Volume without authentication
+        let json = r#"{
+            "export_type": "NVMEOF",
+            "target_name": "nqn.2024-01.org.freebsd.csi:vol1",
+            "parameters": {},
+            "created_at": 1234567890
+        }"#;
+
+        let metadata: VolumeMetadata = serde_json::from_str(json).unwrap();
+
+        assert!(metadata.auth_group.is_none());
+        assert!(!metadata.auth.is_some());
+    }
+}

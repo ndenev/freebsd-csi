@@ -428,34 +428,51 @@ impl NvmeAuth {
 
 /// Authentication configuration for a CTL export.
 ///
-/// Wraps protocol-specific authentication credentials.
+/// Wraps protocol-specific authentication credentials or references
+/// an existing auth-group by name.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AuthConfig {
     /// No authentication required
     #[default]
     None,
-    /// iSCSI CHAP authentication
+    /// iSCSI CHAP authentication (contains credentials)
     IscsiChap(IscsiChapAuth),
-    /// NVMeoF DH-HMAC-CHAP authentication
+    /// NVMeoF DH-HMAC-CHAP authentication (contains credentials)
     NvmeAuth(NvmeAuth),
+    /// Reference to an existing auth-group by name (no credentials stored).
+    ///
+    /// Used when reconciling volumes from ZFS metadata where credentials
+    /// are already persisted in `/etc/ctl.conf`. This avoids storing
+    /// plaintext secrets in ZFS user properties.
+    GroupRef(String),
 }
 
 impl AuthConfig {
     /// Check if authentication is configured.
+    ///
+    /// Returns true for all variants except `None`.
     pub fn is_some(&self) -> bool {
         !matches!(self, AuthConfig::None)
+    }
+
+    /// Check if this config contains actual credentials (not a reference).
+    ///
+    /// Returns true for `IscsiChap` and `NvmeAuth`, false for `None` and `GroupRef`.
+    pub fn has_credentials(&self) -> bool {
+        matches!(self, AuthConfig::IscsiChap(_) | AuthConfig::NvmeAuth(_))
     }
 
     /// Get the auth group name for UCL config.
     ///
     /// Returns "no-authentication" if no auth is configured,
-    /// otherwise returns a unique auth group name based on volume.
+    /// the stored name for `GroupRef`, or a generated name for credentials.
     pub fn auth_group_name(&self, volume_name: &str) -> String {
         match self {
             AuthConfig::None => "no-authentication".to_string(),
             AuthConfig::IscsiChap(_) | AuthConfig::NvmeAuth(_) => {
                 format!("ag-{}", volume_name)
             }
+            AuthConfig::GroupRef(name) => name.clone(),
         }
     }
 }
@@ -584,5 +601,66 @@ mod tests {
         let iqn = Iqn::new("iqn.2024-01.org.freebsd.csi", "vol1").unwrap();
         let target: TargetName = iqn.into();
         assert_eq!(target.volume_name(), Some("vol1"));
+    }
+
+
+    #[test]
+    fn test_auth_config_has_credentials() {
+        // None has no credentials
+        assert!(!AuthConfig::None.has_credentials());
+
+        // IscsiChap has credentials
+        let chap = IscsiChapAuth::new("user", "secret");
+        assert!(AuthConfig::IscsiChap(chap).has_credentials());
+
+        // NvmeAuth has credentials
+        let nvme = NvmeAuth::new("nqn.host", "secret", "sha256");
+        assert!(AuthConfig::NvmeAuth(nvme).has_credentials());
+
+        // GroupRef does not have credentials (it's a reference)
+        assert!(!AuthConfig::GroupRef("ag-vol1".to_string()).has_credentials());
+    }
+
+    #[test]
+    fn test_auth_config_auth_group_name() {
+        // None returns "no-authentication"
+        assert_eq!(AuthConfig::None.auth_group_name("vol1"), "no-authentication");
+
+        // IscsiChap generates auth group name from volume
+        let chap = IscsiChapAuth::new("user", "secret");
+        assert_eq!(AuthConfig::IscsiChap(chap).auth_group_name("vol1"), "ag-vol1");
+
+        // NvmeAuth generates auth group name from volume
+        let nvme = NvmeAuth::new("nqn.host", "secret", "sha256");
+        assert_eq!(AuthConfig::NvmeAuth(nvme).auth_group_name("vol1"), "ag-vol1");
+
+        // GroupRef returns the stored name directly
+        assert_eq!(
+            AuthConfig::GroupRef("ag-custom".to_string()).auth_group_name("vol1"),
+            "ag-custom"
+        );
+    }
+
+    #[test]
+    fn test_auth_config_group_ref_serde() {
+        let group_ref = AuthConfig::GroupRef("ag-vol1".to_string());
+        let json = serde_json::to_string(&group_ref).unwrap();
+        assert_eq!(json, r#"{"GroupRef":"ag-vol1"}"#);
+
+        let parsed: AuthConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, group_ref);
+    }
+
+    #[test]
+    fn test_auth_config_is_some() {
+        assert!(!AuthConfig::None.is_some());
+
+        let chap = IscsiChapAuth::new("user", "secret");
+        assert!(AuthConfig::IscsiChap(chap).is_some());
+
+        let nvme = NvmeAuth::new("nqn.host", "secret", "sha256");
+        assert!(AuthConfig::NvmeAuth(nvme).is_some());
+
+        assert!(AuthConfig::GroupRef("ag-vol1".to_string()).is_some());
     }
 }
