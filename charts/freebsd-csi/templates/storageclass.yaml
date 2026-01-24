@@ -14,7 +14,12 @@ provisioner: {{ .Values.driver.name }}
 parameters:
   exportType: iscsi
   fsType: {{ .Values.storageClassIscsi.parameters.fsType | default "ext4" }}
-  portal: {{ .Values.storageClassIscsi.parameters.portal | quote }}
+  {{- if .Values.storageClassIscsi.parameters.endpoints }}
+  endpoints: {{ .Values.storageClassIscsi.parameters.endpoints | quote }}
+  {{- else if .Values.storageClassIscsi.parameters.portal }}
+  {{/* DEPRECATED: portal is deprecated, use endpoints instead */}}
+  endpoints: {{ .Values.storageClassIscsi.parameters.portal | quote }}
+  {{- end }}
   {{- /* Block device configuration parameters */ -}}
   {{- if .Values.storageClassIscsi.parameters.blockSize }}
   blockSize: {{ .Values.storageClassIscsi.parameters.blockSize | quote }}
@@ -48,7 +53,7 @@ volumeBindingMode: {{ .Values.storageClassIscsi.volumeBindingMode }}
 ---
 {{- end }}
 {{- /* NVMeoF Storage Class */ -}}
-{{- if .Values.storageClassNvmeof.create -}}
+{{- if .Values.storageClassNvmeof.create }}
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -63,8 +68,18 @@ provisioner: {{ .Values.driver.name }}
 parameters:
   exportType: nvmeof
   fsType: {{ .Values.storageClassNvmeof.parameters.fsType | default "ext4" }}
-  transportAddr: {{ .Values.storageClassNvmeof.parameters.transportAddr | quote }}
-  transportPort: {{ .Values.storageClassNvmeof.parameters.transportPort | default "4420" | quote }}
+  {{- if .Values.storageClassNvmeof.parameters.endpoints }}
+  endpoints: {{ .Values.storageClassNvmeof.parameters.endpoints | quote }}
+  {{- else if .Values.storageClassNvmeof.parameters.transportAddr }}
+  {{- /* DEPRECATED: transportAddr/transportPort are deprecated, use endpoints instead */ -}}
+  {{- $port := .Values.storageClassNvmeof.parameters.transportPort | default "4420" }}
+  {{- $addrs := splitList "," .Values.storageClassNvmeof.parameters.transportAddr }}
+  {{- $endpoints := list }}
+  {{- range $addrs }}
+  {{- $endpoints = append $endpoints (printf "%s:%s" (trim .) $port) }}
+  {{- end }}
+  endpoints: {{ join "," $endpoints | quote }}
+  {{- end }}
   {{- /* Block device configuration parameters */ -}}
   {{- if .Values.storageClassNvmeof.parameters.blockSize }}
   blockSize: {{ .Values.storageClassNvmeof.parameters.blockSize | quote }}

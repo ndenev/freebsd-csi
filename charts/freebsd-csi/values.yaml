@@ -170,12 +170,17 @@ storageClassIscsi:
   # iSCSI parameters (REQUIRED if create: true)
   parameters:
     fsType: ext4
-    # Portal address - IP:port of the iSCSI target (REQUIRED when create: true)
+    # Target endpoints - comma-separated list of IP:port (REQUIRED when create: true)
+    # Format: "IP:port" or "IP:port,IP2:port2" for multipath
     # Default port: 3260
-    # For multipath: use comma-separated portals, e.g., "10.0.0.10:3260,10.0.0.11:3260"
-    # Each portal will be discovered and logged into separately.
+    # Examples:
+    #   Single target: "10.0.0.10:3260"
+    #   Multipath: "10.0.0.10:3260,10.0.0.11:3260"
+    # Each endpoint will be discovered and logged into separately.
     # dm-multipath will combine the paths automatically.
-    portal: ""
+    endpoints: ""
+    # DEPRECATED: Use 'endpoints' instead. Kept for backward compatibility.
+    # portal: ""
     # Block device configuration (optional)
     # blockSize: "4096"           # Logical block size: 512 or 4096
     # physicalBlockSize: "4096"   # Physical block size hint
@@ -215,14 +220,18 @@ storageClassNvmeof:
   # NVMeoF parameters (REQUIRED if create: true)
   parameters:
     fsType: ext4
-    # Transport address - IP of the NVMeoF target (REQUIRED when create: true)
+    # Target endpoints - comma-separated list of IP:port (REQUIRED when create: true)
+    # Format: "IP:port" or "IP:port,IP2:port2" for multipath
     # Default port: 4420
-    # For multipath: use comma-separated addresses, e.g., "10.0.0.10,10.0.0.11"
-    # Each address will be connected separately.
+    # Examples:
+    #   Single target: "10.0.0.10:4420"
+    #   Multipath: "10.0.0.10:4420,10.0.0.11:4420"
+    # Each endpoint will be connected separately.
     # Native NVMe multipath or dm-multipath will combine the paths.
-    transportAddr: ""
-    # Transport port (default: 4420)
-    transportPort: "4420"
+    endpoints: ""
+    # DEPRECATED: Use 'endpoints' instead. Kept for backward compatibility.
+    # transportAddr: ""
+    # transportPort: "4420"
     # Block device configuration (optional)
     # blockSize: "4096"           # Logical block size: 512 or 4096
     # physicalBlockSize: "4096"   # Physical block size hint
