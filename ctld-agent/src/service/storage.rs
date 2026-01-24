@@ -263,7 +263,13 @@ impl StorageService {
                 name: vol_name.clone(),
                 export_type,
                 target_name: zfs_meta.target_name.clone(),
-                lun_id: zfs_meta.lun_id.unwrap_or(0) as i32,
+                lun_id: zfs_meta.lun_id.unwrap_or(0).try_into().map_err(|_| {
+                    format!(
+                        "LUN ID {} for volume '{}' exceeds i32::MAX",
+                        zfs_meta.lun_id.unwrap_or(0),
+                        vol_name
+                    )
+                })?,
                 parameters: zfs_meta.parameters.clone(),
                 auth,
             };
@@ -319,6 +325,18 @@ impl StorageService {
                 continue;
             };
 
+            // Validate lun_id can be safely converted to u32
+            let lun_id: u32 = match metadata.lun_id.try_into() {
+                Ok(id) => id,
+                Err(_) => {
+                    warn!(
+                        "Volume '{}' has invalid LUN ID {}, skipping reconciliation",
+                        vol_name, metadata.lun_id
+                    );
+                    continue;
+                }
+            };
+
             let ctl = self.ctl.read().await;
             // Auth-group NAME is stored in ZFS metadata; credentials are in ctl.conf.
             // GroupRef tells write_config() to reference the existing auth-group
@@ -327,7 +345,7 @@ impl StorageService {
                 vol_name,
                 &device_path,
                 ctl_export_type,
-                metadata.lun_id as u32,
+                lun_id,
                 metadata.auth.clone(),
             ) {
                 Ok(_) => {
@@ -726,7 +744,9 @@ impl StorageAgent for StorageService {
             name: req.name.clone(),
             export_type,
             target_name: target_name.clone(),
-            lun_id: lun_id as i32,
+            lun_id: lun_id
+                .try_into()
+                .map_err(|_| Status::internal(format!("LUN ID {} exceeds i32::MAX", lun_id)))?,
             parameters: req.parameters.clone(),
             auth: auth_config,
         };
