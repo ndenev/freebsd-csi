@@ -40,7 +40,7 @@ pub struct CtlManager {
     /// Base NQN prefix for NVMeoF controllers
     base_nqn: String,
     /// Auth group name for UCL config
-    #[allow(dead_code)] // TODO: Use for CHAP authentication support
+    #[allow(dead_code)] // Legacy: superseded by per-volume auth groups in AuthConfig
     auth_group: String,
     /// Portal group name for iSCSI
     portal_group_name: String,
