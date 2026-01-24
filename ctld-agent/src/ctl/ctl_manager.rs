@@ -14,7 +14,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 use super::error::{CtlError, Result};
 use super::types::{AuthConfig, DevicePath, ExportType, Iqn, Nqn, TargetName};
-use super::ucl_config::{AuthGroup, Controller, CtlConfig, Target, UclConfigManager};
+use super::ucl_config::{AuthGroup, Controller, CtlConfig, CtlOptions, Target, UclConfigManager};
 
 /// Represents a CTL export (either iSCSI target or NVMeoF controller)
 #[derive(Debug, Clone)]
@@ -31,6 +31,8 @@ pub struct Export {
     pub lun_id: u32,
     /// Authentication configuration (CHAP for iSCSI, DH-HMAC-CHAP for NVMeoF)
     pub auth: AuthConfig,
+    /// CTL options (blocksize, pblocksize, unmap)
+    pub ctl_options: CtlOptions,
 }
 
 /// Unified manager for CTL exports (iSCSI and NVMeoF)
@@ -139,6 +141,8 @@ impl CtlManager {
                     lun_id,
                     // Auth is not persisted in UCL config, defaults to none
                     auth: AuthConfig::None,
+                    // CTL options not persisted in UCL config, defaults to none
+                    ctl_options: CtlOptions::default(),
                 })
             })
             .collect();
@@ -166,6 +170,8 @@ impl CtlManager {
                     lun_id: ns_id,
                     // Auth is not persisted in UCL config, defaults to none
                     auth: AuthConfig::None,
+                    // CTL options not persisted in UCL config, defaults to none
+                    ctl_options: CtlOptions::default(),
                 })
             })
             .collect();
@@ -192,7 +198,8 @@ impl CtlManager {
     /// * `export_type` - iSCSI or NVMeoF
     /// * `lun_id` - LUN ID for iSCSI or Namespace ID for NVMeoF
     /// * `auth` - Optional authentication configuration (CHAP/DH-HMAC-CHAP)
-    #[instrument(skip(self, auth))]
+    /// * `ctl_options` - CTL options (blocksize, pblocksize, unmap)
+    #[instrument(skip(self, auth, ctl_options))]
     pub fn export_volume(
         &self,
         volume_name: &str,
@@ -200,6 +207,7 @@ impl CtlManager {
         export_type: ExportType,
         lun_id: u32,
         auth: AuthConfig,
+        ctl_options: CtlOptions,
     ) -> Result<Export> {
         // Validate and parse inputs using newtypes
         let device_path = DevicePath::parse(device_path)?;
@@ -223,6 +231,7 @@ impl CtlManager {
             target_name,
             lun_id,
             auth,
+            ctl_options,
         };
 
         // Use Entry API for atomic check-and-insert
@@ -293,22 +302,24 @@ impl CtlManager {
 
             match export.export_type {
                 ExportType::Iscsi => {
-                    let target = Target::new(
+                    let target = Target::with_options(
                         auth_group_name,
                         self.portal_group_name.clone(),
                         export.lun_id,
                         export.device_path.as_str().to_string(),
                         &export.volume_name,
+                        &export.ctl_options,
                     );
                     iscsi_targets.push((export.target_name.to_string(), target));
                 }
                 ExportType::Nvmeof => {
-                    let controller = Controller::new(
+                    let controller = Controller::with_options(
                         auth_group_name,
                         self.transport_group.clone(),
                         export.lun_id,
                         export.device_path.as_str().to_string(),
                         &export.volume_name,
+                        &export.ctl_options,
                     );
                     nvme_controllers.push((export.target_name.to_string(), controller));
                 }
@@ -520,6 +531,7 @@ mod tests {
             target_name: iqn.into(),
             lun_id: 0,
             auth: AuthConfig::None,
+            ctl_options: CtlOptions::default(),
         };
 
         assert_eq!(export.volume_name, "vol1");
@@ -542,6 +554,7 @@ mod tests {
             target_name: iqn.into(),
             lun_id: 0,
             auth: AuthConfig::IscsiChap(chap),
+            ctl_options: CtlOptions::default(),
         };
 
         assert!(export.auth.is_some());

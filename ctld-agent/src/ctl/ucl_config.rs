@@ -46,15 +46,32 @@ fn ucl_quote(s: &str) -> String {
 pub struct Lun {
     /// Path to the backing device
     pub path: String,
-    /// Block size (optional, defaults to 512)
+    /// Logical block size (optional, 512 or 4096, defaults to 512)
     #[ucl(default)]
     pub blocksize: Option<u32>,
+    /// Physical block size hint for alignment optimization (optional)
+    #[ucl(default)]
+    pub pblocksize: Option<u32>,
+    /// Enable UNMAP/TRIM/discard passthrough (optional, "on" or "off")
+    #[ucl(default)]
+    pub unmap: Option<String>,
     /// Serial number for unique device identification
     #[ucl(default)]
     pub serial: Option<String>,
     /// Device ID for unique device identification (T10 vendor format)
     #[ucl(path = "device-id", default)]
     pub device_id: Option<String>,
+}
+
+/// CTL LUN/Namespace options parsed from StorageClass parameters
+#[derive(Debug, Clone, Default)]
+pub struct CtlOptions {
+    /// Logical block size (512 or 4096)
+    pub blocksize: Option<u32>,
+    /// Physical block size hint for alignment
+    pub pblocksize: Option<u32>,
+    /// Enable UNMAP/TRIM/discard passthrough
+    pub unmap: Option<bool>,
 }
 
 impl Lun {
@@ -69,6 +86,29 @@ impl Lun {
         Self {
             path,
             blocksize: None,
+            pblocksize: None,
+            unmap: None,
+            serial: Some(serial),
+            device_id: Some(device_id),
+        }
+    }
+
+    /// Create a new LUN with CTL options (blocksize, pblocksize, unmap)
+    pub fn with_options(path: String, volume_name: &str, options: &CtlOptions) -> Self {
+        let serial = Self::generate_serial(volume_name);
+        let device_id = Self::generate_device_id(volume_name);
+
+        Self {
+            path,
+            blocksize: options.blocksize,
+            pblocksize: options.pblocksize,
+            unmap: options.unmap.map(|b| {
+                if b {
+                    "on".to_string()
+                } else {
+                    "off".to_string()
+                }
+            }),
             serial: Some(serial),
             device_id: Some(device_id),
         }
@@ -83,6 +123,8 @@ impl Lun {
         Self {
             path,
             blocksize: Some(blocksize),
+            pblocksize: None,
+            unmap: None,
             serial: Some(serial),
             device_id: Some(device_id),
         }
@@ -122,6 +164,18 @@ impl ToUcl for Lun {
         if let Some(ref device_id) = self.device_id {
             writeln!(s, "{}device-id = {};", ind, ucl_quote(device_id)).unwrap();
         }
+        // CTL backend options go in an options { } block
+        if self.pblocksize.is_some() || self.unmap.is_some() {
+            writeln!(s, "{}options {{", ind).unwrap();
+            let opts_ind = indent(level + 1);
+            if let Some(pbs) = self.pblocksize {
+                writeln!(s, "{}pblocksize = {};", opts_ind, pbs).unwrap();
+            }
+            if let Some(ref unmap) = self.unmap {
+                writeln!(s, "{}unmap = {};", opts_ind, ucl_quote(unmap)).unwrap();
+            }
+            writeln!(s, "{}}}", ind).unwrap();
+        }
         s
     }
 }
@@ -131,6 +185,15 @@ impl ToUcl for Lun {
 pub struct Namespace {
     /// Path to the backing device
     pub path: String,
+    /// Logical block size (optional, 512 or 4096, defaults to 512)
+    #[ucl(default)]
+    pub blocksize: Option<u32>,
+    /// Physical block size hint for alignment optimization (optional)
+    #[ucl(default)]
+    pub pblocksize: Option<u32>,
+    /// Enable UNMAP/TRIM/discard passthrough (optional, "on" or "off")
+    #[ucl(default)]
+    pub unmap: Option<String>,
     /// Serial number for unique namespace identification (used by multipath)
     #[ucl(default)]
     pub serial: Option<String>,
@@ -147,6 +210,29 @@ impl Namespace {
         let device_id = Self::generate_device_id(volume_name);
         Self {
             path,
+            blocksize: None,
+            pblocksize: None,
+            unmap: None,
+            serial: Some(serial),
+            device_id: Some(device_id),
+        }
+    }
+
+    /// Create a new namespace with CTL options (blocksize, pblocksize, unmap)
+    pub fn with_options(path: String, volume_name: &str, options: &CtlOptions) -> Self {
+        let serial = Self::generate_serial(volume_name);
+        let device_id = Self::generate_device_id(volume_name);
+        Self {
+            path,
+            blocksize: options.blocksize,
+            pblocksize: options.pblocksize,
+            unmap: options.unmap.map(|b| {
+                if b {
+                    "on".to_string()
+                } else {
+                    "off".to_string()
+                }
+            }),
             serial: Some(serial),
             device_id: Some(device_id),
         }
@@ -179,11 +265,26 @@ impl ToUcl for Namespace {
         let mut s = String::new();
         let ind = indent(level);
         writeln!(s, "{}path = {};", ind, ucl_quote(&self.path)).unwrap();
+        if let Some(bs) = self.blocksize {
+            writeln!(s, "{}blocksize = {};", ind, bs).unwrap();
+        }
         if let Some(ref serial) = self.serial {
             writeln!(s, "{}serial = {};", ind, ucl_quote(serial)).unwrap();
         }
         if let Some(ref device_id) = self.device_id {
             writeln!(s, "{}device-id = {};", ind, ucl_quote(device_id)).unwrap();
+        }
+        // CTL backend options go in an options { } block
+        if self.pblocksize.is_some() || self.unmap.is_some() {
+            writeln!(s, "{}options {{", ind).unwrap();
+            let opts_ind = indent(level + 1);
+            if let Some(pbs) = self.pblocksize {
+                writeln!(s, "{}pblocksize = {};", opts_ind, pbs).unwrap();
+            }
+            if let Some(ref unmap) = self.unmap {
+                writeln!(s, "{}unmap = {};", opts_ind, ucl_quote(unmap)).unwrap();
+            }
+            writeln!(s, "{}}}", ind).unwrap();
         }
         s
     }
@@ -218,6 +319,27 @@ impl Target {
     ) -> Self {
         let mut lun = HashMap::new();
         lun.insert(lun_id.to_string(), Lun::new(device_path, volume_name));
+        Self {
+            auth_group,
+            portal_group,
+            lun,
+        }
+    }
+
+    /// Create a new target with a single LUN and CTL options
+    pub fn with_options(
+        auth_group: String,
+        portal_group: String,
+        lun_id: u32,
+        device_path: String,
+        volume_name: &str,
+        options: &CtlOptions,
+    ) -> Self {
+        let mut lun = HashMap::new();
+        lun.insert(
+            lun_id.to_string(),
+            Lun::with_options(device_path, volume_name, options),
+        );
         Self {
             auth_group,
             portal_group,
@@ -285,6 +407,29 @@ impl Controller {
         let serial = Self::generate_serial(volume_name);
         let mut namespace = HashMap::new();
         namespace.insert(ns_id.to_string(), Namespace::new(device_path, volume_name));
+        Self {
+            auth_group,
+            transport_group,
+            serial: Some(serial),
+            namespace,
+        }
+    }
+
+    /// Create a new controller with a single namespace and CTL options
+    pub fn with_options(
+        auth_group: String,
+        transport_group: String,
+        ns_id: u32,
+        device_path: String,
+        volume_name: &str,
+        options: &CtlOptions,
+    ) -> Self {
+        let serial = Self::generate_serial(volume_name);
+        let mut namespace = HashMap::new();
+        namespace.insert(
+            ns_id.to_string(),
+            Namespace::with_options(device_path, volume_name, options),
+        );
         Self {
             auth_group,
             transport_group,
@@ -1053,6 +1198,176 @@ mod tests {
             err_msg.contains("mutual CHAP username"),
             "Error should mention mutual CHAP username: {}",
             err_msg
+        );
+    }
+
+    // ============================================================================
+    // CTL Options tests
+    // ============================================================================
+
+    #[test]
+    fn test_ctl_options_default() {
+        let opts = CtlOptions::default();
+        assert!(opts.blocksize.is_none());
+        assert!(opts.pblocksize.is_none());
+        assert!(opts.unmap.is_none());
+    }
+
+    #[test]
+    fn test_lun_with_options() {
+        let opts = CtlOptions {
+            blocksize: Some(4096),
+            pblocksize: Some(4096),
+            unmap: Some(true),
+        };
+        let lun = Lun::with_options("/dev/zvol/tank/csi/vol1".to_string(), "pvc-test", &opts);
+        let ucl = lun.to_ucl(0);
+
+        assert!(ucl.contains("blocksize = 4096;"), "UCL: {}", ucl);
+        assert!(
+            ucl.contains("options {"),
+            "UCL should have options block: {}",
+            ucl
+        );
+        assert!(ucl.contains("pblocksize = 4096;"), "UCL: {}", ucl);
+        assert!(ucl.contains("unmap = \"on\";"), "UCL: {}", ucl);
+        assert!(ucl.contains("serial ="), "UCL: {}", ucl);
+        assert!(ucl.contains("device-id ="), "UCL: {}", ucl);
+    }
+
+    #[test]
+    fn test_lun_with_options_unmap_off() {
+        let opts = CtlOptions {
+            blocksize: None,
+            pblocksize: None,
+            unmap: Some(false),
+        };
+        let lun = Lun::with_options("/dev/zvol/tank/csi/vol1".to_string(), "pvc-test", &opts);
+        let ucl = lun.to_ucl(0);
+
+        assert!(
+            !ucl.contains("blocksize ="),
+            "UCL should not have blocksize: {}",
+            ucl
+        );
+        assert!(
+            ucl.contains("options {"),
+            "UCL should have options block: {}",
+            ucl
+        );
+        assert!(
+            !ucl.contains("pblocksize"),
+            "UCL should not have pblocksize: {}",
+            ucl
+        );
+        assert!(ucl.contains("unmap = \"off\";"), "UCL: {}", ucl);
+    }
+
+    #[test]
+    fn test_namespace_with_options() {
+        let opts = CtlOptions {
+            blocksize: Some(4096),
+            pblocksize: Some(4096),
+            unmap: Some(true),
+        };
+        let ns = Namespace::with_options("/dev/zvol/tank/csi/vol1".to_string(), "pvc-test", &opts);
+        let ucl = ns.to_ucl(0);
+
+        assert!(ucl.contains("blocksize = 4096;"), "UCL: {}", ucl);
+        assert!(
+            ucl.contains("options {"),
+            "UCL should have options block: {}",
+            ucl
+        );
+        assert!(ucl.contains("pblocksize = 4096;"), "UCL: {}", ucl);
+        assert!(ucl.contains("unmap = \"on\";"), "UCL: {}", ucl);
+        assert!(ucl.contains("serial ="), "UCL: {}", ucl);
+        assert!(ucl.contains("device-id ="), "UCL: {}", ucl);
+    }
+
+    #[test]
+    fn test_target_with_options() {
+        let opts = CtlOptions {
+            blocksize: Some(4096),
+            pblocksize: Some(4096),
+            unmap: Some(true),
+        };
+        let target = Target::with_options(
+            "no-authentication".to_string(),
+            "pg0".to_string(),
+            0,
+            "/dev/zvol/tank/csi/vol1".to_string(),
+            "pvc-test",
+            &opts,
+        );
+        let ucl = target.to_ucl(0);
+
+        assert!(
+            ucl.contains("auth-group = \"no-authentication\";"),
+            "UCL: {}",
+            ucl
+        );
+        assert!(ucl.contains("portal-group = \"pg0\";"), "UCL: {}", ucl);
+        assert!(ucl.contains("lun 0 {"), "UCL: {}", ucl);
+        assert!(ucl.contains("blocksize = 4096;"), "UCL: {}", ucl);
+        assert!(
+            ucl.contains("options {"),
+            "UCL should have options block: {}",
+            ucl
+        );
+        assert!(ucl.contains("pblocksize = 4096;"), "UCL: {}", ucl);
+        assert!(ucl.contains("unmap = \"on\";"), "UCL: {}", ucl);
+    }
+
+    #[test]
+    fn test_controller_with_options() {
+        let opts = CtlOptions {
+            blocksize: Some(4096),
+            pblocksize: Some(4096),
+            unmap: Some(true),
+        };
+        let controller = Controller::with_options(
+            "no-authentication".to_string(),
+            "tg0".to_string(),
+            1,
+            "/dev/zvol/tank/csi/vol1".to_string(),
+            "pvc-test",
+            &opts,
+        );
+        let ucl = controller.to_ucl(0);
+
+        assert!(
+            ucl.contains("auth-group = \"no-authentication\";"),
+            "UCL: {}",
+            ucl
+        );
+        assert!(ucl.contains("transport-group = \"tg0\";"), "UCL: {}", ucl);
+        assert!(ucl.contains("namespace 1 {"), "UCL: {}", ucl);
+        assert!(ucl.contains("blocksize = 4096;"), "UCL: {}", ucl);
+        assert!(
+            ucl.contains("options {"),
+            "UCL should have options block: {}",
+            ucl
+        );
+        assert!(ucl.contains("pblocksize = 4096;"), "UCL: {}", ucl);
+        assert!(ucl.contains("unmap = \"on\";"), "UCL: {}", ucl);
+    }
+
+    #[test]
+    fn test_lun_no_options_block_when_empty() {
+        let opts = CtlOptions {
+            blocksize: Some(4096),
+            pblocksize: None,
+            unmap: None,
+        };
+        let lun = Lun::with_options("/dev/zvol/tank/csi/vol1".to_string(), "pvc-test", &opts);
+        let ucl = lun.to_ucl(0);
+
+        assert!(ucl.contains("blocksize = 4096;"), "UCL: {}", ucl);
+        assert!(
+            !ucl.contains("options {"),
+            "UCL should not have options block: {}",
+            ucl
         );
     }
 }
