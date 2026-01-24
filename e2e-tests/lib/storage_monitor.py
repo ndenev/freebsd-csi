@@ -580,6 +580,149 @@ class StorageMonitor:
         return targets
 
     # -------------------------------------------------------------------------
+    # Auth Group Operations (CHAP Verification)
+    # -------------------------------------------------------------------------
+
+    @dataclass
+    class AuthGroupInfo:
+        """Parsed auth-group information from UCL config."""
+
+        name: str
+        chap_username: str | None = None
+        chap_secret: str | None = None
+        chap_mutual_username: str | None = None
+        chap_mutual_secret: str | None = None
+
+    def list_auth_groups(self) -> list["StorageMonitor.AuthGroupInfo"]:
+        """Parse auth-group blocks from ctld config.
+
+        Returns:
+            List of AuthGroupInfo with parsed CHAP credentials
+        """
+        config = self.get_ctld_config()
+        auth_groups = []
+
+        # Pattern to match auth-group blocks
+        # UCL format: auth-group "name" { ... }
+        ag_pattern = re.compile(
+            r'auth-group\s+"([^"]+)"\s*\{([^}]*)\}', re.DOTALL | re.MULTILINE
+        )
+
+        for match in ag_pattern.finditer(config):
+            name = match.group(1)
+            body = match.group(2)
+
+            info = StorageMonitor.AuthGroupInfo(name=name)
+
+            # Parse chap "username" "secret"
+            chap_match = re.search(r'chap\s+"([^"]+)"\s+"([^"]+)"', body)
+            if chap_match:
+                info.chap_username = chap_match.group(1)
+                info.chap_secret = chap_match.group(2)
+
+            # Parse chap-mutual "username" "secret"
+            mutual_match = re.search(r'chap-mutual\s+"([^"]+)"\s+"([^"]+)"', body)
+            if mutual_match:
+                info.chap_mutual_username = mutual_match.group(1)
+                info.chap_mutual_secret = mutual_match.group(2)
+
+            auth_groups.append(info)
+
+        return auth_groups
+
+    def get_auth_group(self, name: str) -> "StorageMonitor.AuthGroupInfo | None":
+        """Get a specific auth-group by name.
+
+        Args:
+            name: Auth-group name
+
+        Returns:
+            AuthGroupInfo or None if not found
+        """
+        for ag in self.list_auth_groups():
+            if ag.name == name:
+                return ag
+        return None
+
+    def verify_auth_group_exists(self, name: str) -> bool:
+        """Check if an auth-group exists in the config.
+
+        Args:
+            name: Auth-group name
+
+        Returns:
+            True if auth-group exists
+        """
+        return self.get_auth_group(name) is not None
+
+    def verify_auth_group_has_chap(
+        self,
+        name: str,
+        expected_username: str | None = None,
+    ) -> bool:
+        """Verify an auth-group has CHAP configured.
+
+        Args:
+            name: Auth-group name
+            expected_username: Optional username to verify
+
+        Returns:
+            True if auth-group has CHAP (and username matches if provided)
+        """
+        ag = self.get_auth_group(name)
+        if not ag or not ag.chap_username:
+            return False
+        if expected_username and ag.chap_username != expected_username:
+            return False
+        return True
+
+    def verify_auth_group_has_mutual_chap(
+        self,
+        name: str,
+        expected_username: str | None = None,
+        expected_mutual_username: str | None = None,
+    ) -> bool:
+        """Verify an auth-group has mutual CHAP configured.
+
+        Args:
+            name: Auth-group name
+            expected_username: Optional initiator username to verify
+            expected_mutual_username: Optional target username to verify
+
+        Returns:
+            True if auth-group has mutual CHAP configured
+        """
+        ag = self.get_auth_group(name)
+        if not ag:
+            return False
+        if not ag.chap_username or not ag.chap_mutual_username:
+            return False
+        if expected_username and ag.chap_username != expected_username:
+            return False
+        if expected_mutual_username and ag.chap_mutual_username != expected_mutual_username:
+            return False
+        return True
+
+    def get_target_auth_group(self, volume_id: str) -> str | None:
+        """Get the auth-group name used by a target for a volume.
+
+        Args:
+            volume_id: Volume ID (PV name)
+
+        Returns:
+            Auth-group name or None
+        """
+        targets = self.list_iscsi_targets()
+        for target in targets:
+            # Match target by IQN containing volume_id or by LUN name
+            if volume_id in target.get("name", ""):
+                return target.get("auth_group")
+            for lun in target.get("luns", []):
+                if volume_id in lun.get("name", ""):
+                    return target.get("auth_group")
+        return None
+
+    # -------------------------------------------------------------------------
     # State Snapshots
     # -------------------------------------------------------------------------
 
