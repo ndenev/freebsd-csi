@@ -263,17 +263,13 @@ impl StorageService {
                 name: vol_name.clone(),
                 export_type,
                 target_name: zfs_meta.target_name.clone(),
-                lun_id: zfs_meta
-                    .lun_id
-                    .unwrap_or(0)
-                    .try_into()
-                    .map_err(|_| {
-                        format!(
-                            "LUN ID {} for volume '{}' exceeds i32::MAX",
-                            zfs_meta.lun_id.unwrap_or(0),
-                            vol_name
-                        )
-                    })?,
+                lun_id: zfs_meta.lun_id.unwrap_or(0).try_into().map_err(|_| {
+                    format!(
+                        "LUN ID {} for volume '{}' exceeds i32::MAX",
+                        zfs_meta.lun_id.unwrap_or(0),
+                        vol_name
+                    )
+                })?,
                 parameters: zfs_meta.parameters.clone(),
                 auth,
             };
@@ -748,9 +744,9 @@ impl StorageAgent for StorageService {
             name: req.name.clone(),
             export_type,
             target_name: target_name.clone(),
-            lun_id: lun_id.try_into().map_err(|_| {
-                Status::internal(format!("LUN ID {} exceeds i32::MAX", lun_id))
-            })?,
+            lun_id: lun_id
+                .try_into()
+                .map_err(|_| Status::internal(format!("LUN ID {} exceeds i32::MAX", lun_id)))?,
             parameters: req.parameters.clone(),
             auth: auth_config,
         };
