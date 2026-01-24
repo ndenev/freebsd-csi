@@ -102,7 +102,13 @@ impl Lun {
             path,
             blocksize: options.blocksize,
             pblocksize: options.pblocksize,
-            unmap: options.unmap.map(|b| if b { "on".to_string() } else { "off".to_string() }),
+            unmap: options.unmap.map(|b| {
+                if b {
+                    "on".to_string()
+                } else {
+                    "off".to_string()
+                }
+            }),
             serial: Some(serial),
             device_id: Some(device_id),
         }
@@ -220,7 +226,13 @@ impl Namespace {
             path,
             blocksize: options.blocksize,
             pblocksize: options.pblocksize,
-            unmap: options.unmap.map(|b| if b { "on".to_string() } else { "off".to_string() }),
+            unmap: options.unmap.map(|b| {
+                if b {
+                    "on".to_string()
+                } else {
+                    "off".to_string()
+                }
+            }),
             serial: Some(serial),
             device_id: Some(device_id),
         }
@@ -1212,7 +1224,11 @@ mod tests {
         let ucl = lun.to_ucl(0);
 
         assert!(ucl.contains("blocksize = 4096;"), "UCL: {}", ucl);
-        assert!(ucl.contains("options {"), "UCL should have options block: {}", ucl);
+        assert!(
+            ucl.contains("options {"),
+            "UCL should have options block: {}",
+            ucl
+        );
         assert!(ucl.contains("pblocksize = 4096;"), "UCL: {}", ucl);
         assert!(ucl.contains("unmap = \"on\";"), "UCL: {}", ucl);
         assert!(ucl.contains("serial ="), "UCL: {}", ucl);
@@ -1229,9 +1245,21 @@ mod tests {
         let lun = Lun::with_options("/dev/zvol/tank/csi/vol1".to_string(), "pvc-test", &opts);
         let ucl = lun.to_ucl(0);
 
-        assert!(!ucl.contains("blocksize ="), "UCL should not have blocksize: {}", ucl);
-        assert!(ucl.contains("options {"), "UCL should have options block: {}", ucl);
-        assert!(!ucl.contains("pblocksize"), "UCL should not have pblocksize: {}", ucl);
+        assert!(
+            !ucl.contains("blocksize ="),
+            "UCL should not have blocksize: {}",
+            ucl
+        );
+        assert!(
+            ucl.contains("options {"),
+            "UCL should have options block: {}",
+            ucl
+        );
+        assert!(
+            !ucl.contains("pblocksize"),
+            "UCL should not have pblocksize: {}",
+            ucl
+        );
         assert!(ucl.contains("unmap = \"off\";"), "UCL: {}", ucl);
     }
 
@@ -1246,7 +1274,11 @@ mod tests {
         let ucl = ns.to_ucl(0);
 
         assert!(ucl.contains("blocksize = 4096;"), "UCL: {}", ucl);
-        assert!(ucl.contains("options {"), "UCL should have options block: {}", ucl);
+        assert!(
+            ucl.contains("options {"),
+            "UCL should have options block: {}",
+            ucl
+        );
         assert!(ucl.contains("pblocksize = 4096;"), "UCL: {}", ucl);
         assert!(ucl.contains("unmap = \"on\";"), "UCL: {}", ucl);
         assert!(ucl.contains("serial ="), "UCL: {}", ucl);
@@ -1270,11 +1302,19 @@ mod tests {
         );
         let ucl = target.to_ucl(0);
 
-        assert!(ucl.contains("auth-group = \"no-authentication\";"), "UCL: {}", ucl);
+        assert!(
+            ucl.contains("auth-group = \"no-authentication\";"),
+            "UCL: {}",
+            ucl
+        );
         assert!(ucl.contains("portal-group = \"pg0\";"), "UCL: {}", ucl);
         assert!(ucl.contains("lun 0 {"), "UCL: {}", ucl);
         assert!(ucl.contains("blocksize = 4096;"), "UCL: {}", ucl);
-        assert!(ucl.contains("options {"), "UCL should have options block: {}", ucl);
+        assert!(
+            ucl.contains("options {"),
+            "UCL should have options block: {}",
+            ucl
+        );
         assert!(ucl.contains("pblocksize = 4096;"), "UCL: {}", ucl);
         assert!(ucl.contains("unmap = \"on\";"), "UCL: {}", ucl);
     }
@@ -1296,11 +1336,19 @@ mod tests {
         );
         let ucl = controller.to_ucl(0);
 
-        assert!(ucl.contains("auth-group = \"no-authentication\";"), "UCL: {}", ucl);
+        assert!(
+            ucl.contains("auth-group = \"no-authentication\";"),
+            "UCL: {}",
+            ucl
+        );
         assert!(ucl.contains("transport-group = \"tg0\";"), "UCL: {}", ucl);
         assert!(ucl.contains("namespace 1 {"), "UCL: {}", ucl);
         assert!(ucl.contains("blocksize = 4096;"), "UCL: {}", ucl);
-        assert!(ucl.contains("options {"), "UCL should have options block: {}", ucl);
+        assert!(
+            ucl.contains("options {"),
+            "UCL should have options block: {}",
+            ucl
+        );
         assert!(ucl.contains("pblocksize = 4096;"), "UCL: {}", ucl);
         assert!(ucl.contains("unmap = \"on\";"), "UCL: {}", ucl);
     }
@@ -1316,6 +1364,10 @@ mod tests {
         let ucl = lun.to_ucl(0);
 
         assert!(ucl.contains("blocksize = 4096;"), "UCL: {}", ucl);
-        assert!(!ucl.contains("options {"), "UCL should not have options block: {}", ucl);
+        assert!(
+            !ucl.contains("options {"),
+            "UCL should not have options block: {}",
+            ucl
+        );
     }
 }
