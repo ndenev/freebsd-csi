@@ -244,6 +244,31 @@ pub struct DevicePath(String);
 impl DevicePath {
     const PREFIX: &'static str = "/dev/zvol/";
 
+    /// Validate that this device path is under the specified parent dataset.
+    ///
+    /// This is a security check to prevent privilege escalation by ensuring
+    /// device paths can only reference volumes under the CSI-managed dataset.
+    ///
+    /// # Arguments
+    /// * `parent_dataset` - The ZFS parent dataset (e.g., "tank/csi")
+    ///
+    /// # Examples
+    /// ```ignore
+    /// let path = DevicePath::parse("/dev/zvol/tank/csi/vol1")?;
+    /// path.validate_parent_dataset("tank/csi")?; // Ok
+    /// path.validate_parent_dataset("other/pool")?; // Error
+    /// ```
+    pub fn validate_parent_dataset(&self, parent_dataset: &str) -> Result<()> {
+        let expected_prefix = format!("{}{}/", Self::PREFIX, parent_dataset);
+        if !self.0.starts_with(&expected_prefix) {
+            return Err(CtlError::InvalidName(format!(
+                "device path '{}' must be under {}",
+                self.0, expected_prefix
+            )));
+        }
+        Ok(())
+    }
+
     /// Create a device path from a ZFS dataset name.
     pub fn from_dataset(dataset_name: &str) -> Result<Self> {
         if dataset_name.is_empty() {
@@ -587,6 +612,32 @@ mod tests {
         assert!(DevicePath::parse("").is_err());
         assert!(DevicePath::parse("/dev/da0").is_err());
         assert!(DevicePath::parse("/dev/zvol/../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_device_path_parent_dataset_validation() {
+        // Valid: path is under parent dataset
+        let path = DevicePath::parse("/dev/zvol/tank/csi/pvc-abc123").unwrap();
+        assert!(path.validate_parent_dataset("tank/csi").is_ok());
+
+        // Valid: nested path under parent dataset
+        let nested = DevicePath::parse("/dev/zvol/tank/csi/ns/vol1").unwrap();
+        assert!(nested.validate_parent_dataset("tank/csi").is_ok());
+
+        // Invalid: different pool
+        let other_pool = DevicePath::parse("/dev/zvol/other/pool/vol").unwrap();
+        assert!(other_pool.validate_parent_dataset("tank/csi").is_err());
+
+        // Invalid: sibling dataset
+        let sibling = DevicePath::parse("/dev/zvol/tank/other/vol").unwrap();
+        assert!(sibling.validate_parent_dataset("tank/csi").is_err());
+
+        // Invalid: parent dataset itself (no volume name)
+        let parent_only = DevicePath::from_dataset("tank/csi").unwrap();
+        assert!(parent_only.validate_parent_dataset("tank/csi").is_err());
+
+        // Invalid: path traversal attempt (already blocked by parse, but double-check)
+        assert!(DevicePath::parse("/dev/zvol/tank/csi/../other/vol").is_err());
     }
 
     #[test]
