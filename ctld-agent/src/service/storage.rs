@@ -1267,26 +1267,84 @@ impl StorageAgent for StorageService {
         let volume_name = parts[0];
         let snap_name = parts[1];
 
-        // Delete ZFS snapshot using ZfsManager (validates input to prevent command injection)
+        // Delete ZFS snapshot
+        // First try the direct path (fast path for common case)
+        // If not found, search by CSI snapshot ID property (handles promoted clones)
         {
             let zfs = self.zfs.read().await;
-            if let Err(e) = zfs.delete_snapshot(volume_name, snap_name) {
-                use crate::zfs::ZfsError;
-                let (status, error_type) = match e {
-                    ZfsError::DatasetNotFound(_) => (
-                        Status::not_found(format!("snapshot '{}' not found", req.snapshot_id)),
-                        "not_found",
-                    ),
-                    ZfsError::InvalidName(msg) => {
-                        (Status::invalid_argument(msg), "invalid_argument")
+
+            // Try direct deletion first
+            match zfs.delete_snapshot(volume_name, snap_name) {
+                Ok(()) => {
+                    info!(
+                        snapshot_id = %req.snapshot_id,
+                        "Deleted snapshot via direct path"
+                    );
+                }
+                Err(crate::zfs::ZfsError::DatasetNotFound(_)) => {
+                    // Snapshot not found at expected path
+                    // This can happen if the source volume was deleted and a clone was promoted,
+                    // which moves the snapshot to the promoted clone's dataset.
+                    // Search for the snapshot by its CSI snapshot ID property.
+                    info!(
+                        snapshot_id = %req.snapshot_id,
+                        "Snapshot not at expected path, searching by CSI ID property"
+                    );
+
+                    use crate::zfs::FindSnapshotResult;
+                    match zfs.find_snapshot_by_id(&req.snapshot_id) {
+                        Ok(FindSnapshotResult::NotFound) => {
+                            // Snapshot truly doesn't exist - treat as already deleted (idempotent)
+                            info!(
+                                snapshot_id = %req.snapshot_id,
+                                "Snapshot not found anywhere, treating as already deleted"
+                            );
+                        }
+                        Ok(FindSnapshotResult::Found(path)) => {
+                            // Found the snapshot at a different location (promoted clone)
+                            info!(
+                                snapshot_id = %req.snapshot_id,
+                                path = %path,
+                                "Found migrated snapshot, deleting"
+                            );
+                            if let Err(e) = zfs.delete_snapshot_by_path(&path) {
+                                timer.failure("zfs_error");
+                                return Err(Status::internal(format!(
+                                    "failed to delete migrated snapshot at {}: {}",
+                                    path, e
+                                )));
+                            }
+                        }
+                        Ok(FindSnapshotResult::Ambiguous(count)) => {
+                            // Multiple snapshots with same ID - this should never happen
+                            // Refuse to delete to avoid data loss
+                            timer.failure("ambiguous_snapshot");
+                            return Err(Status::failed_precondition(format!(
+                                "Found {} snapshots with ID '{}' - refusing to delete. \
+                                 This indicates a bug or data corruption.",
+                                count, req.snapshot_id
+                            )));
+                        }
+                        Err(e) => {
+                            timer.failure("zfs_error");
+                            return Err(Status::internal(format!(
+                                "failed to search for snapshot: {}",
+                                e
+                            )));
+                        }
                     }
-                    _ => (
-                        Status::internal(format!("failed to delete snapshot: {}", e)),
-                        "zfs_error",
-                    ),
-                };
-                timer.failure(error_type);
-                return Err(status);
+                }
+                Err(crate::zfs::ZfsError::InvalidName(msg)) => {
+                    timer.failure("invalid_argument");
+                    return Err(Status::invalid_argument(msg));
+                }
+                Err(e) => {
+                    timer.failure("zfs_error");
+                    return Err(Status::internal(format!(
+                        "failed to delete snapshot: {}",
+                        e
+                    )));
+                }
             }
         }
 

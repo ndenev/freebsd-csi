@@ -2,7 +2,18 @@ use std::process::{Command, Output};
 use tracing::{debug, info, instrument, warn};
 
 use super::error::{Result, ZfsError};
-use super::properties::{METADATA_PROPERTY, VolumeMetadata};
+use super::properties::{METADATA_PROPERTY, SNAPSHOT_ID_PROPERTY, VolumeMetadata};
+
+/// Result of searching for a snapshot by its CSI snapshot ID
+#[derive(Debug)]
+pub enum FindSnapshotResult {
+    /// Snapshot not found
+    NotFound,
+    /// Exactly one snapshot found at the given path
+    Found(String),
+    /// Multiple snapshots found with the same ID (should not happen)
+    Ambiguous(usize),
+}
 
 /// Check command output for success or return appropriate error.
 ///
@@ -202,6 +213,11 @@ impl ZfsManager {
     }
 
     /// Create a snapshot of a volume
+    ///
+    /// The snapshot is tagged with a `user:csi:snapshot_id` property containing
+    /// the CSI snapshot ID (format: "volume_name@snap_name"). This property
+    /// persists even if the snapshot is moved due to clone promotion, allowing
+    /// us to find and delete the snapshot regardless of its current location.
     #[instrument(skip(self))]
     pub fn create_snapshot(&self, volume_name: &str, snap_name: &str) -> Result<String> {
         // Validate names for command injection prevention
@@ -209,8 +225,10 @@ impl ZfsManager {
         validate_name(snap_name)?;
 
         let full_volume = self.full_path(volume_name);
-        let snapshot_name = format!("{}@{}", full_volume, snap_name);
-        info!(volume = %full_volume, snapshot = %snap_name, "Creating ZFS snapshot");
+        let snapshot_path = format!("{}@{}", full_volume, snap_name);
+        // CSI snapshot ID uses the volume name (not full path) for portability
+        let snapshot_id = format!("{}@{}", volume_name, snap_name);
+        info!(volume = %full_volume, snapshot = %snap_name, snapshot_id = %snapshot_id, "Creating ZFS snapshot");
 
         // Check if volume exists
         if !self.dataset_exists(&full_volume)? {
@@ -218,17 +236,23 @@ impl ZfsManager {
             return Err(ZfsError::DatasetNotFound(full_volume));
         }
 
+        // Create snapshot with CSI snapshot ID property set atomically
+        let property_arg = format!(
+            "{}={}",
+            super::properties::SNAPSHOT_ID_PROPERTY,
+            snapshot_id
+        );
         let output = Command::new("zfs")
-            .args(["snapshot", &snapshot_name])
+            .args(["snapshot", "-o", &property_arg, &snapshot_path])
             .output()?;
 
-        if let Err(e) = check_command_result(&output, &snapshot_name) {
-            warn!(snapshot = %snapshot_name, error = %e, "Failed to create snapshot");
+        if let Err(e) = check_command_result(&output, &snapshot_path) {
+            warn!(snapshot = %snapshot_path, error = %e, "Failed to create snapshot");
             return Err(e);
         }
 
-        info!(snapshot = %snapshot_name, "ZFS snapshot created successfully");
-        Ok(snapshot_name)
+        info!(snapshot = %snapshot_path, snapshot_id = %snapshot_id, "ZFS snapshot created successfully");
+        Ok(snapshot_path)
     }
 
     /// Delete a snapshot
@@ -304,6 +328,100 @@ impl ZfsManager {
 
         debug!(volume = %full_name, count = snapshots.len(), "Found snapshots");
         Ok(snapshots)
+    }
+
+    /// Find a snapshot by its CSI snapshot ID property
+    ///
+    /// This searches all snapshots under the parent dataset for one with the
+    /// matching `user:csi:snapshot_id` property. This is used to find snapshots
+    /// that may have moved due to clone promotion.
+    ///
+    /// Returns:
+    /// - `NotFound` if no snapshot has the given ID
+    /// - `Found(path)` if exactly one snapshot matches
+    /// - `Ambiguous(count)` if multiple snapshots match (should not happen with UUIDs)
+    #[instrument(skip(self))]
+    pub fn find_snapshot_by_id(&self, snapshot_id: &str) -> Result<FindSnapshotResult> {
+        debug!(snapshot_id = %snapshot_id, "Searching for snapshot by CSI ID");
+
+        // List all snapshots with their CSI snapshot ID property
+        let output = Command::new("zfs")
+            .args([
+                "list",
+                "-H",
+                "-t",
+                "snapshot",
+                "-o",
+                &format!("name,{}", SNAPSHOT_ID_PROPERTY),
+                "-r",
+                &self.parent_dataset,
+            ])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("no datasets available") {
+                return Ok(FindSnapshotResult::NotFound);
+            }
+            return Err(ZfsError::CommandFailed(format!(
+                "failed to search snapshots: {}",
+                stderr
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let matches: Vec<&str> = stdout
+            .lines()
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.split('\t').collect();
+                if parts.len() >= 2 && parts[1] == snapshot_id {
+                    Some(parts[0])
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        match matches.len() {
+            0 => {
+                debug!(snapshot_id = %snapshot_id, "Snapshot not found");
+                Ok(FindSnapshotResult::NotFound)
+            }
+            1 => {
+                let path = matches[0].to_string();
+                info!(snapshot_id = %snapshot_id, path = %path, "Found snapshot by CSI ID");
+                Ok(FindSnapshotResult::Found(path))
+            }
+            n => {
+                warn!(
+                    snapshot_id = %snapshot_id,
+                    count = n,
+                    "Multiple snapshots found with same CSI ID - refusing to delete"
+                );
+                Ok(FindSnapshotResult::Ambiguous(n))
+            }
+        }
+    }
+
+    /// Delete a snapshot by its full ZFS path
+    ///
+    /// This is a lower-level method that takes the full path (e.g., "tank/csi/vol@snap")
+    /// rather than separate volume and snapshot names.
+    #[instrument(skip(self))]
+    pub fn delete_snapshot_by_path(&self, snapshot_path: &str) -> Result<()> {
+        info!(snapshot = %snapshot_path, "Deleting ZFS snapshot by path");
+
+        let output = Command::new("zfs")
+            .args(["destroy", snapshot_path])
+            .output()?;
+
+        if let Err(e) = check_command_result(&output, snapshot_path) {
+            warn!(snapshot = %snapshot_path, error = %e, "Failed to delete snapshot");
+            return Err(e);
+        }
+
+        info!(snapshot = %snapshot_path, "ZFS snapshot deleted successfully");
+        Ok(())
     }
 
     /// Get information about a specific dataset

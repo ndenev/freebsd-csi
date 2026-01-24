@@ -27,3 +27,7 @@ pub struct VolumeMetadata {
 
 /// ZFS user property name for CSI metadata
 pub const METADATA_PROPERTY: &str = "user:csi:metadata";
+
+/// ZFS user property name for CSI snapshot ID
+/// This property is set on snapshots to track them even after promotion moves them
+pub const SNAPSHOT_ID_PROPERTY: &str = "user:csi:snapshot_id";
