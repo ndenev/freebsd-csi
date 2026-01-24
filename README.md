@@ -185,7 +185,9 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
-  portal: "192.168.1.100:3260"
+  portal: "192.168.1.100:3260"  # Default port: 3260
+  blockSize: "4096"             # Optional: 4K block size
+  enableUnmap: "true"           # Optional: Enable TRIM/discard
 csi.storage.k8s.io/provisioner-secret-name: iscsi-chap-secret
 csi.storage.k8s.io/provisioner-secret-namespace: default
 csi.storage.k8s.io/node-stage-secret-name: iscsi-chap-secret
