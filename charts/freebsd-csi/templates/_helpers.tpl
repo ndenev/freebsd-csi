@@ -102,13 +102,13 @@ Validate required values
 {{- fail "agent.endpoint is required. Set it to your FreeBSD storage server address (e.g., --set agent.endpoint=http://192.168.1.100:50051)" }}
 {{- end }}
 {{- if .Values.storageClassIscsi.create }}
-{{- if not .Values.storageClassIscsi.parameters.portal }}
-{{- fail "storageClassIscsi.parameters.portal is required when storageClassIscsi.create is true (e.g., --set storageClassIscsi.parameters.portal=192.168.1.100:3260)" }}
+{{- if and (not .Values.storageClassIscsi.parameters.endpoints) (not .Values.storageClassIscsi.parameters.portal) }}
+{{- fail "storageClassIscsi.parameters.endpoints is required when storageClassIscsi.create is true (e.g., --set storageClassIscsi.parameters.endpoints=192.168.1.100:3260)" }}
 {{- end }}
 {{- end }}
 {{- if .Values.storageClassNvmeof.create }}
-{{- if not .Values.storageClassNvmeof.parameters.transportAddr }}
-{{- fail "storageClassNvmeof.parameters.transportAddr is required when storageClassNvmeof.create is true (e.g., --set storageClassNvmeof.parameters.transportAddr=192.168.1.100)" }}
+{{- if and (not .Values.storageClassNvmeof.parameters.endpoints) (not .Values.storageClassNvmeof.parameters.transportAddr) }}
+{{- fail "storageClassNvmeof.parameters.endpoints is required when storageClassNvmeof.create is true (e.g., --set storageClassNvmeof.parameters.endpoints=192.168.1.100:4420)" }}
 {{- end }}
 {{- end }}
 {{- end }}
