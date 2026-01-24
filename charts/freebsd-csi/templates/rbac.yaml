@@ -10,6 +10,10 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumes"]
     verbs: ["get", "list", "watch", "create", "delete", "patch"]
+  # Secrets for CHAP/NVMeoF authentication
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "update"]

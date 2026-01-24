@@ -176,16 +176,26 @@ storageClassIscsi:
     # dm-multipath will combine the paths automatically.
     portal: ""
   # CHAP Authentication (optional)
-  # Create a secret with the following keys:
+  # Option 1: Reference an existing secret by name
+  # Option 2: Create a secret from values (see credentials below)
+  # Secret keys:
   #   node.session.auth.username - CHAP username
   #   node.session.auth.password - CHAP secret
   #   node.session.auth.username_in - Mutual CHAP username (optional)
   #   node.session.auth.password_in - Mutual CHAP secret (optional)
   chapSecret:
-    # Name of the secret containing CHAP credentials
+    # Name of an existing secret (if set, credentials below are ignored)
     name: ""
     # Namespace of the secret (defaults to release namespace)
     namespace: ""
+    # Create a secret from these credentials (ignored if name is set)
+    # Note: Consider using external secrets management for production
+    credentials:
+      username: ""
+      password: ""
+      # Mutual CHAP (optional - target authenticates to initiator)
+      usernameIn: ""
+      passwordIn: ""
 
 # NVMeoF Storage Class (FreeBSD 15.0+)
 storageClassNvmeof:
@@ -210,16 +220,27 @@ storageClassNvmeof:
   # NVMeoF Access Control (optional, FreeBSD 15.0+)
   # Note: FreeBSD 15's ctld only supports host-nqn based access control for NVMeoF.
   #       DH-HMAC-CHAP is not yet implemented in ctld.
-  # Create a secret with the following keys:
+  # Option 1: Reference an existing secret by name
+  # Option 2: Create a secret from values (see credentials below)
+  # Secret keys:
   #   nvme.auth.host_nqn - Host NQN allowed to connect (required)
   #   nvme.auth.secret - Reserved for future DH-HMAC-CHAP support
   #   nvme.auth.hash_function - Reserved for future DH-HMAC-CHAP support
   #   nvme.auth.dh_group - Reserved for future DH-HMAC-CHAP support
   authSecret:
-    # Name of the secret containing NVMeoF auth credentials
+    # Name of an existing secret (if set, credentials below are ignored)
     name: ""
     # Namespace of the secret (defaults to release namespace)
     namespace: ""
+    # Create a secret from these credentials (ignored if name is set)
+    # Note: Consider using external secrets management for production
+    credentials:
+      # Host NQN allowed to connect (required for access control)
+      hostNqn: ""
+      # Reserved for future DH-HMAC-CHAP support
+      secret: ""
+      hashFunction: ""
+      dhGroup: ""
 
 # Prometheus metrics configuration
 metrics:

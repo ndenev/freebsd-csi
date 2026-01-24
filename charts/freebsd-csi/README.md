@@ -56,11 +56,20 @@ helm install freebsd-csi charts/freebsd-csi \
 | `storageClassIscsi.name` | iSCSI StorageClass name | `freebsd-zfs-iscsi` |
 | `storageClassIscsi.default` | Set as default StorageClass | `false` |
 | `storageClassIscsi.parameters.portal` | **Required if create=true.** iSCSI portal address | `""` |
+| `storageClassIscsi.chapSecret.name` | Existing secret with CHAP credentials | `""` |
+| `storageClassIscsi.chapSecret.namespace` | Namespace of CHAP secret | Release namespace |
+| `storageClassIscsi.chapSecret.credentials.username` | CHAP username (creates secret if set) | `""` |
+| `storageClassIscsi.chapSecret.credentials.password` | CHAP password | `""` |
+| `storageClassIscsi.chapSecret.credentials.usernameIn` | Mutual CHAP username (optional) | `""` |
+| `storageClassIscsi.chapSecret.credentials.passwordIn` | Mutual CHAP password (optional) | `""` |
 | `storageClassNvmeof.create` | Create an NVMeoF StorageClass | `false` |
 | `storageClassNvmeof.name` | NVMeoF StorageClass name | `freebsd-zfs-nvmeof` |
 | `storageClassNvmeof.default` | Set as default StorageClass | `false` |
 | `storageClassNvmeof.parameters.transportAddr` | **Required if create=true.** NVMeoF target address | `""` |
 | `storageClassNvmeof.parameters.transportPort` | NVMeoF transport port | `4420` |
+| `storageClassNvmeof.authSecret.name` | Existing secret with NVMeoF auth credentials | `""` |
+| `storageClassNvmeof.authSecret.namespace` | Namespace of auth secret | Release namespace |
+| `storageClassNvmeof.authSecret.credentials.hostNqn` | Host NQN for access control (creates secret if set) | `""` |
 | `serviceAccount.create` | Create ServiceAccount | `true` |
 | `rbac.create` | Create RBAC resources | `true` |
 
@@ -95,6 +104,38 @@ helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
   --set agent.endpoint=http://192.168.1.100:50051 \
   --set storageClassIscsi.create=true \
   --set storageClassIscsi.parameters.portal=192.168.1.100:3260
+```
+
+### With iSCSI CHAP Authentication
+
+Using an existing secret:
+```bash
+# First, create the CHAP secret
+kubectl create secret generic iscsi-chap \
+  --namespace freebsd-csi \
+  --from-literal=node.session.auth.username=myuser \
+  --from-literal=node.session.auth.password=mysecret
+
+# Install with secret reference
+helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
+  --namespace freebsd-csi \
+  --create-namespace \
+  --set agent.endpoint=http://192.168.1.100:50051 \
+  --set storageClassIscsi.create=true \
+  --set storageClassIscsi.parameters.portal=192.168.1.100:3260 \
+  --set storageClassIscsi.chapSecret.name=iscsi-chap
+```
+
+Or create the secret inline (for testing/development):
+```bash
+helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
+  --namespace freebsd-csi \
+  --create-namespace \
+  --set agent.endpoint=http://192.168.1.100:50051 \
+  --set storageClassIscsi.create=true \
+  --set storageClassIscsi.parameters.portal=192.168.1.100:3260 \
+  --set storageClassIscsi.chapSecret.credentials.username=myuser \
+  --set storageClassIscsi.chapSecret.credentials.password=mysecret
 ```
 
 ### With NVMeoF StorageClass (FreeBSD 15.0+)

@@ -1,0 +1,32 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: freebsd-e2e-iscsi-chap
+  labels:
+    app.kubernetes.io/component: e2e-testing
+    app.kubernetes.io/part-of: freebsd-csi
+provisioner: csi.freebsd.org
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+parameters:
+  # Export volume via iSCSI
+  exportType: iscsi
+  # iSCSI portal addresses (required for Linux initiators)
+  portal: "10.0.0.10:3260"
+  # Filesystem type
+  fsType: ext4
+  # CHAP authentication secrets for provisioner and node operations
+  csi.storage.k8s.io/provisioner-secret-name: "iscsi-chap-credentials"
+  csi.storage.k8s.io/provisioner-secret-namespace: "freebsd-csi"
+  csi.storage.k8s.io/node-stage-secret-name: "iscsi-chap-credentials"
+  csi.storage.k8s.io/node-stage-secret-namespace: "freebsd-csi"
+  csi.storage.k8s.io/node-publish-secret-name: "iscsi-chap-credentials"
+  csi.storage.k8s.io/node-publish-secret-namespace: "freebsd-csi"
+---
+# Example CHAP secret (replace with actual credentials for testing)
+# Create this secret before using the StorageClass:
+#   kubectl create secret generic iscsi-chap-credentials \
+#     --namespace freebsd-csi \
+#     --from-literal=node.session.auth.username=testuser \
+#     --from-literal=node.session.auth.password=testsecret

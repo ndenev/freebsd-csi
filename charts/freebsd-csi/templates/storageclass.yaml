@@ -16,9 +16,21 @@ parameters:
   fsType: {{ .Values.storageClassIscsi.parameters.fsType | default "ext4" }}
   portal: {{ .Values.storageClassIscsi.parameters.portal | quote }}
   {{- /* CHAP authentication secret parameters */ -}}
+  {{- $iscsiSecretName := "" }}
+  {{- $iscsiSecretNamespace := .Release.Namespace }}
   {{- if .Values.storageClassIscsi.chapSecret.name }}
-  csi.storage.k8s.io/provisioner-secret-name: {{ .Values.storageClassIscsi.chapSecret.name | quote }}
-  csi.storage.k8s.io/provisioner-secret-namespace: {{ .Values.storageClassIscsi.chapSecret.namespace | default .Release.Namespace | quote }}
+  {{- $iscsiSecretName = .Values.storageClassIscsi.chapSecret.name }}
+  {{- $iscsiSecretNamespace = .Values.storageClassIscsi.chapSecret.namespace | default .Release.Namespace }}
+  {{- else if .Values.storageClassIscsi.chapSecret.credentials.username }}
+  {{- $iscsiSecretName = printf "%s-chap" (include "freebsd-csi.fullname" .) }}
+  {{- end }}
+  {{- if $iscsiSecretName }}
+  csi.storage.k8s.io/provisioner-secret-name: {{ $iscsiSecretName | quote }}
+  csi.storage.k8s.io/provisioner-secret-namespace: {{ $iscsiSecretNamespace | quote }}
+  csi.storage.k8s.io/node-stage-secret-name: {{ $iscsiSecretName | quote }}
+  csi.storage.k8s.io/node-stage-secret-namespace: {{ $iscsiSecretNamespace | quote }}
+  csi.storage.k8s.io/node-publish-secret-name: {{ $iscsiSecretName | quote }}
+  csi.storage.k8s.io/node-publish-secret-namespace: {{ $iscsiSecretNamespace | quote }}
   {{- end }}
 allowVolumeExpansion: {{ .Values.storageClassIscsi.allowVolumeExpansion }}
 reclaimPolicy: {{ .Values.storageClassIscsi.reclaimPolicy }}
@@ -44,9 +56,21 @@ parameters:
   transportAddr: {{ .Values.storageClassNvmeof.parameters.transportAddr | quote }}
   transportPort: {{ .Values.storageClassNvmeof.parameters.transportPort | default "4420" | quote }}
   {{- /* NVMeoF DH-HMAC-CHAP authentication secret parameters */ -}}
+  {{- $nvmeSecretName := "" }}
+  {{- $nvmeSecretNamespace := .Release.Namespace }}
   {{- if .Values.storageClassNvmeof.authSecret.name }}
-  csi.storage.k8s.io/provisioner-secret-name: {{ .Values.storageClassNvmeof.authSecret.name | quote }}
-  csi.storage.k8s.io/provisioner-secret-namespace: {{ .Values.storageClassNvmeof.authSecret.namespace | default .Release.Namespace | quote }}
+  {{- $nvmeSecretName = .Values.storageClassNvmeof.authSecret.name }}
+  {{- $nvmeSecretNamespace = .Values.storageClassNvmeof.authSecret.namespace | default .Release.Namespace }}
+  {{- else if .Values.storageClassNvmeof.authSecret.credentials.hostNqn }}
+  {{- $nvmeSecretName = printf "%s-nvme-auth" (include "freebsd-csi.fullname" .) }}
+  {{- end }}
+  {{- if $nvmeSecretName }}
+  csi.storage.k8s.io/provisioner-secret-name: {{ $nvmeSecretName | quote }}
+  csi.storage.k8s.io/provisioner-secret-namespace: {{ $nvmeSecretNamespace | quote }}
+  csi.storage.k8s.io/node-stage-secret-name: {{ $nvmeSecretName | quote }}
+  csi.storage.k8s.io/node-stage-secret-namespace: {{ $nvmeSecretNamespace | quote }}
+  csi.storage.k8s.io/node-publish-secret-name: {{ $nvmeSecretName | quote }}
+  csi.storage.k8s.io/node-publish-secret-namespace: {{ $nvmeSecretNamespace | quote }}
   {{- end }}
 allowVolumeExpansion: {{ .Values.storageClassNvmeof.allowVolumeExpansion }}
 reclaimPolicy: {{ .Values.storageClassNvmeof.reclaimPolicy }}
