@@ -18,7 +18,7 @@ use tracing::{debug, error, info, instrument, warn};
 const DEFAULT_MAX_CONCURRENT_OPS: usize = 10;
 
 use crate::ctl::{
-    AuthConfig, ConfigWriterHandle, CtlError, CtlManager, ExportType as CtlExportType,
+    AuthConfig, ConfigWriterHandle, CtlError, CtlManager, CtlOptions, ExportType as CtlExportType,
     IscsiChapAuth, NvmeAuth, spawn_config_writer,
 };
 use crate::metrics::{self, OperationTimer};
@@ -82,6 +82,42 @@ fn proto_to_ctl_auth(auth: Option<&AuthCredentials>) -> AuthConfig {
             }
             AuthConfig::NvmeAuth(auth)
         }
+    }
+}
+
+/// Parse CTL options from request parameters.
+///
+/// Supports the following StorageClass parameters:
+/// - `blockSize` (or `block_size`): Logical block size (512 or 4096)
+/// - `physicalBlockSize` (or `physical_block_size`, `pblocksize`): Physical block hint
+/// - `enableUnmap` (or `enable_unmap`, `unmap`): Enable TRIM/discard ("true" or "false")
+fn parse_ctl_options(params: &HashMap<String, String>) -> CtlOptions {
+    let blocksize = params
+        .get("blockSize")
+        .or_else(|| params.get("block_size"))
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&bs| bs == 512 || bs == 4096);
+
+    let pblocksize = params
+        .get("physicalBlockSize")
+        .or_else(|| params.get("physical_block_size"))
+        .or_else(|| params.get("pblocksize"))
+        .and_then(|v| v.parse::<u32>().ok());
+
+    let unmap = params
+        .get("enableUnmap")
+        .or_else(|| params.get("enable_unmap"))
+        .or_else(|| params.get("unmap"))
+        .and_then(|v| match v.to_lowercase().as_str() {
+            "true" | "1" | "on" | "yes" => Some(true),
+            "false" | "0" | "off" | "no" => Some(false),
+            _ => None,
+        });
+
+    CtlOptions {
+        blocksize,
+        pblocksize,
+        unmap,
     }
 }
 
@@ -341,12 +377,14 @@ impl StorageService {
             // Auth-group NAME is stored in ZFS metadata; credentials are in ctl.conf.
             // GroupRef tells write_config() to reference the existing auth-group
             // without creating a new one (credentials already persisted in ctl.conf).
+            // CTL options are not persisted in ZFS metadata, so use defaults on reconciliation.
             match ctl.export_volume(
                 vol_name,
                 &device_path,
                 ctl_export_type,
                 lun_id,
                 metadata.auth.clone(),
+                CtlOptions::default(),
             ) {
                 Ok(_) => {
                     info!(
@@ -706,6 +744,9 @@ impl StorageAgent for StorageService {
         // auth_config was extracted earlier for ZFS metadata persistence
         let has_auth = auth_config.is_some();
 
+        // Parse CTL options from request parameters
+        let ctl_options = parse_ctl_options(&req.parameters);
+
         // Export the volume via unified CTL manager
         {
             let ctl = self.ctl.read().await;
@@ -715,6 +756,7 @@ impl StorageAgent for StorageService {
                 ctl_export_type,
                 lun_id,
                 auth_config.clone(),
+                ctl_options,
             ) {
                 warn!("Failed to export volume: {}", e);
                 timer.failure("export_error");
