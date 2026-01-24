@@ -416,32 +416,6 @@ pub fn default_fs_type() -> &'static str {
     DEFAULT_FS_TYPE
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_validate_fs_type_valid() {
-        assert_eq!(validate_fs_type("ufs").unwrap(), "ufs");
-        assert_eq!(validate_fs_type("ffs").unwrap(), "ufs");
-        assert_eq!(validate_fs_type("").unwrap(), "ufs");
-        assert_eq!(validate_fs_type("UFS").unwrap(), "ufs");
-    }
-
-    #[test]
-    fn test_validate_fs_type_invalid() {
-        assert!(validate_fs_type("ext4").is_err());
-        assert!(validate_fs_type("xfs").is_err());
-        assert!(validate_fs_type("zfs").is_err());
-        assert!(validate_fs_type("ntfs").is_err());
-    }
-
-    #[test]
-    fn test_default_fs_type() {
-        assert_eq!(default_fs_type(), "ufs");
-    }
-}
-
 // ============================================================================
 // StorageOps trait implementation
 // ============================================================================
@@ -516,5 +490,31 @@ impl StorageOps for FreeBsdPlatform {
 
     fn default_fs_type() -> &'static str {
         default_fs_type()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_fs_type_valid() {
+        assert_eq!(validate_fs_type("ufs").unwrap(), "ufs");
+        assert_eq!(validate_fs_type("ffs").unwrap(), "ufs");
+        assert_eq!(validate_fs_type("").unwrap(), "ufs");
+        assert_eq!(validate_fs_type("UFS").unwrap(), "ufs");
+    }
+
+    #[test]
+    fn test_validate_fs_type_invalid() {
+        assert!(validate_fs_type("ext4").is_err());
+        assert!(validate_fs_type("xfs").is_err());
+        assert!(validate_fs_type("zfs").is_err());
+        assert!(validate_fs_type("ntfs").is_err());
+    }
+
+    #[test]
+    fn test_default_fs_type() {
+        assert_eq!(default_fs_type(), "ufs");
     }
 }
