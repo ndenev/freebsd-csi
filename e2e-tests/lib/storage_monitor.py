@@ -353,13 +353,20 @@ class StorageMonitor:
         """Read the ctld configuration file.
 
         Returns:
-            Contents of /etc/ctl.conf
+            Contents of /etc/ctl.ucl
         """
         try:
-            with open("/etc/ctl.conf") as f:
+            with open("/etc/ctl.ucl") as f:
                 return f.read()
         except FileNotFoundError:
             return ""
+        except PermissionError:
+            # May need sudo in non-root context
+            try:
+                result = self._run(["cat", "/etc/ctl.ucl"])
+                return result.stdout
+            except subprocess.CalledProcessError:
+                return ""
 
     def list_ctl_luns(self) -> list[LunInfo]:
         """List CTL LUNs using XML output.

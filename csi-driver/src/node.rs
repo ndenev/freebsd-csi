@@ -27,7 +27,7 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
 use crate::csi;
-use crate::platform;
+use crate::platform::{Platform, StorageOps};
 
 /// Base IQN prefix for iSCSI targets (must match ctld-agent configuration)
 const BASE_IQN: &str = "iqn.2024-01.org.freebsd.csi";
@@ -312,9 +312,9 @@ impl NodeService {
     fn disconnect_volume_targets(volume_id: &str) -> Result<(), Status> {
         // Try iSCSI first
         let iqn = Self::derive_iqn(volume_id);
-        if platform::is_iscsi_connected(&iqn) {
+        if Platform::is_iscsi_connected(&iqn) {
             info!(target = %iqn, "Disconnecting iSCSI target");
-            platform::disconnect_iscsi(&iqn).map_err(|e| {
+            Platform::disconnect_iscsi(&iqn).map_err(|e| {
                 error!(error = %e, target = %iqn, "Failed to disconnect iSCSI target");
                 Status::internal(format!(
                     "Failed to disconnect iSCSI target {}: {}. Volume may still be connected.",
@@ -325,9 +325,9 @@ impl NodeService {
 
         // Try NVMeoF
         let nqn = Self::derive_nqn(volume_id);
-        if platform::is_nvmeof_connected(&nqn) {
+        if Platform::is_nvmeof_connected(&nqn) {
             info!(target = %nqn, "Disconnecting NVMeoF target");
-            platform::disconnect_nvmeof(&nqn).map_err(|e| {
+            Platform::disconnect_nvmeof(&nqn).map_err(|e| {
                 error!(error = %e, target = %nqn, "Failed to disconnect NVMeoF target");
                 Status::internal(format!(
                     "Failed to disconnect NVMeoF target {}: {}. Volume may still be connected.",
@@ -359,7 +359,7 @@ impl NodeService {
             && let Some(csi::volume_capability::AccessType::Mount(mount)) = &cap.access_type
             && !mount.fs_type.is_empty()
         {
-            return platform::validate_fs_type(&mount.fs_type);
+            return Platform::validate_fs_type(&mount.fs_type);
         }
 
         // Fall back to volume_context
@@ -369,7 +369,7 @@ impl NodeService {
             .map(|s| s.as_str())
             .unwrap_or("");
 
-        platform::validate_fs_type(fs_type_raw)
+        Platform::validate_fs_type(fs_type_raw)
     }
 
     /// Check if a block volume is staged by checking for an active target session.
@@ -378,12 +378,12 @@ impl NodeService {
     /// We check both iSCSI and NVMeoF based on the derived target names.
     fn is_block_volume_staged(volume_id: &str) -> bool {
         let iqn = Self::derive_iqn(volume_id);
-        if platform::is_iscsi_connected(&iqn) {
+        if Platform::is_iscsi_connected(&iqn) {
             return true;
         }
 
         let nqn = Self::derive_nqn(volume_id);
-        platform::is_nvmeof_connected(&nqn)
+        Platform::is_nvmeof_connected(&nqn)
     }
 
     /// Find the block device for a volume by querying active sessions.
@@ -392,14 +392,14 @@ impl NodeService {
     fn find_block_device(volume_id: &str) -> Result<String, Status> {
         // Try iSCSI first
         let iqn = Self::derive_iqn(volume_id);
-        if platform::is_iscsi_connected(&iqn) {
-            return platform::find_iscsi_device(&iqn);
+        if Platform::is_iscsi_connected(&iqn) {
+            return Platform::find_iscsi_device(&iqn);
         }
 
         // Try NVMeoF
         let nqn = Self::derive_nqn(volume_id);
-        if platform::is_nvmeof_connected(&nqn) {
-            return platform::find_nvmeof_device(&nqn);
+        if Platform::is_nvmeof_connected(&nqn) {
+            return Platform::find_nvmeof_device(&nqn);
         }
 
         Err(Status::failed_precondition(format!(
@@ -481,7 +481,7 @@ impl csi::node_server::Node for NodeService {
             }
         } else {
             // Mount volume: check if mounted
-            if platform::is_mounted(staging_target_path)? {
+            if Platform::is_mounted(staging_target_path)? {
                 info!(staging_target_path = %staging_target_path, "Volume already staged");
                 return Ok(Response::new(csi::NodeStageVolumeResponse {}));
             }
@@ -489,9 +489,9 @@ impl csi::node_server::Node for NodeService {
 
         // Connect to target and get device
         let device = match export_type.to_lowercase().as_str() {
-            "iscsi" => platform::connect_iscsi(target_name, portal)?,
+            "iscsi" => Platform::connect_iscsi(target_name, portal)?,
             "nvmeof" | "nvme" => {
-                platform::connect_nvmeof(target_name, transport_addr, transport_port)?
+                Platform::connect_nvmeof(target_name, transport_addr, transport_port)?
             }
             other => {
                 return Err(Status::invalid_argument(format!(
@@ -514,12 +514,12 @@ impl csi::node_server::Node for NodeService {
             let fs_type =
                 Self::get_fs_type_from_capability(&req.volume_capability, volume_context)?;
 
-            if platform::needs_formatting(&device)? {
-                platform::format_device(&device, fs_type)?;
+            if Platform::needs_formatting(&device)? {
+                Platform::format_device(&device, fs_type)?;
             }
 
             // Mount the device to staging path
-            platform::mount_device(&device, staging_target_path, fs_type)?;
+            Platform::mount_device(&device, staging_target_path, fs_type)?;
 
             info!(
                 volume_id = %volume_id,
@@ -557,7 +557,7 @@ impl csi::node_server::Node for NodeService {
 
         // Determine volume type: if staging path is mounted, it's a filesystem volume
         // Block volumes don't mount anything, they just have an active session
-        let is_mounted = platform::is_mounted(staging_target_path)?;
+        let is_mounted = Platform::is_mounted(staging_target_path)?;
 
         info!(
             volume_id = %volume_id,
@@ -568,7 +568,7 @@ impl csi::node_server::Node for NodeService {
 
         if is_mounted {
             // Filesystem volume: unmount from staging path
-            platform::unmount(staging_target_path)?;
+            Platform::unmount(staging_target_path)?;
         }
         // Block volumes have no mount to clean up
 
@@ -670,7 +670,7 @@ impl csi::node_server::Node for NodeService {
         } else {
             // Mount volume: bind mount from staging
             // Check if staging path is mounted
-            if !platform::is_mounted(staging_target_path)? {
+            if !Platform::is_mounted(staging_target_path)? {
                 return Err(Status::failed_precondition(format!(
                     "Volume not staged at {}",
                     staging_target_path
@@ -678,13 +678,13 @@ impl csi::node_server::Node for NodeService {
             }
 
             // Check if already published
-            if platform::is_mounted(target_path)? {
+            if Platform::is_mounted(target_path)? {
                 info!(target_path = %target_path, "Volume already published");
                 return Ok(Response::new(csi::NodePublishVolumeResponse {}));
             }
 
             // Create bind mount from staging to target
-            platform::bind_mount(staging_target_path, target_path)?;
+            Platform::bind_mount(staging_target_path, target_path)?;
 
             // Handle readonly mount if requested
             if req.readonly {
@@ -701,7 +701,7 @@ impl csi::node_server::Node for NodeService {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     error!(stderr = %stderr, target_path = %target_path, "Failed to set readonly mount");
                     // Unmount and fail - readonly was explicitly requested
-                    if let Err(e) = platform::unmount(target_path) {
+                    if let Err(e) = Platform::unmount(target_path) {
                         warn!(error = %e, "Failed to unmount after readonly failure");
                     }
                     return Err(Status::internal(format!(
@@ -769,7 +769,7 @@ impl csi::node_server::Node for NodeService {
             info!(volume_id = %volume_id, target_path = %target_path, "Block volume unpublished");
         } else {
             // Mount volume: unmount from target path
-            platform::unmount(target_path)?;
+            Platform::unmount(target_path)?;
 
             // Try to remove the target directory
             if target.exists()

@@ -13,10 +13,9 @@ use std::process::Command;
 use tonic::Status;
 use tracing::{debug, error, info, warn};
 
-use super::PlatformResult;
+use super::{PlatformResult, StorageOps};
 
 /// Default filesystem type for Linux
-#[allow(dead_code)] // Platform constant for future use
 pub const DEFAULT_FS_TYPE: &str = "ext4";
 
 /// Check if an iSCSI target is currently connected.
@@ -879,7 +878,6 @@ pub fn validate_fs_type(fs_type: &str) -> PlatformResult<&'static str> {
 }
 
 /// Get the default filesystem type for Linux.
-#[allow(dead_code)] // Platform API for future use
 pub fn default_fs_type() -> &'static str {
     DEFAULT_FS_TYPE
 }
@@ -927,5 +925,82 @@ mod tests {
         assert!(!is_nvme_namespace_device("/dev/nvme"));
         assert!(!is_nvme_namespace_device(""));
         assert!(!is_nvme_namespace_device("/dev/nvme0n")); // Missing namespace number
+    }
+}
+
+// ============================================================================
+// StorageOps trait implementation
+// ============================================================================
+
+/// Linux platform marker struct for compile-time platform selection.
+pub struct LinuxPlatform;
+
+impl StorageOps for LinuxPlatform {
+    fn is_iscsi_connected(target_iqn: &str) -> bool {
+        is_iscsi_connected(target_iqn)
+    }
+
+    fn is_nvmeof_connected(target_nqn: &str) -> bool {
+        is_nvmeof_connected(target_nqn)
+    }
+
+    fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<String> {
+        connect_iscsi(target_iqn, portal)
+    }
+
+    fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
+        find_iscsi_device(target_iqn)
+    }
+
+    fn disconnect_iscsi(target_iqn: &str) -> PlatformResult<()> {
+        disconnect_iscsi(target_iqn)
+    }
+
+    fn connect_nvmeof(
+        target_nqn: &str,
+        transport_addr: Option<&str>,
+        transport_port: Option<&str>,
+    ) -> PlatformResult<String> {
+        connect_nvmeof(target_nqn, transport_addr, transport_port)
+    }
+
+    fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
+        find_nvmeof_device(target_nqn)
+    }
+
+    fn disconnect_nvmeof(target_nqn: &str) -> PlatformResult<()> {
+        disconnect_nvmeof(target_nqn)
+    }
+
+    fn format_device(device: &str, fs_type: &str) -> PlatformResult<()> {
+        format_device(device, fs_type)
+    }
+
+    fn needs_formatting(device: &str) -> PlatformResult<bool> {
+        needs_formatting(device)
+    }
+
+    fn mount_device(device: &str, target: &str, fs_type: &str) -> PlatformResult<()> {
+        mount_device(device, target, fs_type)
+    }
+
+    fn bind_mount(source: &str, target: &str) -> PlatformResult<()> {
+        bind_mount(source, target)
+    }
+
+    fn unmount(target: &str) -> PlatformResult<()> {
+        unmount(target)
+    }
+
+    fn is_mounted(target: &str) -> PlatformResult<bool> {
+        is_mounted(target)
+    }
+
+    fn validate_fs_type(fs_type: &str) -> PlatformResult<&'static str> {
+        validate_fs_type(fs_type)
+    }
+
+    fn default_fs_type() -> &'static str {
+        default_fs_type()
     }
 }

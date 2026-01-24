@@ -6,8 +6,11 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::process::Command;
-use std::sync::RwLock;
-use tracing::{debug, info, instrument, warn};
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use tokio::sync::{RwLock as TokioRwLock, mpsc, oneshot};
+use tracing::{debug, error, info, instrument, warn};
 
 use super::error::{CtlError, Result};
 use super::types::{AuthConfig, DevicePath, ExportType, Iqn, Nqn, TargetName};
@@ -347,6 +350,148 @@ impl CtlManager {
         info!("Successfully reloaded ctld configuration");
         Ok(())
     }
+}
+
+// ============================================================================
+// Serialized Config Writer
+// ============================================================================
+
+/// Default debounce duration for config writes.
+/// Multiple write requests within this window are batched into one write.
+const CONFIG_WRITE_DEBOUNCE_MS: u64 = 50;
+
+/// A write request with an optional response channel.
+struct WriteRequest {
+    /// Channel to send the result back to the caller.
+    /// If None, this is a fire-and-forget request.
+    response_tx: Option<oneshot::Sender<Result<()>>>,
+}
+
+/// Handle for requesting config writes.
+///
+/// This is a cloneable sender that can be passed to multiple tasks.
+/// Write requests are debounced and serialized by the background writer task.
+#[derive(Clone)]
+pub struct ConfigWriterHandle {
+    tx: mpsc::Sender<WriteRequest>,
+}
+
+impl ConfigWriterHandle {
+    /// Request a config write and wait for completion.
+    ///
+    /// This blocks until the config is written and ctld is reloaded.
+    /// Use this for CSI operations that must guarantee the volume is
+    /// accessible before returning success.
+    ///
+    /// Multiple concurrent requests are batched - all waiters receive
+    /// the result of the same write operation.
+    pub async fn write_config(&self) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+
+        self.tx
+            .send(WriteRequest {
+                response_tx: Some(response_tx),
+            })
+            .await
+            .map_err(|_| CtlError::ConfigError("config writer task shut down".into()))?;
+
+        response_rx
+            .await
+            .map_err(|_| CtlError::ConfigError("config writer task dropped response".into()))?
+    }
+
+    /// Request a config write without waiting for completion.
+    ///
+    /// Use this only for non-critical operations where you don't need
+    /// to guarantee the write completed before continuing.
+    pub fn request_write_async(&self) {
+        let _ = self.tx.try_send(WriteRequest { response_tx: None });
+    }
+}
+
+/// Spawn the background config writer task.
+///
+/// Returns a handle that can be used to request config writes.
+/// The task will run until the handle is dropped (all senders closed).
+///
+/// # Arguments
+/// * `ctl_manager` - Arc to the CtlManager (for calling write_config)
+/// * `debounce_ms` - Debounce duration in milliseconds (0 to disable)
+pub fn spawn_config_writer(
+    ctl_manager: Arc<TokioRwLock<CtlManager>>,
+    debounce_ms: Option<u64>,
+) -> ConfigWriterHandle {
+    let (tx, rx) = mpsc::channel::<WriteRequest>(32);
+    let debounce = Duration::from_millis(debounce_ms.unwrap_or(CONFIG_WRITE_DEBOUNCE_MS));
+
+    tokio::spawn(config_writer_task(ctl_manager, rx, debounce));
+
+    ConfigWriterHandle { tx }
+}
+
+/// Background task that handles serialized config writes with debouncing.
+async fn config_writer_task(
+    ctl_manager: Arc<TokioRwLock<CtlManager>>,
+    mut rx: mpsc::Receiver<WriteRequest>,
+    debounce: Duration,
+) {
+    info!("Config writer task started (debounce: {:?})", debounce);
+
+    while let Some(first_request) = rx.recv().await {
+        // Collect response channels from this batch
+        let mut response_channels: Vec<oneshot::Sender<Result<()>>> = Vec::new();
+        if let Some(tx) = first_request.response_tx {
+            response_channels.push(tx);
+        }
+
+        // Debounce: wait for more requests to batch
+        if !debounce.is_zero() {
+            tokio::time::sleep(debounce).await;
+        }
+
+        // Drain any pending requests (they'll be handled by this write)
+        while let Ok(req) = rx.try_recv() {
+            if let Some(tx) = req.response_tx {
+                response_channels.push(tx);
+            }
+        }
+
+        if !response_channels.is_empty() {
+            debug!(
+                "Batching {} write requests into single operation",
+                response_channels.len()
+            );
+        }
+
+        // Perform the actual write
+        let result = {
+            let ctl = ctl_manager.read().await;
+            ctl.write_config()
+        };
+
+        // Log the result
+        match &result {
+            Ok(()) => debug!("Config write completed successfully"),
+            Err(e) => error!("Config write failed: {}", e),
+        }
+
+        // Notify all waiters with the result
+        // Convert the result to a cloneable form (error as string)
+        let send_result: Result<()> = match &result {
+            Ok(()) => Ok(()),
+            Err(e) => Err(CtlError::ConfigError(e.to_string())),
+        };
+
+        for tx in response_channels {
+            // Clone the wrapped result for each waiter
+            let _ = tx.send(match &send_result {
+                Ok(()) => Ok(()),
+                Err(e) => Err(CtlError::ConfigError(e.to_string())),
+            });
+        }
+    }
+
+    info!("Config writer task shutting down");
 }
 
 #[cfg(test)]

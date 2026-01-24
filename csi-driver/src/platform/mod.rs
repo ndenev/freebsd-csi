@@ -3,6 +3,16 @@
 //! Provides platform-specific implementations for iSCSI, NVMeoF, filesystem
 //! operations, and bind mounts. Uses compile-time platform selection via
 //! `#[cfg(target_os)]` for zero runtime overhead.
+//!
+//! # Usage
+//!
+//! ```ignore
+//! use crate::platform::Platform;
+//!
+//! // Platform is a type alias to the current OS implementation
+//! let device = Platform::connect_iscsi(target_iqn, portal)?;
+//! Platform::format_device(&device, "ext4")?;
+//! ```
 
 #[cfg(target_os = "freebsd")]
 mod freebsd;
@@ -10,21 +20,23 @@ mod freebsd;
 #[cfg(target_os = "linux")]
 mod linux;
 
-#[cfg(target_os = "freebsd")]
-pub use freebsd::*;
-
-#[cfg(target_os = "linux")]
-pub use linux::*;
-
 use tonic::Status;
 
 /// Result type for platform operations
 pub type PlatformResult<T> = Result<T, Status>;
 
 /// Platform-agnostic interface for storage operations.
-/// Each platform module implements these functions.
-#[allow(dead_code)] // API trait for potential future use
+///
+/// Each platform (FreeBSD, Linux) implements this trait on a marker struct,
+/// providing compile-time enforcement that all platforms support the same
+/// operations with matching signatures.
 pub trait StorageOps {
+    /// Check if an iSCSI target is currently connected.
+    fn is_iscsi_connected(target_iqn: &str) -> bool;
+
+    /// Check if an NVMeoF target is currently connected.
+    fn is_nvmeof_connected(target_nqn: &str) -> bool;
+
     /// Connect to an iSCSI target and return the device path.
     fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<String>;
 
@@ -71,3 +83,10 @@ pub trait StorageOps {
     /// Get the default filesystem type for this platform.
     fn default_fs_type() -> &'static str;
 }
+
+// Re-export the platform-specific marker struct as `Platform`
+#[cfg(target_os = "freebsd")]
+pub use freebsd::FreeBsdPlatform as Platform;
+
+#[cfg(target_os = "linux")]
+pub use linux::LinuxPlatform as Platform;

@@ -6,7 +6,10 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
+use std::io::Write as IoWrite;
 use std::path::Path;
+
+use tempfile::NamedTempFile;
 
 use uclicious::{DEFAULT_DUPLICATE_STRATEGY, Priority, Uclicious};
 
@@ -20,12 +23,6 @@ use super::error::{CtlError, Result};
 pub trait ToUcl {
     /// Serialize to UCL string with the given indentation level.
     fn to_ucl(&self, indent: usize) -> String;
-
-    /// Serialize to UCL string with no indentation.
-    #[allow(dead_code)]
-    fn to_ucl_string(&self) -> String {
-        self.to_ucl(0)
-    }
 }
 
 /// Helper to create indentation string
@@ -533,20 +530,6 @@ impl UclConfigManager {
         Ok(user_content)
     }
 
-    /// Write the config file with user content + CSI-managed targets (no auth groups).
-    ///
-    /// This is a convenience wrapper around `write_config_with_auth` for targets
-    /// that don't require authentication.
-    #[allow(dead_code)]
-    pub fn write_config(
-        &self,
-        user_content: &str,
-        iscsi_targets: &[(String, Target)],
-        nvme_controllers: &[(String, Controller)],
-    ) -> Result<()> {
-        self.write_config_with_auth(user_content, iscsi_targets, nvme_controllers, &[])
-    }
-
     /// Write the config file with user content + CSI-managed targets + auth groups.
     ///
     /// This extended version supports per-volume authentication groups for CHAP.
@@ -592,14 +575,23 @@ impl UclConfigManager {
         content.push_str(CSI_SECTION_END);
         content.push('\n');
 
-        // Write atomically via temp file
-        let temp_path = format!("{}.tmp", self.config_path);
-        fs::write(&temp_path, &content)?;
+        // Write atomically via unique temp file in the same directory.
+        // Using NamedTempFile ensures each concurrent write gets a unique file,
+        // avoiding race conditions where multiple writers use the same temp path.
+        let config_dir = Path::new(&self.config_path)
+            .parent()
+            .unwrap_or(Path::new("/etc"));
 
-        fs::rename(&temp_path, &self.config_path).map_err(|e| {
-            let _ = fs::remove_file(&temp_path);
-            CtlError::Io(e)
-        })?;
+        let mut temp_file = NamedTempFile::new_in(config_dir).map_err(CtlError::Io)?;
+
+        temp_file
+            .write_all(content.as_bytes())
+            .map_err(CtlError::Io)?;
+
+        // Persist and rename atomically
+        temp_file
+            .persist(&self.config_path)
+            .map_err(|e| CtlError::Io(e.error))?;
 
         Ok(())
     }

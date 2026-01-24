@@ -18,7 +18,8 @@ use tracing::{debug, error, info, instrument, warn};
 const DEFAULT_MAX_CONCURRENT_OPS: usize = 10;
 
 use crate::ctl::{
-    AuthConfig, CtlError, CtlManager, ExportType as CtlExportType, IscsiChapAuth, NvmeAuth,
+    AuthConfig, ConfigWriterHandle, CtlError, CtlManager, ExportType as CtlExportType,
+    IscsiChapAuth, NvmeAuth, spawn_config_writer,
 };
 use crate::metrics::{self, OperationTimer};
 use crate::zfs::{VolumeMetadata as ZfsVolumeMetadata, ZfsManager};
@@ -163,6 +164,8 @@ pub struct StorageService {
     zfs: Arc<RwLock<ZfsManager>>,
     /// Unified CTL manager (handles both iSCSI and NVMeoF)
     ctl: Arc<RwLock<CtlManager>>,
+    /// Handle to the serialized config writer task
+    config_writer: ConfigWriterHandle,
     /// Volume metadata tracking
     volumes: Arc<RwLock<HashMap<String, VolumeMetadata>>>,
     /// Snapshot metadata tracking
@@ -185,9 +188,15 @@ impl StorageService {
         ctl: Arc<RwLock<CtlManager>>,
         max_concurrent_ops: usize,
     ) -> Self {
+        // Spawn the serialized config writer task.
+        // This ensures all config writes are serialized with debouncing,
+        // preventing race conditions during parallel volume operations.
+        let config_writer = spawn_config_writer(ctl.clone(), None);
+
         Self {
             zfs,
             ctl,
+            config_writer,
             volumes: Arc::new(RwLock::new(HashMap::new())),
             snapshots: Arc::new(RwLock::new(HashMap::new())),
             ops_semaphore: Arc::new(Semaphore::new(max_concurrent_ops)),
@@ -327,11 +336,10 @@ impl StorageService {
         drop(volumes);
 
         // Write unified UCL config after reconciliation
-        if reconciled_count > 0 {
-            let ctl = self.ctl.read().await;
-            if let Err(e) = ctl.write_config() {
-                warn!("Failed to write CTL config after reconciliation: {}", e);
-            }
+        if reconciled_count > 0
+            && let Err(e) = self.config_writer.write_config().await
+        {
+            warn!("Failed to write CTL config after reconciliation: {}", e);
         }
 
         info!("Reconciled {} export(s)", reconciled_count);
@@ -679,16 +687,13 @@ impl StorageAgent for StorageService {
         // Write UCL config and reload ctld
         // CRITICAL: If this fails, ctld won't know about the export and
         // initiators won't be able to connect. We must return error.
-        {
-            let ctl = self.ctl.read().await;
-            if let Err(e) = ctl.write_config() {
-                error!("Failed to write CTL config: {}", e);
-                timer.failure("config_write_error");
-                return Err(Status::internal(format!(
-                    "Volume created but CTL config write failed: {}. Target may be inaccessible.",
-                    e
-                )));
-            }
+        if let Err(e) = self.config_writer.write_config().await {
+            error!("Failed to write CTL config: {}", e);
+            timer.failure("config_write_error");
+            return Err(Status::internal(format!(
+                "Volume created but CTL config write failed: {}. Target may be inaccessible.",
+                e
+            )));
         }
 
         // Store in-memory metadata (ZFS metadata was set atomically during creation)
@@ -872,25 +877,15 @@ impl StorageAgent for StorageService {
 
         // Try to unexport the volume via unified CTL manager
         // This is idempotent - if already unexported, we continue
-        {
+        // Track whether we need to write config
+        let needs_config_write = {
             let ctl = self.ctl.read().await;
             match ctl.unexport_volume(&req.volume_id) {
-                Ok(()) => {
-                    // Write UCL config with updated (removed) export entries
-                    // CRITICAL: If this fails, export will reappear on ctld restart
-                    // pointing to a deleted zvol, causing errors for initiators.
-                    if let Err(e) = ctl.write_config() {
-                        error!("Failed to write CTL config after unexport: {}", e);
-                        timer.failure("config_write_error");
-                        return Err(Status::internal(format!(
-                            "Unexport succeeded but CTL config write failed: {}. Export may reappear on restart.",
-                            e
-                        )));
-                    }
-                }
+                Ok(()) => true,
                 Err(CtlError::TargetNotFound(_)) => {
                     // Already unexported - this is fine (idempotent per CSI spec)
                     debug!("Volume {} already unexported (idempotent)", req.volume_id);
+                    false
                 }
                 Err(e) => {
                     // Unexport failed - export is still active.
@@ -904,6 +899,18 @@ impl StorageAgent for StorageService {
                     )));
                 }
             }
+        };
+
+        // Write UCL config with updated (removed) export entries
+        // CRITICAL: If this fails, export will reappear on ctld restart
+        // pointing to a deleted zvol, causing errors for initiators.
+        if needs_config_write && let Err(e) = self.config_writer.write_config().await {
+            error!("Failed to write CTL config after unexport: {}", e);
+            timer.failure("config_write_error");
+            return Err(Status::internal(format!(
+                "Unexport succeeded but CTL config write failed: {}. Export may reappear on restart.",
+                e
+            )));
         }
 
         // Clear ZFS metadata before deleting (for consistency)

@@ -4,7 +4,7 @@ pub mod types;
 pub mod ucl_config;
 
 // Re-exports for module API
-pub use ctl_manager::CtlManager;
+pub use ctl_manager::{ConfigWriterHandle, CtlManager, spawn_config_writer};
 pub use error::CtlError;
 pub use types::ExportType;
 

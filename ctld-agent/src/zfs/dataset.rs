@@ -64,6 +64,13 @@ fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Serialize metadata into a ZFS property string (key=value format).
+fn format_metadata_property(metadata: &VolumeMetadata) -> Result<String> {
+    let json = serde_json::to_string(metadata)
+        .map_err(|e| ZfsError::ParseError(format!("failed to serialize metadata: {}", e)))?;
+    Ok(format!("{}={}", METADATA_PROPERTY, json))
+}
+
 /// Represents a ZFS dataset (filesystem or volume)
 #[derive(Debug, Clone)]
 pub struct Dataset {
@@ -140,10 +147,7 @@ impl ZfsManager {
 
         let full_name = self.full_path(name);
 
-        // Serialize metadata for ZFS property
-        let metadata_json = serde_json::to_string(metadata)
-            .map_err(|e| ZfsError::ParseError(format!("failed to serialize metadata: {}", e)))?;
-        let metadata_property = format!("{}={}", METADATA_PROPERTY, metadata_json);
+        let metadata_property = format_metadata_property(metadata)?;
 
         info!(volume = %full_name, size_bytes, "Creating ZFS volume with metadata");
 
@@ -642,11 +646,7 @@ impl ZfsManager {
 
         let snapshot_full = format!("{}@{}", self.full_path(source_volume), snap_name);
         let target_full = self.full_path(target_volume);
-
-        // Serialize metadata for ZFS property
-        let metadata_json = serde_json::to_string(metadata)
-            .map_err(|e| ZfsError::ParseError(format!("failed to serialize metadata: {}", e)))?;
-        let metadata_property = format!("{}={}", METADATA_PROPERTY, metadata_json);
+        let metadata_property = format_metadata_property(metadata)?;
 
         info!(
             snapshot = %snapshot_full,
@@ -714,11 +714,7 @@ impl ZfsManager {
 
         let snapshot_full = format!("{}@{}", self.full_path(source_volume), snap_name);
         let target_full = self.full_path(target_volume);
-
-        // Serialize metadata for ZFS property
-        let metadata_json = serde_json::to_string(metadata)
-            .map_err(|e| ZfsError::ParseError(format!("failed to serialize metadata: {}", e)))?;
-        let metadata_property = format!("{}={}", METADATA_PROPERTY, metadata_json);
+        let metadata_property = format_metadata_property(metadata)?;
 
         info!(
             snapshot = %snapshot_full,
