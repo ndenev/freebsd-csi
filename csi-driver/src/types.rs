@@ -259,7 +259,11 @@ pub struct EndpointParseError(String);
 
 impl Display for EndpointParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "invalid endpoint '{}': expected 'host:port' or 'host'", self.0)
+        write!(
+            f,
+            "invalid endpoint '{}': expected 'host:port' or 'host'",
+            self.0
+        )
     }
 }
 
