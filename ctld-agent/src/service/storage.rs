@@ -182,19 +182,6 @@ struct VolumeMetadata {
     auth: AuthConfig,
 }
 
-/// Internal tracking of snapshot metadata
-#[derive(Debug, Clone)]
-struct SnapshotMetadata {
-    /// Snapshot ID (format: volume_id@snap_name)
-    id: String,
-    /// Source volume ID
-    source_volume_id: String,
-    /// Snapshot name
-    name: String,
-    /// Creation timestamp (Unix seconds)
-    creation_time: i64,
-}
-
 /// gRPC Storage Agent service
 ///
 /// Uses a semaphore to limit concurrent operations and prevent overload.
@@ -208,8 +195,8 @@ pub struct StorageService {
     config_writer: ConfigWriterHandle,
     /// Volume metadata tracking
     volumes: Arc<RwLock<HashMap<String, VolumeMetadata>>>,
-    /// Snapshot metadata tracking
-    snapshots: Arc<RwLock<HashMap<String, SnapshotMetadata>>>,
+    // Note: Snapshot metadata is stored in ZFS properties and queried directly.
+    // No in-memory cache needed - ZFS is the single source of truth.
     /// Semaphore for rate limiting concurrent operations
     ops_semaphore: Arc<Semaphore>,
     /// Maximum concurrent operations (for error messages)
@@ -238,7 +225,6 @@ impl StorageService {
             ctl,
             config_writer,
             volumes: Arc::new(RwLock::new(HashMap::new())),
-            snapshots: Arc::new(RwLock::new(HashMap::new())),
             ops_semaphore: Arc::new(Semaphore::new(max_concurrent_ops)),
             max_concurrent_ops,
         }
@@ -1331,18 +1317,8 @@ impl StorageAgent for StorageService {
         let snapshot_id = format!("{}@{}", req.source_volume_id, req.name);
         let creation_time = unix_timestamp_now();
 
-        // Store metadata
-        let snap_metadata = SnapshotMetadata {
-            id: snapshot_id.clone(),
-            source_volume_id: req.source_volume_id.clone(),
-            name: req.name.clone(),
-            creation_time,
-        };
-
-        {
-            let mut snapshots = self.snapshots.write().await;
-            snapshots.insert(snapshot_id.clone(), snap_metadata);
-        }
+        // Note: Snapshot metadata is stored in ZFS properties by create_snapshot().
+        // ListSnapshots and GetSnapshot query ZFS directly, so no in-memory cache needed.
 
         let snapshot = Snapshot {
             id: snapshot_id,
@@ -1472,11 +1448,7 @@ impl StorageAgent for StorageService {
             }
         }
 
-        // Remove metadata
-        {
-            let mut snapshots = self.snapshots.write().await;
-            snapshots.remove(&req.snapshot_id);
-        }
+        // Note: No in-memory cache to update - ZFS is the source of truth.
 
         info!(
             "Deleted snapshot: {} (volume={}, snap={})",
@@ -1487,6 +1459,9 @@ impl StorageAgent for StorageService {
     }
 
     /// List snapshots, optionally filtered by source volume
+    ///
+    /// This queries ZFS directly for snapshots with the CSI metadata property,
+    /// ensuring the list survives restarts and always reflects the actual ZFS state.
     #[instrument(skip(self, request))]
     async fn list_snapshots(
         &self,
@@ -1498,14 +1473,20 @@ impl StorageAgent for StorageService {
             req.source_volume_id, req.max_entries, req.starting_token
         );
 
-        let snapshots_meta = self.snapshots.read().await;
+        // Query ZFS directly for all CSI snapshots
+        let csi_snapshots = {
+            let zfs = self.zfs.read().await;
+            zfs.list_csi_snapshots().map_err(|e| {
+                Status::internal(format!("failed to list snapshots from ZFS: {}", e))
+            })?
+        };
 
         // Filter by source volume if specified
-        let filtered: Vec<&SnapshotMetadata> = if req.source_volume_id.is_empty() {
-            snapshots_meta.values().collect()
+        let filtered: Vec<_> = if req.source_volume_id.is_empty() {
+            csi_snapshots
         } else {
-            snapshots_meta
-                .values()
+            csi_snapshots
+                .into_iter()
                 .filter(|s| s.source_volume_id == req.source_volume_id)
                 .collect()
         };
@@ -1514,11 +1495,11 @@ impl StorageAgent for StorageService {
         let snapshots: Vec<Snapshot> = filtered
             .iter()
             .map(|s| Snapshot {
-                id: s.id.clone(),
+                id: s.snapshot_id.clone(),
                 source_volume_id: s.source_volume_id.clone(),
                 name: s.name.clone(),
                 creation_time: s.creation_time,
-                size_bytes: 0,
+                size_bytes: 0, // ZFS snapshots don't consume space until divergence
             })
             .collect();
 
@@ -1531,6 +1512,9 @@ impl StorageAgent for StorageService {
     }
 
     /// Get a single snapshot by ID
+    ///
+    /// This queries ZFS directly for the snapshot, ensuring accurate results
+    /// that survive restarts.
     #[instrument(skip(self, request))]
     async fn get_snapshot(
         &self,
@@ -1543,20 +1527,27 @@ impl StorageAgent for StorageService {
             return Err(Status::invalid_argument("snapshot_id cannot be empty"));
         }
 
-        // Get metadata
-        let metadata = {
-            let snapshots = self.snapshots.read().await;
-            snapshots.get(&req.snapshot_id).cloned().ok_or_else(|| {
-                Status::not_found(format!("snapshot '{}' not found", req.snapshot_id))
+        // Query ZFS directly for all CSI snapshots and find the matching one
+        let csi_snapshots = {
+            let zfs = self.zfs.read().await;
+            zfs.list_csi_snapshots().map_err(|e| {
+                Status::internal(format!("failed to query snapshots from ZFS: {}", e))
             })?
         };
 
+        let snapshot_info = csi_snapshots
+            .into_iter()
+            .find(|s| s.snapshot_id == req.snapshot_id)
+            .ok_or_else(|| {
+                Status::not_found(format!("snapshot '{}' not found", req.snapshot_id))
+            })?;
+
         let snapshot = Snapshot {
-            id: metadata.id,
-            source_volume_id: metadata.source_volume_id,
-            name: metadata.name,
-            creation_time: metadata.creation_time,
-            size_bytes: 0,
+            id: snapshot_info.snapshot_id,
+            source_volume_id: snapshot_info.source_volume_id,
+            name: snapshot_info.name,
+            creation_time: snapshot_info.creation_time,
+            size_bytes: 0, // ZFS snapshots don't consume space until divergence
         };
 
         Ok(Response::new(GetSnapshotResponse {

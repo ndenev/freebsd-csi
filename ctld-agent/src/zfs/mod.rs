@@ -2,7 +2,7 @@ pub mod dataset;
 pub mod error;
 pub mod properties;
 
-pub use dataset::{Capacity, Dataset, FindSnapshotResult, ZfsManager};
+pub use dataset::{Capacity, CsiSnapshotInfo, Dataset, FindSnapshotResult, ZfsManager};
 // Re-export for module API
 #[allow(unused_imports)]
 pub use error::{Result, ZfsError};
