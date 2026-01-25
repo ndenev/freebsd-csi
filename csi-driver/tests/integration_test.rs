@@ -949,16 +949,18 @@ fn test_volume_provisioning_with_chap() {
 fn test_volume_publishing_flow() {
     let mut volume_context: HashMap<String, String> = HashMap::new();
     volume_context.insert(
-        "target_name".to_string(),
+        "targetName".to_string(),
         "iqn.2024-01.org.freebsd.csi:vol1".to_string(),
     );
-    volume_context.insert("lun_id".to_string(), "0".to_string());
-    volume_context.insert("export_type".to_string(), "iscsi".to_string());
+    volume_context.insert("lunId".to_string(), "0".to_string());
+    volume_context.insert("exportType".to_string(), "ISCSI".to_string());
+    volume_context.insert("endpoints".to_string(), "10.0.0.10:3260".to_string());
 
     let staging_path = "/var/lib/kubelet/plugins/kubernetes.io/csi/staging/vol1";
     let target_path = "/var/lib/kubelet/pods/pod/volumes/csi/vol1";
 
-    assert!(volume_context.contains_key("target_name"));
+    assert!(volume_context.contains_key("targetName"));
+    assert!(volume_context.contains_key("endpoints"));
     assert!(!staging_path.is_empty());
     assert!(!target_path.is_empty());
     assert!(staging_path.starts_with('/'));

@@ -343,28 +343,10 @@ impl ControllerService {
         };
         volume_context.insert("exportType".to_string(), export_type.to_string());
 
-        // Pass through portal/address info for node service (required on Linux)
-        // endpoints format: "ip:port,ip:port,..." (first endpoint used for single-path)
-        if let Some(endpoints) = parameters.get("endpoints")
-            && let Some(first_endpoint) = endpoints.split(',').next()
-        {
-            let endpoint = first_endpoint.trim();
-            match export_type {
-                ExportType::Iscsi => {
-                    // For iSCSI, pass as portal (ip:port format)
-                    volume_context.insert("portal".to_string(), endpoint.to_string());
-                }
-                ExportType::Nvmeof => {
-                    // For NVMeoF, split into addr and port
-                    if let Some((addr, port)) = endpoint.rsplit_once(':') {
-                        volume_context.insert("transport_addr".to_string(), addr.to_string());
-                        volume_context.insert("transport_port".to_string(), port.to_string());
-                    } else {
-                        // No port specified, use just the address
-                        volume_context.insert("transport_addr".to_string(), endpoint.to_string());
-                    }
-                }
-            }
+        // Pass through endpoints for node service (required for iSCSI/NVMeoF connection)
+        // Format: "host:port,host:port,..." - supports multipath when multiple endpoints provided
+        if let Some(endpoints) = parameters.get("endpoints") {
+            volume_context.insert("endpoints".to_string(), endpoints.clone());
         }
 
         // Pass through filesystem type for node service
