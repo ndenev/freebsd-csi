@@ -456,7 +456,6 @@ impl NodeService {
         // Fall back to volume_context
         let fs_type_raw = volume_context
             .get("fs_type")
-            .or_else(|| volume_context.get("fsType"))
             .map(|s| s.as_str())
             .unwrap_or("");
 
@@ -548,20 +547,9 @@ impl csi::node_server::Node for NodeService {
             .unwrap_or("iscsi");
 
         // Get portal/address info (required on Linux, optional on FreeBSD)
-        let portal = volume_context
-            .get("portal")
-            .or_else(|| volume_context.get("targetPortal"))
-            .map(|s| s.as_str());
-
-        let transport_addr = volume_context
-            .get("transport_addr")
-            .or_else(|| volume_context.get("transportAddr"))
-            .map(|s| s.as_str());
-
-        let transport_port = volume_context
-            .get("transport_port")
-            .or_else(|| volume_context.get("transportPort"))
-            .map(|s| s.as_str());
+        let portal = volume_context.get("portal").map(|s| s.as_str());
+        let transport_addr = volume_context.get("transport_addr").map(|s| s.as_str());
+        let transport_port = volume_context.get("transport_port").map(|s| s.as_str());
 
         // Check if already staged
         if is_block {

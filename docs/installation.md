@@ -257,7 +257,7 @@ helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
   --create-namespace \
   --set agent.endpoint=http://<FREEBSD-STORAGE-IP>:50051 \
   --set storageClassIscsi.create=true \
-  --set storageClassIscsi.parameters.portal=<FREEBSD-STORAGE-IP>:3260
+  --set storageClassIscsi.parameters.endpoints=<FREEBSD-STORAGE-IP>:3260
 
 # NVMeoF StorageClass (FreeBSD 15.0+)
 helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
@@ -265,7 +265,7 @@ helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
   --create-namespace \
   --set agent.endpoint=http://<FREEBSD-STORAGE-IP>:50051 \
   --set storageClassNvmeof.create=true \
-  --set storageClassNvmeof.parameters.transportAddr=<FREEBSD-STORAGE-IP>
+  --set storageClassNvmeof.parameters.endpoints=<FREEBSD-STORAGE-IP>:4420
 ```
 
 **Option 2: Create manually after installation**
@@ -279,8 +279,8 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
-  fsType: ext4
-  portal: "<FREEBSD-STORAGE-IP>:3260"
+  fs_type: ext4
+  endpoints: "<FREEBSD-STORAGE-IP>:3260"
 allowVolumeExpansion: true
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
@@ -295,9 +295,8 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: nvmeof
-  fsType: ext4
-  transportAddr: "<FREEBSD-STORAGE-IP>"
-  transportPort: "4420"
+  fs_type: ext4
+  endpoints: "<FREEBSD-STORAGE-IP>:4420"
 allowVolumeExpansion: true
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
