@@ -1,11 +1,10 @@
 //! CSI Node Service Implementation
 //!
-//! Handles volume staging and publishing on worker nodes using
+//! Handles volume staging and publishing on Linux worker nodes using
 //! iSCSI/NVMeoF connections and bind mounts.
 //!
 //! Platform-specific operations (iSCSI, NVMe, filesystem, bind mounts)
-//! are delegated to the `platform` module which provides compile-time
-//! platform selection for FreeBSD and Linux.
+//! are delegated to the `platform` module.
 //!
 //! ## Target Naming Convention
 //!
@@ -139,51 +138,22 @@ impl NodeService {
     fn detect_filesystem_type(path: &str) -> Result<String, Status> {
         Self::validate_path(path)?;
 
-        // Use df -T on Linux, or mount on FreeBSD to get filesystem type
-        #[cfg(target_os = "linux")]
-        {
-            let output = std::process::Command::new("df")
-                .args(["-T", path])
-                .output()
-                .map_err(|e| {
-                    error!(error = %e, "Failed to execute df -T");
-                    Status::internal(format!("Failed to detect filesystem type: {}", e))
-                })?;
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // df -T output: Filesystem Type ... (second column is type)
-            if let Some(line) = stdout.lines().nth(1)
-                && let Some(fs_type) = line.split_whitespace().nth(1)
-            {
-                return Ok(fs_type.to_string());
-            }
-        }
-
-        #[cfg(target_os = "freebsd")]
-        {
-            let output = std::process::Command::new("mount").output().map_err(|e| {
-                error!(error = %e, "Failed to execute mount");
+        let output = std::process::Command::new("df")
+            .args(["-T", path])
+            .output()
+            .map_err(|e| {
+                error!(error = %e, "Failed to execute df -T");
                 Status::internal(format!("Failed to detect filesystem type: {}", e))
             })?;
 
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // mount output: /dev/xxx on /path (fstype, options)
-            for line in stdout.lines() {
-                if line.contains(&format!(" on {} ", path))
-                    || line.contains(&format!(" on {} (", path))
-                {
-                    // Extract filesystem type from parentheses
-                    if let Some(start) = line.rfind('(') {
-                        let rest = &line[start + 1..];
-                        if let Some(fs_type) = rest.split(',').next() {
-                            return Ok(fs_type.trim().to_string());
-                        }
-                    }
-                }
-            }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // df -T output: Filesystem Type ... (second column is type)
+        if let Some(line) = stdout.lines().nth(1)
+            && let Some(fs_type) = line.split_whitespace().nth(1)
+        {
+            return Ok(fs_type.to_string());
         }
 
-        // Default to unknown
         Ok("unknown".to_string())
     }
 
@@ -191,15 +161,10 @@ impl NodeService {
     /// Returns true if resize was performed, false if not needed.
     ///
     /// Note: The underlying storage is a ZFS zvol on the FreeBSD storage node,
-    /// but the FILESYSTEM on top (formatted by the initiator) is typically:
-    /// - Linux initiators: ext4 or xfs
-    /// - FreeBSD initiators: ufs
-    ///
-    /// ZFS filesystem on a remote iSCSI target is not a valid use case.
+    /// but the FILESYSTEM on top (formatted by the initiator) is ext4 or xfs.
     fn resize_filesystem(path: &str, fs_type: &str) -> Result<bool, Status> {
         match fs_type {
             "ext4" | "ext3" | "ext2" => {
-                // Get the device for this mount point
                 let device = Self::get_mount_device(path)?;
                 info!(device = %device, fs_type = %fs_type, "Resizing ext filesystem");
 
@@ -244,26 +209,6 @@ impl NodeService {
                 }
                 Ok(true)
             }
-            "ufs" => {
-                // FreeBSD UFS: use growfs command
-                let device = Self::get_mount_device(path)?;
-                info!(device = %device, "Resizing UFS filesystem");
-
-                let output = std::process::Command::new("growfs")
-                    .args(["-y", &device])
-                    .output()
-                    .map_err(|e| {
-                        error!(error = %e, "Failed to execute growfs");
-                        Status::internal(format!("Failed to resize UFS filesystem: {}", e))
-                    })?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    error!(stderr = %stderr, "growfs failed");
-                    return Err(Status::internal(format!("growfs failed: {}", stderr)));
-                }
-                Ok(true)
-            }
             _ => {
                 warn!(fs_type = %fs_type, "Unknown filesystem type, skipping resize");
                 Ok(false)
@@ -273,87 +218,45 @@ impl NodeService {
 
     /// Get the device backing a mount point.
     ///
-    /// Uses platform-specific tools for reliable device lookup:
-    /// - Linux: `findmnt -n -o SOURCE` (preferred over df parsing)
-    /// - FreeBSD: parse `mount` output
+    /// Uses `findmnt -n -o SOURCE` for reliable device lookup.
     fn get_mount_device(path: &str) -> Result<String, Status> {
         Self::validate_path(path)?;
 
-        #[cfg(target_os = "linux")]
-        {
-            // Use findmnt for reliable device lookup on Linux
-            // findmnt -n -o SOURCE returns just the device path
-            let output = std::process::Command::new("findmnt")
-                .args(["-n", "-o", "SOURCE", path])
-                .output()
-                .map_err(|e| {
-                    error!(error = %e, "Failed to execute findmnt");
-                    Status::internal(format!("Failed to get mount device: {}", e))
-                })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                error!(path = %path, stderr = %stderr, "findmnt failed");
-                return Err(Status::internal(format!(
-                    "Path {} is not a mount point",
-                    path
-                )));
-            }
-
-            let device = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if device.is_empty() {
-                return Err(Status::internal(format!(
-                    "Could not determine device for mount point {}",
-                    path
-                )));
-            }
-
-            // Validate device path looks reasonable (starts with /dev/)
-            if !device.starts_with("/dev/") {
-                warn!(
-                    device = %device,
-                    path = %path,
-                    "Mount device is not a block device path"
-                );
-            }
-
-            Ok(device)
-        }
-
-        #[cfg(target_os = "freebsd")]
-        {
-            // Parse mount output on FreeBSD: device on /path (fstype, options)
-            let output = std::process::Command::new("mount").output().map_err(|e| {
-                error!(error = %e, "Failed to execute mount");
+        let output = std::process::Command::new("findmnt")
+            .args(["-n", "-o", "SOURCE", path])
+            .output()
+            .map_err(|e| {
+                error!(error = %e, "Failed to execute findmnt");
                 Status::internal(format!("Failed to get mount device: {}", e))
             })?;
 
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                // Match "device on /exact/path (" or "device on /exact/path ("
-                if line.contains(&format!(" on {} ", path))
-                    || line.contains(&format!(" on {} (", path))
-                {
-                    // Device is the first field before " on "
-                    if let Some(device) = line.split(" on ").next() {
-                        let device = device.trim().to_string();
-                        if !device.is_empty() {
-                            return Ok(device);
-                        }
-                    }
-                }
-            }
-
-            Err(Status::internal(format!(
-                "Could not find mount point {} in mount output",
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            error!(path = %path, stderr = %stderr, "findmnt failed");
+            return Err(Status::internal(format!(
+                "Path {} is not a mount point",
                 path
-            )))
+            )));
         }
 
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-        {
-            Err(Status::internal("Unsupported platform"))
+        let device = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if device.is_empty() {
+            return Err(Status::internal(format!(
+                "Could not determine device for mount point {}",
+                path
+            )));
         }
+
+        // Validate device path looks reasonable (starts with /dev/)
+        if !device.starts_with("/dev/") {
+            warn!(
+                device = %device,
+                path = %path,
+                "Mount device is not a block device path"
+            );
+        }
+
+        Ok(device)
     }
 
     /// Parse endpoint from volume_context.
