@@ -420,8 +420,20 @@ impl StorageService {
         dataset: &crate::zfs::Dataset,
         metadata: &VolumeMetadata,
     ) -> Volume {
-        // Use volsize for zvols (the actual volume capacity), fall back to referenced
-        let size_bytes = dataset.volsize.unwrap_or(dataset.referenced) as i64;
+        // Use volsize for zvols (the actual volume capacity)
+        // For zvols, volsize should always be present - if not, log warning and use 0
+        // Do NOT fall back to 'referenced' as it's semantically different (allocated space, not capacity)
+        let size_bytes = match dataset.volsize {
+            Some(volsize) => volsize as i64,
+            None => {
+                warn!(
+                    dataset = %dataset.name,
+                    referenced = dataset.referenced,
+                    "zvol missing volsize property - reporting 0 capacity"
+                );
+                0
+            }
+        };
         Volume {
             id: metadata.id.clone(),
             name: metadata.name.clone(),
@@ -1034,7 +1046,26 @@ impl StorageAgent for StorageService {
         {
             // Origin format: "pool/dataset/volume@snapshot_name"
             // Extract just the volume name from the full path
-            let source_volume = source_path.rsplit('/').next().unwrap_or(source_path);
+            // SAFETY: Validate the path contains '/' before extracting - if not, skip cleanup
+            let Some(source_volume) = source_path.rsplit('/').next() else {
+                warn!(
+                    origin = %origin,
+                    source_path = %source_path,
+                    "Unexpected origin path format (no '/'), skipping snapshot cleanup"
+                );
+                // Don't continue with cleanup - path parsing failed
+                return Ok(Response::new(DeleteVolumeResponse {}));
+            };
+
+            // Additional validation: volume name should not be empty or contain unexpected chars
+            if source_volume.is_empty() || source_volume.contains('@') {
+                warn!(
+                    origin = %origin,
+                    source_volume = %source_volume,
+                    "Invalid source volume name extracted, skipping snapshot cleanup"
+                );
+                return Ok(Response::new(DeleteVolumeResponse {}));
+            }
 
             info!(
                 deleted_clone = %volume_name,

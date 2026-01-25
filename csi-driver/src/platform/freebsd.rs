@@ -73,7 +73,12 @@ pub fn connect_iscsi(target_iqn: &str, _portal: Option<&str>) -> PlatformResult<
 }
 
 /// Find the device associated with an iSCSI target.
+///
+/// CRITICAL: This function MUST only return devices that are verified to belong
+/// to the requested target IQN. Returning the wrong device causes data corruption.
 pub fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
+    info!(target_iqn = %target_iqn, "Looking up iSCSI device");
+
     // Use iscsictl -L to list sessions and find the device
     let output = Command::new("iscsictl").arg("-L").output().map_err(|e| {
         error!(error = %e, "Failed to execute iscsictl -L");
@@ -81,40 +86,43 @@ pub fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
     })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    debug!(output = %stdout, "iscsictl -L output");
 
     // Parse output to find device for this target
-    // Format: "Target: <iqn> ... Device: da<N>"
+    // Format varies but typically: "Target: <iqn> ... da<N>"
+    // We need to find the line with our exact IQN and extract the device from it
     for line in stdout.lines() {
-        if line.contains(target_iqn) {
-            // Look for device in the same or following lines
-            if let Some(device_part) = line.split_whitespace().find(|s| s.starts_with("da")) {
-                return Ok(format!("/dev/{}", device_part));
+        // Must contain our exact target IQN
+        if !line.contains(target_iqn) {
+            continue;
+        }
+
+        debug!(line = %line, target_iqn = %target_iqn, "Found line matching target IQN");
+
+        // Extract device from this line - look for da<N> pattern
+        for token in line.split_whitespace() {
+            if token.starts_with("da") && token.chars().skip(2).all(|c| c.is_ascii_digit()) {
+                let device = format!("/dev/{}", token);
+                info!(
+                    device = %device,
+                    target_iqn = %target_iqn,
+                    "Found iSCSI device for target"
+                );
+                return Ok(device);
             }
         }
     }
 
-    // If not found in iscsictl output, try camcontrol
-    let output = Command::new("camcontrol")
-        .args(["devlist"])
-        .output()
-        .map_err(|e| {
-            error!(error = %e, "Failed to execute camcontrol");
-            Status::internal(format!("Failed to list devices: {}", e))
-        })?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Find the most recently added da device
-    for line in stdout.lines().rev() {
-        if let Some(start) = line.find("(da")
-            && let Some(end) = line[start..].find(',')
-        {
-            let device = &line[start + 1..start + end];
-            return Ok(format!("/dev/{}", device));
-        }
-    }
-
-    Err(Status::internal("Could not find device for iSCSI target"))
+    // CRITICAL: Do NOT fall back to returning an arbitrary device!
+    // If we can't find the device for this specific IQN, we must fail.
+    error!(
+        target_iqn = %target_iqn,
+        "No iSCSI device found for target IQN. Target may not be connected."
+    );
+    Err(Status::internal(format!(
+        "No iSCSI device found for target '{}'. Ensure the target is connected.",
+        target_iqn
+    )))
 }
 
 /// Disconnect from an iSCSI target.
@@ -180,7 +188,12 @@ pub fn connect_nvmeof(
 }
 
 /// Find the device associated with an NVMeoF target.
+///
+/// CRITICAL: This function MUST only return devices that are verified to belong
+/// to the requested target NQN. Returning the wrong device causes data corruption.
 pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
+    info!(target_nqn = %target_nqn, "Looking up NVMeoF device");
+
     // Use nvmecontrol devlist to find devices
     let output = Command::new("nvmecontrol")
         .arg("devlist")
@@ -191,21 +204,55 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
         })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    debug!(output = %stdout, "nvmecontrol devlist output");
 
     // Parse output to find device for this target
-    // Look for nvme<N>ns<M> or nda<N> devices
+    // CRITICAL: Only match lines that contain our EXACT target NQN
+    // Do NOT match generic "nvme" - that would return wrong devices!
     for line in stdout.lines() {
-        if line.contains(target_nqn) || line.contains("nvme") {
-            // Extract device name
-            if let Some(device) = line.split_whitespace().next()
-                && (device.starts_with("nvme") || device.starts_with("nda"))
-            {
-                return Ok(format!("/dev/{}", device));
+        // Must contain our exact target NQN - no fallback!
+        if !line.contains(target_nqn) {
+            continue;
+        }
+
+        debug!(line = %line, target_nqn = %target_nqn, "Found line matching target NQN");
+
+        // Extract device name from this line
+        // Look for nvme<N>ns<M> or nda<N> patterns
+        for token in line.split_whitespace() {
+            let is_nvme_ns = token.starts_with("nvme")
+                && token.contains("ns")
+                && token
+                    .chars()
+                    .skip(4)
+                    .take_while(|c| c.is_ascii_digit())
+                    .count()
+                    > 0;
+            let is_nda =
+                token.starts_with("nda") && token.chars().skip(3).all(|c| c.is_ascii_digit());
+
+            if is_nvme_ns || is_nda {
+                let device = format!("/dev/{}", token);
+                info!(
+                    device = %device,
+                    target_nqn = %target_nqn,
+                    "Found NVMeoF device for target"
+                );
+                return Ok(device);
             }
         }
     }
 
-    Err(Status::internal("Could not find device for NVMeoF target"))
+    // CRITICAL: Do NOT fall back to returning an arbitrary device!
+    // If we can't find the device for this specific NQN, we must fail.
+    error!(
+        target_nqn = %target_nqn,
+        "No NVMeoF device found for target NQN. Target may not be connected."
+    );
+    Err(Status::internal(format!(
+        "No NVMeoF device found for NQN '{}'. Ensure the target is connected.",
+        target_nqn
+    )))
 }
 
 /// Disconnect from an NVMeoF target.
