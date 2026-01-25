@@ -246,12 +246,18 @@ impl ControllerService {
     fn extract_content_source(
         content_source: Option<&csi::VolumeContentSource>,
         parameters: &HashMap<String, String>,
-    ) -> Option<VolumeContentSource> {
+    ) -> Result<Option<VolumeContentSource>, Status> {
         use crate::agent::volume_content_source::Source;
         use csi::volume_content_source::Type;
 
-        let source = content_source?;
-        let source_type = source.r#type.as_ref()?;
+        let source = match content_source {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let source_type = match source.r#type.as_ref() {
+            Some(t) => t,
+            None => return Ok(None),
+        };
 
         // Parse clone mode from StorageClass parameters
         let clone_mode = parameters
@@ -267,8 +273,9 @@ impl ControllerService {
         match source_type {
             Type::Snapshot(snapshot_source) => {
                 if snapshot_source.snapshot_id.is_empty() {
-                    warn!("VolumeContentSource has empty snapshot_id");
-                    return None;
+                    return Err(Status::invalid_argument(
+                        "VolumeContentSource has empty snapshot_id",
+                    ));
                 }
 
                 debug!(
@@ -277,15 +284,16 @@ impl ControllerService {
                     "Extracting content source from snapshot"
                 );
 
-                Some(VolumeContentSource {
+                Ok(Some(VolumeContentSource {
                     source: Some(Source::SnapshotId(snapshot_source.snapshot_id.clone())),
                     clone_mode: clone_mode as i32,
-                })
+                }))
             }
             Type::Volume(volume_source) => {
                 if volume_source.volume_id.is_empty() {
-                    warn!("VolumeContentSource has empty volume_id");
-                    return None;
+                    return Err(Status::invalid_argument(
+                        "VolumeContentSource has empty volume_id",
+                    ));
                 }
 
                 debug!(
@@ -294,10 +302,10 @@ impl ControllerService {
                     "Extracting content source from volume (PVC cloning)"
                 );
 
-                Some(VolumeContentSource {
+                Ok(Some(VolumeContentSource {
                     source: Some(Source::SourceVolumeId(volume_source.volume_id.clone())),
                     clone_mode: clone_mode as i32,
-                })
+                }))
             }
         }
     }
@@ -426,7 +434,7 @@ impl csi::controller_server::Controller for ControllerService {
 
         // Extract content source for snapshot restore
         let content_source =
-            Self::extract_content_source(req.volume_content_source.as_ref(), &req.parameters);
+            Self::extract_content_source(req.volume_content_source.as_ref(), &req.parameters)?;
 
         debug!(
             name = %name,
