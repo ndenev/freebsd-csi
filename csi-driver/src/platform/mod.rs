@@ -7,8 +7,10 @@
 //!
 //! ```ignore
 //! use crate::platform;
+//! use crate::types::{Endpoint, Endpoints};
 //!
-//! let device = platform::connect_iscsi(target_iqn, portal)?;
+//! let endpoints = Endpoints::parse("10.0.0.1:3260,10.0.0.2:3260", 3260)?;
+//! let device = platform::connect_iscsi(target_iqn, endpoints.as_slice())?;
 //! platform::format_device(&device, "ext4")?;
 //! ```
 

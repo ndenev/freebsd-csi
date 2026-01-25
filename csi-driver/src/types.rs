@@ -366,7 +366,7 @@ impl Endpoints {
     }
 
     /// Format all endpoints as comma-separated "host:port" strings.
-    /// This is the format expected by platform::connect_iscsi/connect_nvmeof.
+    /// Useful for logging and display purposes.
     pub fn to_portal_string(&self) -> String {
         self.endpoints
             .iter()

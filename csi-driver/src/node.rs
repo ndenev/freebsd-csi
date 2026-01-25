@@ -493,19 +493,8 @@ impl csi::node_server::Node for NodeService {
 
         // Connect to target and get device (multipath: connects to all endpoints)
         let device = match export_type {
-            ExportType::Iscsi => {
-                // Pass all portals as "host:port,host:port,..." for multipath
-                let portal_string = endpoints.to_portal_string();
-                platform::connect_iscsi(target_name, Some(&portal_string))?
-            }
-            ExportType::Nvmeof => {
-                // NVMeoF platform expects addresses and port separately
-                // Pass all hosts as "host,host,..." and use first endpoint's port
-                let hosts: Vec<_> = endpoints.as_slice().iter().map(|e| e.host.as_str()).collect();
-                let hosts_string = hosts.join(",");
-                let port_string = endpoints.first().map(|e| e.port.to_string()).unwrap_or_else(|| "4420".to_string());
-                platform::connect_nvmeof(target_name, Some(&hosts_string), Some(&port_string))?
-            }
+            ExportType::Iscsi => platform::connect_iscsi(target_name, endpoints.as_slice())?,
+            ExportType::Nvmeof => platform::connect_nvmeof(target_name, endpoints.as_slice())?,
         };
 
         if is_block {

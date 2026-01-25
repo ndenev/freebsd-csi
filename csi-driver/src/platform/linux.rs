@@ -14,6 +14,7 @@ use tonic::Status;
 use tracing::{debug, error, info, warn};
 
 use super::PlatformResult;
+use crate::types::Endpoint;
 
 /// Default filesystem type for Linux
 pub const DEFAULT_FS_TYPE: &str = "ext4";
@@ -125,7 +126,7 @@ fn is_nvme_native_multipath_enabled() -> bool {
 
 /// Connect to an iSCSI target using iscsiadm with support for multiple portals.
 ///
-/// When multiple portals are provided (comma-separated), this function will:
+/// When multiple endpoints are provided, this function will:
 /// 1. Run sendtargets discovery against each portal
 /// 2. Login to the target via each portal
 /// 3. Wait for dm-multipath to combine the paths
@@ -133,21 +134,19 @@ fn is_nvme_native_multipath_enabled() -> bool {
 ///
 /// # Arguments
 /// * `target_iqn` - The iSCSI Qualified Name of the target
-/// * `portal` - One or more portal addresses (comma-separated), e.g., "10.0.0.10:3260,10.0.0.11:3260"
-pub fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<String> {
-    let portal_str = portal.ok_or_else(|| {
-        Status::invalid_argument(
-            "Portal address is required for iSCSI on Linux (pass via volume_context)",
-        )
-    })?;
+/// * `endpoints` - One or more endpoints (host:port pairs) for multipath support
+pub fn connect_iscsi(target_iqn: &str, endpoints: &[Endpoint]) -> PlatformResult<String> {
+    if endpoints.is_empty() {
+        return Err(Status::invalid_argument(
+            "At least one endpoint is required for iSCSI connection",
+        ));
+    }
 
-    // Parse comma-separated portals for multipath support
-    let portals: Vec<&str> = portal_str.split(',').map(|s| s.trim()).collect();
-    let multipath_mode = portals.len() > 1;
+    let multipath_mode = endpoints.len() > 1;
 
     info!(
         target_iqn = %target_iqn,
-        portals = ?portals,
+        endpoints = ?endpoints.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
         multipath = multipath_mode,
         "Connecting to iSCSI target"
     );
@@ -156,10 +155,12 @@ pub fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<S
     let mut successful_logins = 0;
 
     // Step 1 & 2: Discover and login to each portal
-    for portal in &portals {
+    for endpoint in endpoints {
+        let portal = endpoint.to_portal_string();
+
         // Run sendtargets discovery to populate node database
         let discover_output = Command::new("iscsiadm")
-            .args(["-m", "discovery", "-t", "sendtargets", "-p", portal])
+            .args(["-m", "discovery", "-t", "sendtargets", "-p", &portal])
             .output()
             .map_err(|e| {
                 error!(error = %e, portal = %portal, "Failed to execute iscsiadm discovery");
@@ -182,7 +183,7 @@ pub fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<S
 
         // Login to the target via this portal
         let login_output = Command::new("iscsiadm")
-            .args(["-m", "node", "-T", target_iqn, "-p", portal, "--login"])
+            .args(["-m", "node", "-T", target_iqn, "-p", &portal, "--login"])
             .output()
             .map_err(|e| {
                 error!(error = %e, portal = %portal, "Failed to execute iscsiadm login");
@@ -406,37 +407,28 @@ pub fn disconnect_iscsi(target_iqn: &str) -> PlatformResult<()> {
     Ok(())
 }
 
-/// Connect to an NVMeoF target using nvme-cli with support for multiple transport addresses.
+/// Connect to an NVMeoF target using nvme-cli with support for multiple endpoints.
 ///
-/// When multiple transport addresses are provided (comma-separated), this function will:
-/// 1. Connect to each transport address
+/// When multiple endpoints are provided, this function will:
+/// 1. Connect to each endpoint (each with its own host:port)
 /// 2. Wait for multipath to combine the paths (native NVMe multipath or dm-multipath)
-/// 3. Return the multipath device (or single device if only one address)
+/// 3. Return the multipath device (or single device if only one endpoint)
 ///
 /// # Arguments
 /// * `target_nqn` - The NVMe Qualified Name of the target
-/// * `transport_addr` - One or more transport addresses (comma-separated), e.g., "10.0.0.10,10.0.0.11"
-/// * `transport_port` - The transport port (default: 4420)
-pub fn connect_nvmeof(
-    target_nqn: &str,
-    transport_addr: Option<&str>,
-    transport_port: Option<&str>,
-) -> PlatformResult<String> {
-    let addr_str = transport_addr.ok_or_else(|| {
-        Status::invalid_argument(
-            "Transport address is required for NVMeoF on Linux (pass via volume_context)",
-        )
-    })?;
+/// * `endpoints` - One or more endpoints (host:port pairs) for multipath support
+pub fn connect_nvmeof(target_nqn: &str, endpoints: &[Endpoint]) -> PlatformResult<String> {
+    if endpoints.is_empty() {
+        return Err(Status::invalid_argument(
+            "At least one endpoint is required for NVMeoF connection",
+        ));
+    }
 
-    // Parse comma-separated addresses for multipath support
-    let addresses: Vec<&str> = addr_str.split(',').map(|s| s.trim()).collect();
-    let multipath_mode = addresses.len() > 1;
-    let port = transport_port.unwrap_or("4420");
+    let multipath_mode = endpoints.len() > 1;
 
     info!(
         target_nqn = %target_nqn,
-        addresses = ?addresses,
-        port = %port,
+        endpoints = ?endpoints.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
         multipath = multipath_mode,
         "Connecting to NVMeoF target"
     );
@@ -444,15 +436,18 @@ pub fn connect_nvmeof(
     // Track successful connections
     let mut successful_connects = 0;
 
-    // Connect to each transport address
-    for addr in &addresses {
+    // Connect to each endpoint (each with its own host:port)
+    for endpoint in endpoints {
+        let addr = &endpoint.host;
+        let port = endpoint.port.to_string();
+
         let output = Command::new("nvme")
             .args([
-                "connect", "-t", "tcp", "-a", addr, "-s", port, "-n", target_nqn,
+                "connect", "-t", "tcp", "-a", addr, "-s", &port, "-n", target_nqn,
             ])
             .output()
             .map_err(|e| {
-                error!(error = %e, addr = %addr, "Failed to execute nvme connect");
+                error!(error = %e, endpoint = %endpoint, "Failed to execute nvme connect");
                 Status::internal(format!("Failed to execute nvme connect: {}", e))
             })?;
 
@@ -460,15 +455,15 @@ pub fn connect_nvmeof(
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Check if already connected
             if stderr.contains("already connected") {
-                info!(target_nqn = %target_nqn, addr = %addr, "NVMeoF target already connected");
+                info!(target_nqn = %target_nqn, endpoint = %endpoint, "NVMeoF target already connected");
                 successful_connects += 1;
             } else {
                 // In multipath mode, warn but continue; in single mode, fail
                 if multipath_mode {
                     warn!(
                         stderr = %stderr,
-                        addr = %addr,
-                        "nvme connect failed for address (continuing with other addresses)"
+                        endpoint = %endpoint,
+                        "nvme connect failed for endpoint (continuing with other endpoints)"
                     );
                 } else {
                     error!(stderr = %stderr, "nvme connect failed");
@@ -476,7 +471,7 @@ pub fn connect_nvmeof(
                 }
             }
         } else {
-            info!(target_nqn = %target_nqn, addr = %addr, "NVMeoF connect successful");
+            info!(target_nqn = %target_nqn, endpoint = %endpoint, "NVMeoF connect successful");
             successful_connects += 1;
         }
     }
@@ -484,7 +479,7 @@ pub fn connect_nvmeof(
     // Ensure at least one connection succeeded
     if successful_connects == 0 {
         return Err(Status::internal(
-            "Failed to connect to any NVMeoF transport address".to_string(),
+            "Failed to connect to any NVMeoF endpoint".to_string(),
         ));
     }
 
