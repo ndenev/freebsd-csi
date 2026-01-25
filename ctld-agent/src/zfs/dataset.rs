@@ -2,7 +2,9 @@ use std::process::{Command, Output};
 use tracing::{debug, info, instrument, warn};
 
 use super::error::{Result, ZfsError};
-use super::properties::{METADATA_PROPERTY, SNAPSHOT_ID_PROPERTY, VolumeMetadata};
+use super::properties::{
+    CURRENT_SCHEMA_VERSION, METADATA_PROPERTY, SNAPSHOT_ID_PROPERTY, VolumeMetadata,
+};
 
 /// Result of searching for a snapshot by its CSI snapshot ID
 #[derive(Debug)]
@@ -761,6 +763,17 @@ impl ZfsManager {
 
             match serde_json::from_str::<VolumeMetadata>(metadata_json) {
                 Ok(mut metadata) => {
+                    // Reject metadata from future versions we don't understand
+                    if metadata.schema_version > CURRENT_SCHEMA_VERSION {
+                        warn!(
+                            volume = %vol_name,
+                            metadata_version = metadata.schema_version,
+                            supported_version = CURRENT_SCHEMA_VERSION,
+                            "Metadata version too new, skipping (upgrade ctld-agent to manage this volume)"
+                        );
+                        continue;
+                    }
+
                     // Migrate old metadata formats to current version
                     if metadata.needs_migration() {
                         debug!(
