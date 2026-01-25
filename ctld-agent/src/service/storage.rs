@@ -130,7 +130,7 @@ fn unix_timestamp_now() -> i64 {
 }
 
 /// Apply pagination to a list of items
-fn paginate<T>(items: Vec<T>, max_entries: i32, starting_token: &str) -> (Vec<T>, String) {
+fn paginate<T>(items: Vec<T>, max_entries: i32, starting_token: &str) -> Result<(Vec<T>, String), Status> {
     let max_entries = if max_entries > 0 {
         max_entries as usize
     } else {
@@ -138,7 +138,9 @@ fn paginate<T>(items: Vec<T>, max_entries: i32, starting_token: &str) -> (Vec<T>
     };
 
     let start_idx = if !starting_token.is_empty() {
-        starting_token.parse::<usize>().unwrap_or(0)
+        starting_token
+            .parse::<usize>()
+            .map_err(|_| Status::invalid_argument("Invalid starting_token"))?
     } else {
         0
     };
@@ -158,7 +160,7 @@ fn paginate<T>(items: Vec<T>, max_entries: i32, starting_token: &str) -> (Vec<T>
         String::new()
     };
 
-    (paginated, next_token)
+    Ok((paginated, next_token))
 }
 
 /// Internal tracking of volume metadata
@@ -1225,7 +1227,7 @@ impl StorageAgent for StorageService {
         }
 
         let (paginated_volumes, next_token) =
-            paginate(volumes, req.max_entries, &req.starting_token);
+            paginate(volumes, req.max_entries, &req.starting_token)?;
 
         Ok(Response::new(ListVolumesResponse {
             volumes: paginated_volumes,
@@ -1520,7 +1522,7 @@ impl StorageAgent for StorageService {
             })
             .collect();
 
-        let (paginated, next_token) = paginate(snapshots, req.max_entries, &req.starting_token);
+        let (paginated, next_token) = paginate(snapshots, req.max_entries, &req.starting_token)?;
 
         Ok(Response::new(ListSnapshotsResponse {
             snapshots: paginated,
@@ -1588,5 +1590,52 @@ impl StorageAgent for StorageService {
             total_capacity: (capacity.available + capacity.used) as i64,
             used_capacity: capacity.used as i64,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_paginate_empty_token() {
+        let items = vec![1, 2, 3, 4, 5];
+        let (result, next_token) = paginate(items, 2, "").unwrap();
+        assert_eq!(result, vec![1, 2]);
+        assert_eq!(next_token, "2");
+    }
+
+    #[test]
+    fn test_paginate_valid_token() {
+        let items = vec![1, 2, 3, 4, 5];
+        let (result, next_token) = paginate(items, 2, "2").unwrap();
+        assert_eq!(result, vec![3, 4]);
+        assert_eq!(next_token, "4");
+    }
+
+    #[test]
+    fn test_paginate_invalid_token_returns_error() {
+        let items = vec![1, 2, 3, 4, 5];
+        let result = paginate(items, 2, "invalid");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("Invalid starting_token"));
+    }
+
+    #[test]
+    fn test_paginate_last_page() {
+        let items = vec![1, 2, 3, 4, 5];
+        let (result, next_token) = paginate(items, 2, "4").unwrap();
+        assert_eq!(result, vec![5]);
+        assert!(next_token.is_empty()); // No more pages
+    }
+
+    #[test]
+    fn test_paginate_zero_max_entries_returns_all() {
+        let items = vec![1, 2, 3];
+        let (result, next_token) = paginate(items, 0, "").unwrap();
+        assert_eq!(result, vec![1, 2, 3]);
+        assert!(next_token.is_empty());
     }
 }
