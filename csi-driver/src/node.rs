@@ -355,6 +355,57 @@ impl NodeService {
         }
     }
 
+    /// Parse endpoint from volume_context.
+    ///
+    /// Format: "ip:port,ip2:port2,..." for multipath support.
+    /// For now, uses first endpoint (multipath handled by OS).
+    ///
+    /// Default ports: iSCSI=3260, NVMeoF=4420
+    fn parse_endpoint(
+        volume_context: &std::collections::HashMap<String, String>,
+        export_type: &str,
+    ) -> Result<(String, u16), Status> {
+        let endpoints = volume_context
+            .get("endpoints")
+            .ok_or_else(|| Status::invalid_argument("Missing 'endpoints' in volume_context"))?;
+
+        // Take first endpoint (multipath handled by OS)
+        let first = endpoints.split(',').next().unwrap_or(endpoints).trim();
+
+        if first.is_empty() {
+            return Err(Status::invalid_argument("Empty endpoint in volume_context"));
+        }
+
+        // Default ports by protocol
+        let default_port: u16 = match export_type.to_lowercase().as_str() {
+            "iscsi" => 3260,
+            "nvmeof" | "nvme" => 4420,
+            _ => {
+                return Err(Status::invalid_argument(format!(
+                    "Unknown export type for endpoint parsing: {}",
+                    export_type
+                )))
+            }
+        };
+
+        // Parse ip:port - use rfind to handle IPv6 addresses with colons
+        if let Some(colon_idx) = first.rfind(':') {
+            let ip = &first[..colon_idx];
+            let port_str = &first[colon_idx + 1..];
+
+            // Check if this looks like a port (numeric)
+            if let Ok(port) = port_str.parse::<u16>() {
+                if ip.is_empty() {
+                    return Err(Status::invalid_argument("Empty IP address in endpoint"));
+                }
+                return Ok((ip.to_string(), port));
+            }
+        }
+
+        // No valid port specified, use default
+        Ok((first.to_string(), default_port))
+    }
+
     /// Derive the iSCSI target IQN from a volume ID.
     fn derive_iqn(volume_id: &str) -> String {
         format!("{}:{}", BASE_IQN, volume_id)
@@ -546,10 +597,8 @@ impl csi::node_server::Node for NodeService {
             .map(|s| s.as_str())
             .unwrap_or("iscsi");
 
-        // Get portal/address info (required on Linux, optional on FreeBSD)
-        let portal = volume_context.get("portal").map(|s| s.as_str());
-        let transport_addr = volume_context.get("transport_addr").map(|s| s.as_str());
-        let transport_port = volume_context.get("transport_port").map(|s| s.as_str());
+        // Parse endpoint from volume_context (format: "ip:port,ip2:port2,...")
+        let (endpoint_addr, endpoint_port) = Self::parse_endpoint(volume_context, export_type)?;
 
         // Check if already staged
         if is_block {
@@ -568,9 +617,14 @@ impl csi::node_server::Node for NodeService {
 
         // Connect to target and get device
         let device = match export_type.to_lowercase().as_str() {
-            "iscsi" => Platform::connect_iscsi(target_name, portal)?,
+            "iscsi" => {
+                // Format endpoint as portal string for iSCSI (ip:port)
+                let portal = format!("{}:{}", endpoint_addr, endpoint_port);
+                Platform::connect_iscsi(target_name, Some(&portal))?
+            }
             "nvmeof" | "nvme" => {
-                Platform::connect_nvmeof(target_name, transport_addr, transport_port)?
+                let port_str = endpoint_port.to_string();
+                Platform::connect_nvmeof(target_name, Some(&endpoint_addr), Some(&port_str))?
             }
             other => {
                 return Err(Status::invalid_argument(format!(
@@ -1023,5 +1077,81 @@ mod tests {
     fn test_node_service_creation() {
         let service = NodeService::new("test-node-1".to_string());
         assert_eq!(service.node_id, "test-node-1");
+    }
+
+    #[test]
+    fn test_parse_endpoint_with_port() {
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert("endpoints".to_string(), "192.168.1.1:3260".to_string());
+
+        let (addr, port) = NodeService::parse_endpoint(&ctx, "iscsi").unwrap();
+        assert_eq!(addr, "192.168.1.1");
+        assert_eq!(port, 3260);
+    }
+
+    #[test]
+    fn test_parse_endpoint_default_iscsi_port() {
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert("endpoints".to_string(), "192.168.1.1".to_string());
+
+        let (addr, port) = NodeService::parse_endpoint(&ctx, "iscsi").unwrap();
+        assert_eq!(addr, "192.168.1.1");
+        assert_eq!(port, 3260);
+    }
+
+    #[test]
+    fn test_parse_endpoint_default_nvmeof_port() {
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert("endpoints".to_string(), "192.168.1.1".to_string());
+
+        let (addr, port) = NodeService::parse_endpoint(&ctx, "nvmeof").unwrap();
+        assert_eq!(addr, "192.168.1.1");
+        assert_eq!(port, 4420);
+    }
+
+    #[test]
+    fn test_parse_endpoint_multipath_uses_first() {
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert(
+            "endpoints".to_string(),
+            "192.168.1.1:3260,192.168.1.2:3260,192.168.1.3:3260".to_string(),
+        );
+
+        let (addr, port) = NodeService::parse_endpoint(&ctx, "iscsi").unwrap();
+        assert_eq!(addr, "192.168.1.1");
+        assert_eq!(port, 3260);
+    }
+
+    #[test]
+    fn test_parse_endpoint_missing() {
+        let ctx = std::collections::HashMap::new();
+        assert!(NodeService::parse_endpoint(&ctx, "iscsi").is_err());
+    }
+
+    #[test]
+    fn test_parse_endpoint_empty() {
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert("endpoints".to_string(), "".to_string());
+        assert!(NodeService::parse_endpoint(&ctx, "iscsi").is_err());
+    }
+
+    #[test]
+    fn test_parse_endpoint_custom_port() {
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert("endpoints".to_string(), "10.0.0.1:9999".to_string());
+
+        let (addr, port) = NodeService::parse_endpoint(&ctx, "nvme").unwrap();
+        assert_eq!(addr, "10.0.0.1");
+        assert_eq!(port, 9999);
+    }
+
+    #[test]
+    fn test_parse_endpoint_trims_whitespace() {
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert("endpoints".to_string(), " 192.168.1.1:3260 ".to_string());
+
+        let (addr, port) = NodeService::parse_endpoint(&ctx, "iscsi").unwrap();
+        assert_eq!(addr, "192.168.1.1");
+        assert_eq!(port, 3260);
     }
 }
