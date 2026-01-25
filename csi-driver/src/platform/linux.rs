@@ -597,7 +597,7 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
         }
     }
 
-    // Fallback: Check /sys/class/nvme-subsystem/
+    // Fallback 1: Check /sys/class/nvme-subsystem/ (newer kernels)
     let nvme_subsys = Path::new("/sys/class/nvme-subsystem");
     if nvme_subsys.exists()
         && let Ok(entries) = fs::read_dir(nvme_subsys)
@@ -615,6 +615,11 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
                         // Only match namespace devices like nvme0n1, not controller devices like nvme0
                         if is_nvme_namespace_device(&name_str) {
                             let raw_device = format!("/dev/{}", name_str);
+                            info!(
+                                device = %raw_device,
+                                target_nqn = %target_nqn,
+                                "Found NVMeoF device via /sys/class/nvme-subsystem"
+                            );
                             // Always check for dm-multipath
                             return Ok(resolve_multipath_device(&raw_device));
                         }
@@ -624,26 +629,54 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
         }
     }
 
-    // Last resort: find most recent nvme device from nvme list text output
-    let output = Command::new("nvme").arg("list").output().map_err(|e| {
-        error!(error = %e, "Failed to execute nvme list");
-        Status::internal(format!("Failed to list NVMe devices: {}", e))
-    })?;
+    // Fallback 2: Check /sys/block/nvme*/device/subsysnqn (direct block device lookup)
+    // This path is more reliable on some kernel versions
+    let sys_block = Path::new("/sys/block");
+    if sys_block.exists()
+        && let Ok(entries) = fs::read_dir(sys_block)
+    {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if line.starts_with("/dev/nvme")
-            && let Some(device) = line.split_whitespace().next()
-            && is_nvme_namespace_device(device)
-        {
-            // Always check for dm-multipath
-            return Ok(resolve_multipath_device(device));
+            // Only check nvme namespace devices (nvmeXnY)
+            if !is_nvme_namespace_device(&name_str) {
+                continue;
+            }
+
+            let nqn_path = entry.path().join("device/subsysnqn");
+            if let Ok(nqn) = fs::read_to_string(&nqn_path) {
+                let nqn_trimmed = nqn.trim();
+                debug!(
+                    device = %name_str,
+                    nqn = %nqn_trimmed,
+                    target_nqn = %target_nqn,
+                    "Checking NVMe device NQN"
+                );
+                if nqn_trimmed == target_nqn {
+                    let raw_device = format!("/dev/{}", name_str);
+                    info!(
+                        device = %raw_device,
+                        target_nqn = %target_nqn,
+                        "Found NVMeoF device via /sys/block"
+                    );
+                    // Always check for dm-multipath
+                    return Ok(resolve_multipath_device(&raw_device));
+                }
+            }
         }
     }
 
-    Err(Status::internal(
-        "Could not find device for NVMeoF target. Ensure nvme-cli is installed and the connection succeeded.",
-    ))
+    // No device found - return error with diagnostic info
+    // CRITICAL: Do NOT return an arbitrary device - this causes data corruption!
+    error!(
+        target_nqn = %target_nqn,
+        "No NVMe device found matching target NQN. Device may not be connected."
+    );
+    Err(Status::internal(format!(
+        "No NVMe device found for NQN '{}'. Ensure the target is connected and the NQN is correct.",
+        target_nqn
+    )))
 }
 
 /// Disconnect from an NVMeoF target.
