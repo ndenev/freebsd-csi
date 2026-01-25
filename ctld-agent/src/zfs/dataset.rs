@@ -774,14 +774,24 @@ impl ZfsManager {
                         continue;
                     }
 
-                    // Migrate old metadata formats to current version
+                    // Migrate old metadata formats to current version and persist
                     if metadata.needs_migration() {
-                        debug!(
-                            volume = %vol_name,
-                            from_version = metadata.schema_version,
-                            "Migrating metadata to current schema"
-                        );
+                        let from_version = metadata.schema_version;
                         metadata.migrate();
+                        info!(
+                            volume = %vol_name,
+                            from_version = from_version,
+                            to_version = CURRENT_SCHEMA_VERSION,
+                            "Migrated metadata schema"
+                        );
+                        // Persist the migrated metadata back to ZFS
+                        if let Err(e) = self.set_volume_metadata(&vol_name, &metadata) {
+                            warn!(
+                                volume = %vol_name,
+                                error = %e,
+                                "Failed to persist migrated metadata (will retry on next scan)"
+                            );
+                        }
                     }
                     debug!(volume = %vol_name, "Found volume with valid CSI metadata");
                     results.push((vol_name, metadata));
