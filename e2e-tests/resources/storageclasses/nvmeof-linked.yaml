@@ -12,5 +12,7 @@ allowVolumeExpansion: true
 parameters:
   # Export volume via NVMe over Fabrics
   exportType: nvmeof
+  # NVMeoF target endpoints (host:port format, default port 4420)
+  endpoints: "10.0.0.10:4420"
   # Use LINKED clone mode
   cloneMode: linked

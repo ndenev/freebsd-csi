@@ -282,10 +282,9 @@ fn test_volume_size_limit_bytes() {
 fn test_export_type_parsing() {
     let mut params: HashMap<String, String> = HashMap::new();
 
-    // Default (no param)
+    // Default (no param) - should default to iSCSI
     let default_type = params
         .get("exportType")
-        .or_else(|| params.get("export_type"))
         .map(|s| s.to_lowercase())
         .unwrap_or_else(|| "iscsi".to_string());
     assert_eq!(default_type, "iscsi");
