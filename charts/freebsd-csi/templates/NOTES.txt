@@ -38,14 +38,14 @@ No StorageClasses were created. To create one, use values like:
     create: true
     name: freebsd-zfs-iscsi
     parameters:
-      portal: "<your-storage-server>:3260"
+      endpoints: "<your-storage-server>:3260"
 
   # For NVMeoF (FreeBSD 15.0+):
   storageClassNvmeof:
     create: true
     name: freebsd-zfs-nvmeof
     parameters:
-      transportAddr: "<your-storage-server>"
+      endpoints: "<your-storage-server>:4420"
 {{- end }}
 
 To create a test PVC:

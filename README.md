@@ -91,7 +91,7 @@ helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
   --create-namespace \
   --set agent.endpoint=http://<FREEBSD-STORAGE-IP>:50051 \
   --set storageClassIscsi.create=true \
-  --set storageClassIscsi.parameters.portal=<FREEBSD-STORAGE-IP>:3260
+  --set storageClassIscsi.parameters.endpoints=<FREEBSD-STORAGE-IP>:3260
 
 # Or install from source
 helm install freebsd-csi charts/freebsd-csi \
@@ -185,13 +185,13 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
-  portal: "192.168.1.100:3260"  # Default port: 3260
-  blockSize: "4096"             # Optional: 4K block size
-  enableUnmap: "true"           # Optional: Enable TRIM/discard
-csi.storage.k8s.io/provisioner-secret-name: iscsi-chap-secret
-csi.storage.k8s.io/provisioner-secret-namespace: default
-csi.storage.k8s.io/node-stage-secret-name: iscsi-chap-secret
-csi.storage.k8s.io/node-stage-secret-namespace: default
+  endpoints: "192.168.1.100:3260"  # Required, default port: 3260
+  blockSize: "4096"                # Optional: 4K block size
+  enableUnmap: "true"              # Optional: Enable TRIM/discard
+  csi.storage.k8s.io/provisioner-secret-name: iscsi-chap-secret
+  csi.storage.k8s.io/provisioner-secret-namespace: default
+  csi.storage.k8s.io/node-stage-secret-name: iscsi-chap-secret
+  csi.storage.k8s.io/node-stage-secret-namespace: default
 ```
 
 3. **Create a PVC using the authenticated StorageClass:**

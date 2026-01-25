@@ -55,7 +55,7 @@ helm install freebsd-csi charts/freebsd-csi \
 | `storageClassIscsi.create` | Create an iSCSI StorageClass | `false` |
 | `storageClassIscsi.name` | iSCSI StorageClass name | `freebsd-zfs-iscsi` |
 | `storageClassIscsi.default` | Set as default StorageClass | `false` |
-| `storageClassIscsi.parameters.portal` | **Required if create=true.** iSCSI portal address (default port: 3260). Supports multipath: `10.0.0.1:3260,10.0.0.2:3260` | `""` |
+| `storageClassIscsi.parameters.endpoints` | **Required if create=true.** Target endpoints (default port: 3260). Supports multipath: `10.0.0.1:3260,10.0.0.2:3260` | `""` |
 | `storageClassIscsi.parameters.blockSize` | Logical block size (512 or 4096) | - |
 | `storageClassIscsi.parameters.physicalBlockSize` | Physical block size hint | - |
 | `storageClassIscsi.parameters.enableUnmap` | Enable TRIM/discard for SSD-backed storage | - |
@@ -68,8 +68,7 @@ helm install freebsd-csi charts/freebsd-csi \
 | `storageClassNvmeof.create` | Create an NVMeoF StorageClass | `false` |
 | `storageClassNvmeof.name` | NVMeoF StorageClass name | `freebsd-zfs-nvmeof` |
 | `storageClassNvmeof.default` | Set as default StorageClass | `false` |
-| `storageClassNvmeof.parameters.transportAddr` | **Required if create=true.** NVMeoF target address (default port: 4420). Supports multipath: `10.0.0.1,10.0.0.2` | `""` |
-| `storageClassNvmeof.parameters.transportPort` | NVMeoF transport port | `4420` |
+| `storageClassNvmeof.parameters.endpoints` | **Required if create=true.** Target endpoints (default port: 4420). Supports multipath: `10.0.0.1:4420,10.0.0.2:4420` | `""` |
 | `storageClassNvmeof.parameters.blockSize` | Logical block size (512 or 4096) | - |
 | `storageClassNvmeof.parameters.physicalBlockSize` | Physical block size hint | - |
 | `storageClassNvmeof.parameters.enableUnmap` | Enable TRIM/discard for SSD-backed storage | - |
@@ -109,7 +108,7 @@ helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
   --create-namespace \
   --set agent.endpoint=http://192.168.1.100:50051 \
   --set storageClassIscsi.create=true \
-  --set storageClassIscsi.parameters.portal=192.168.1.100:3260
+  --set storageClassIscsi.parameters.endpoints=192.168.1.100:3260
 ```
 
 ### With iSCSI CHAP Authentication
@@ -128,7 +127,7 @@ helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
   --create-namespace \
   --set agent.endpoint=http://192.168.1.100:50051 \
   --set storageClassIscsi.create=true \
-  --set storageClassIscsi.parameters.portal=192.168.1.100:3260 \
+  --set storageClassIscsi.parameters.endpoints=192.168.1.100:3260 \
   --set storageClassIscsi.chapSecret.name=iscsi-chap
 ```
 
@@ -139,7 +138,7 @@ helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
   --create-namespace \
   --set agent.endpoint=http://192.168.1.100:50051 \
   --set storageClassIscsi.create=true \
-  --set storageClassIscsi.parameters.portal=192.168.1.100:3260 \
+  --set storageClassIscsi.parameters.endpoints=192.168.1.100:3260 \
   --set storageClassIscsi.chapSecret.credentials.username=myuser \
   --set storageClassIscsi.chapSecret.credentials.password=mysecret
 ```
@@ -152,7 +151,7 @@ helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
   --create-namespace \
   --set agent.endpoint=http://192.168.1.100:50051 \
   --set storageClassNvmeof.create=true \
-  --set storageClassNvmeof.parameters.transportAddr=192.168.1.100
+  --set storageClassNvmeof.parameters.endpoints=192.168.1.100:4420
 ```
 
 ### Using values.yaml
@@ -169,22 +168,22 @@ storageClassIscsi:
   default: true
   parameters:
     fsType: ext4
-    portal: "192.168.1.100:3260"  # Default port: 3260
-    blockSize: "4096"             # Optional: 4K block size
-    enableUnmap: "true"           # Optional: Enable TRIM/discard
+    endpoints: "192.168.1.100:3260"  # Required, default port: 3260
+    blockSize: "4096"                # Optional: 4K block size
+    enableUnmap: "true"              # Optional: Enable TRIM/discard
 
 # High-availability example with multipath
 # storageClassIscsi:
 #   create: true
 #   parameters:
-#     portal: "10.0.0.1:3260,10.0.0.2:3260"  # Multiple portals for HA
+#     endpoints: "10.0.0.1:3260,10.0.0.2:3260"  # Multiple endpoints for HA
 #     blockSize: "4096"
 
 # Optional: Also create NVMeoF StorageClass (FreeBSD 15.0+ required on storage server)
 # storageClassNvmeof:
 #   create: true
 #   parameters:
-#     transportAddr: "192.168.1.100"  # Default port: 4420
+#     endpoints: "192.168.1.100:4420"  # Required, default port: 4420
 #     blockSize: "4096"
 #     enableUnmap: "true"
 
@@ -219,9 +218,9 @@ provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
   fsType: ext4
-  portal: "192.168.1.100:3260"  # Default port: 3260
-  blockSize: "4096"             # Optional: 4K block size
-  enableUnmap: "true"           # Optional: Enable TRIM/discard
+  endpoints: "192.168.1.100:3260"  # Required, default port: 3260
+  blockSize: "4096"                # Optional: 4K block size
+  enableUnmap: "true"              # Optional: Enable TRIM/discard
 allowVolumeExpansion: true
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
@@ -237,8 +236,8 @@ provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
   fsType: ext4
-  # Multiple portals for multipath - dm-multipath combines paths automatically
-  portal: "10.0.0.1:3260,10.0.0.2:3260"
+  # Multiple endpoints for multipath - dm-multipath combines paths automatically
+  endpoints: "10.0.0.1:3260,10.0.0.2:3260"
   blockSize: "4096"
 allowVolumeExpansion: true
 reclaimPolicy: Delete
@@ -255,8 +254,7 @@ provisioner: csi.freebsd.org
 parameters:
   exportType: nvmeof
   fsType: ext4
-  transportAddr: "192.168.1.100"  # Default port: 4420
-  transportPort: "4420"
+  endpoints: "192.168.1.100:4420"  # Required, default port: 4420
   blockSize: "4096"
   enableUnmap: "true"
 allowVolumeExpansion: true
