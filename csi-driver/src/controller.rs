@@ -344,26 +344,53 @@ impl ControllerService {
         volume_context.insert("export_type".to_string(), export_type_str.to_string());
 
         // Pass through portal/address info for node service (required on Linux)
-        // StorageClass parameters like: portal, targetPortal, transportAddr, transportPort
-        if let Some(portal) = parameters
-            .get("portal")
-            .or_else(|| parameters.get("targetPortal"))
-        {
-            volume_context.insert("portal".to_string(), portal.clone());
-        }
+        // Supports both legacy parameters (portal, transportAddr) and new unified 'endpoints'
+        // endpoints format: "ip:port,ip:port,..." (first endpoint used for single-path)
+        if let Some(endpoints) = parameters.get("endpoints") {
+            // Parse endpoints - take first one for connection
+            if let Some(first_endpoint) = endpoints.split(',').next() {
+                let endpoint = first_endpoint.trim();
+                match export_type_str {
+                    "iscsi" => {
+                        // For iSCSI, pass as portal (ip:port format)
+                        volume_context.insert("portal".to_string(), endpoint.to_string());
+                    }
+                    "nvmeof" => {
+                        // For NVMeoF, split into addr and port
+                        if let Some((addr, port)) = endpoint.rsplit_once(':') {
+                            volume_context.insert("transport_addr".to_string(), addr.to_string());
+                            volume_context.insert("transport_port".to_string(), port.to_string());
+                        } else {
+                            // No port specified, use just the address
+                            volume_context
+                                .insert("transport_addr".to_string(), endpoint.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            // Legacy parameter support
+            if let Some(portal) = parameters
+                .get("portal")
+                .or_else(|| parameters.get("targetPortal"))
+            {
+                volume_context.insert("portal".to_string(), portal.clone());
+            }
 
-        // For NVMeoF, pass transport address and port
-        if let Some(addr) = parameters
-            .get("transportAddr")
-            .or_else(|| parameters.get("transport_addr"))
-        {
-            volume_context.insert("transport_addr".to_string(), addr.clone());
-        }
-        if let Some(port) = parameters
-            .get("transportPort")
-            .or_else(|| parameters.get("transport_port"))
-        {
-            volume_context.insert("transport_port".to_string(), port.clone());
+            // For NVMeoF, pass transport address and port
+            if let Some(addr) = parameters
+                .get("transportAddr")
+                .or_else(|| parameters.get("transport_addr"))
+            {
+                volume_context.insert("transport_addr".to_string(), addr.clone());
+            }
+            if let Some(port) = parameters
+                .get("transportPort")
+                .or_else(|| parameters.get("transport_port"))
+            {
+                volume_context.insert("transport_port".to_string(), port.clone());
+            }
         }
 
         // Pass through filesystem type for node service
