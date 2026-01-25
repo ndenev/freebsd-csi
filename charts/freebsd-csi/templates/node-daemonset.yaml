@@ -88,7 +88,7 @@ spec:
               # iSCSI discovery needs to write to /etc/iscsi/send_targets/
             - name: host-sys
               mountPath: /sys
-              readOnly: true
+              # NVMe disconnect requires write access to /sys to remove controllers
             {{- if .Values.tls.enabled }}
             - name: tls-certs
               mountPath: /etc/csi-tls
