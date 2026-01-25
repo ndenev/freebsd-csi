@@ -15,6 +15,20 @@ pub enum FindSnapshotResult {
     Ambiguous(usize),
 }
 
+
+/// Information about a CSI snapshot retrieved from ZFS
+#[derive(Debug, Clone)]
+pub struct CsiSnapshotInfo {
+    /// CSI snapshot ID (format: "volume_id@snap_name")
+    pub snapshot_id: String,
+    /// Source volume ID (parsed from snapshot_id)
+    pub source_volume_id: String,
+    /// Snapshot name (parsed from snapshot_id)
+    pub name: String,
+    /// Creation timestamp (Unix seconds)
+    pub creation_time: i64,
+}
+
 /// Check command output for success or return appropriate error.
 ///
 /// This helper reduces boilerplate for checking command results.
@@ -419,6 +433,114 @@ impl ZfsManager {
                     "Multiple snapshots found with same CSI ID - refusing to delete"
                 );
                 Ok(FindSnapshotResult::Ambiguous(n))
+            }
+        }
+    }
+
+
+    /// List all ZFS snapshots with CSI metadata
+    ///
+    /// This queries ZFS for all snapshots under the parent dataset that have the
+    /// `user:csi:snapshot_id` property set. Returns snapshot information including
+    /// the snapshot ID, source volume ID, name, and creation time.
+    ///
+    /// This is used by ListSnapshots to query ZFS directly instead of relying on
+    /// an in-memory cache, ensuring the list survives restarts and always reflects
+    /// the actual ZFS state.
+    #[instrument(skip(self))]
+    pub fn list_csi_snapshots(&self) -> Result<Vec<CsiSnapshotInfo>> {
+        debug!("Listing all CSI snapshots");
+
+        // List all snapshots with their CSI snapshot ID property and creation time
+        // Format: name<TAB>user:csi:snapshot_id<TAB>creation
+        let output = Command::new("zfs")
+            .args([
+                "list",
+                "-H",
+                "-t",
+                "snapshot",
+                "-o",
+                &format!("name,{},creation", SNAPSHOT_ID_PROPERTY),
+                "-r",
+                &self.parent_dataset,
+            ])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("no datasets available") {
+                return Ok(Vec::new());
+            }
+            return Err(ZfsError::CommandFailed(format!(
+                "failed to list CSI snapshots: {}",
+                stderr
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut snapshots = Vec::new();
+
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+
+            let _zfs_name = parts[0];
+            let snapshot_id = parts[1];
+            let creation_str = parts[2];
+
+            // Skip snapshots without a CSI snapshot ID (indicated by "-" in ZFS output)
+            if snapshot_id == "-" || snapshot_id.is_empty() {
+                continue;
+            }
+
+            // Parse the snapshot ID to extract source_volume_id and name
+            // Format: "volume_id@snap_name"
+            let (source_volume_id, name) = match snapshot_id.split_once('@') {
+                Some((vol, snap)) => (vol.to_string(), snap.to_string()),
+                None => {
+                    warn!(snapshot_id = %snapshot_id, "Invalid snapshot ID format, skipping");
+                    continue;
+                }
+            };
+
+            // Parse creation time - ZFS returns it in a human-readable format
+            // We need to convert it to Unix timestamp
+            let creation_time = Self::parse_zfs_creation_time(creation_str);
+
+            snapshots.push(CsiSnapshotInfo {
+                snapshot_id: snapshot_id.to_string(),
+                source_volume_id,
+                name,
+                creation_time,
+            });
+        }
+
+        debug!(count = snapshots.len(), "Found CSI snapshots");
+        Ok(snapshots)
+    }
+
+    /// Parse ZFS creation time to Unix timestamp
+    ///
+    /// ZFS returns creation time in a locale-dependent format like:
+    /// "Sat Jan 25 12:34:56 2025" or similar
+    /// We use the `date` command to parse it robustly.
+    fn parse_zfs_creation_time(creation_str: &str) -> i64 {
+        // Use date command to parse the ZFS timestamp
+        let output = Command::new("date")
+            .args(["-j", "-f", "%a %b %d %H:%M %Y", creation_str, "+%s"])
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let timestamp_str = String::from_utf8_lossy(&out.stdout);
+                timestamp_str.trim().parse().unwrap_or(0)
+            }
+            _ => {
+                // Fallback: try a simpler parse or return 0
+                // ZFS on some systems may use different formats
+                0
             }
         }
     }
