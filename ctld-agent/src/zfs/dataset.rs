@@ -201,9 +201,7 @@ impl ZfsManager {
 
         // Create the volume with volmode=dev and metadata set atomically
         // Let zfs create fail if already exists (avoids TOCTOU race)
-        let output = Command::new("zfs")
-            .args(&args)
-            .output()?;
+        let output = Command::new("zfs").args(&args).output()?;
 
         if let Err(e) = check_command_result(&output, &full_name) {
             warn!(volume = %full_name, error = %e, "Failed to create volume");

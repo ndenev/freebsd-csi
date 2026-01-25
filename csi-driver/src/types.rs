@@ -153,7 +153,6 @@ impl From<CloneMode> for agent::CloneMode {
 // Tests
 // ============================================================================
 
-
 // ============================================================================
 // ProvisioningMode
 // ============================================================================
@@ -286,7 +285,6 @@ mod tests {
         let proto: agent::CloneMode = CloneMode::Copy.into();
         assert_eq!(proto, agent::CloneMode::Copy);
     }
-
 
     #[test]
     fn test_provisioning_mode_from_str() {
