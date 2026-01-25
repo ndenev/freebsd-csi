@@ -545,6 +545,50 @@ fn is_nvme_namespace_device(path: &str) -> bool {
     chars.peek().is_some_and(|c| c.is_ascii_digit())
 }
 
+/// Helper to find NVMe device via `nvme list-subsys` command.
+/// Returns the device path (e.g., "/dev/nvme0n1") if found, None otherwise.
+fn find_device_via_list_subsys(target_nqn: &str) -> Option<String> {
+    let output = Command::new("nvme")
+        .args(["list-subsys", "-o", "json"])
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).ok()?;
+
+    // nvme list-subsys output: {"Subsystems":[{"NQN":"...", "Paths":[{"Name":"nvme0n1"}]}]}
+    let subsystems = json.get("Subsystems")?.as_array()?;
+
+    for subsys in subsystems {
+        let nqn = subsys.get("NQN").and_then(|n| n.as_str()).unwrap_or("");
+        if nqn != target_nqn {
+            continue;
+        }
+
+        // Try "Paths" array first (common format)
+        if let Some(paths) = subsys.get("Paths").and_then(|p| p.as_array()) {
+            for path in paths {
+                let name = path.get("Name").and_then(|n| n.as_str())?;
+                if is_nvme_namespace_device(name) {
+                    return Some(format!("/dev/{}", name));
+                }
+            }
+        }
+
+        // Try "Namespaces" array (alternative format)
+        if let Some(namespaces) = subsys.get("Namespaces").and_then(|n| n.as_array()) {
+            for ns in namespaces {
+                let name = ns.get("NameSpace").and_then(|n| n.as_str())?;
+                if is_nvme_namespace_device(name) {
+                    return Some(format!("/dev/{}", name));
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Find the device associated with an NVMeoF target.
 ///
 /// This function handles both NVMe native multipath and dm-multipath:
@@ -562,7 +606,24 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
         "Checking NVMe native multipath status"
     );
 
-    // Use nvme list to find devices
+    // Wait for udev to finish processing device events (best practice from other CSI drivers)
+    // This ensures /sys entries are fully populated after nvme connect
+    let _ = Command::new("udevadm")
+        .args(["settle", "--timeout=5"])
+        .output();
+
+    // Method 1: Use nvme list-subsys which directly maps NQN to devices
+    // This is the most reliable method as it's specifically designed for this purpose
+    if let Some(device) = find_device_via_list_subsys(target_nqn) {
+        info!(
+            device = %device,
+            target_nqn = %target_nqn,
+            "Found NVMeoF device via nvme list-subsys"
+        );
+        return Ok(resolve_multipath_device(&device));
+    }
+
+    // Method 2: Use nvme list with JSON output
     let output = Command::new("nvme")
         .args(["list", "-o", "json"])
         .output()
@@ -571,33 +632,32 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
             Status::internal(format!("Failed to list NVMe devices: {}", e))
         })?;
 
-    // Try to parse JSON output
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Simple parsing - look for device paths
-    // In production, we'd use serde_json to properly parse
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout)
         && let Some(devices) = json.get("Devices").and_then(|d| d.as_array())
     {
         for device in devices {
             if let Some(dev_path) = device.get("DevicePath").and_then(|p| p.as_str()) {
                 // Check if this device is associated with our NQN
-                // The NQN might be in the SubsystemNQN or ModelNumber field
                 let subsys_nqn = device
                     .get("SubsystemNQN")
                     .and_then(|n| n.as_str())
                     .unwrap_or("");
-                if (subsys_nqn == target_nqn || subsys_nqn.contains(target_nqn))
-                    && is_nvme_namespace_device(dev_path)
-                {
-                    // Always check for dm-multipath - it may claim devices even with native multipath
+                // CRITICAL: Require exact NQN match, not substring match
+                if subsys_nqn == target_nqn && is_nvme_namespace_device(dev_path) {
+                    info!(
+                        device = %dev_path,
+                        target_nqn = %target_nqn,
+                        "Found NVMeoF device via nvme list"
+                    );
                     return Ok(resolve_multipath_device(dev_path));
                 }
             }
         }
     }
 
-    // Fallback 1: Check /sys/class/nvme-subsystem/ (newer kernels)
+    // Method 3: Check /sys/class/nvme-subsystem/ (kernel 4.15+)
     let nvme_subsys = Path::new("/sys/class/nvme-subsystem");
     if nvme_subsys.exists()
         && let Ok(entries) = fs::read_dir(nvme_subsys)
@@ -629,8 +689,8 @@ pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
         }
     }
 
-    // Fallback 2: Check /sys/block/nvme*/device/subsysnqn (direct block device lookup)
-    // This path is more reliable on some kernel versions
+    // Method 4: Check /sys/block/nvme*/device/subsysnqn (direct block device lookup)
+    // This path works on all kernel versions with NVMe support
     let sys_block = Path::new("/sys/block");
     if sys_block.exists()
         && let Ok(entries) = fs::read_dir(sys_block)
