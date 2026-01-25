@@ -22,7 +22,7 @@ This document provides a comprehensive reference for all configuration options i
   - [Volume Access Control](#volume-access-control)
 - [Platform Support](#platform-support)
   - [Linux Worker Nodes](#linux-worker-nodes)
-  - [FreeBSD Worker Nodes](#freebsd-worker-nodes)
+  - [FreeBSD Storage Node](#freebsd-storage-node)
 
 ---
 
@@ -280,8 +280,8 @@ StorageClass parameters control how volumes are provisioned:
 | Parameter | Values | Default | Description |
 |-----------|--------|---------|-------------|
 | `exportType` | `iscsi`, `nvmeof` | `iscsi` | Protocol for exporting volumes |
-| `fs_type` | `ext4`, `xfs` (Linux); `ufs` (FreeBSD) | `ext4` | Filesystem type for formatting volumes |
-| `endpoints` | `<ip>:<port>[,<ip2>:<port2>...]` | - | **Required on Linux.** Comma-separated list of target endpoints. Default ports: iSCSI=3260, NVMeoF=4420 |
+| `fsType` | `ext4`, `xfs` | `ext4` | Filesystem type for formatting volumes |
+| `endpoints` | `<ip>:<port>[,<ip2>:<port2>...]` | - | **Required.** Comma-separated list of target endpoints. Default ports: iSCSI=3260, NVMeoF=4420 |
 
 > **Multipath Support:** The `endpoints` parameter accepts comma-separated values for multipath configurations.
 > For iSCSI, each portal will be discovered and logged into separately. For NVMeoF, each address will be connected separately.
@@ -295,16 +295,14 @@ StorageClass parameters control how volumes are provisioned:
 | `physicalBlockSize` | `512`, `4096`, etc. | - | Physical block size hint for storage optimization |
 | `enableUnmap` | `true`, `false` | `false` | Enable TRIM/discard passthrough for SSD-backed storage |
 
-> **Note:** These parameters also accept alternative naming conventions: `block_size`, `physical_block_size`/`pblocksize`, `enable_unmap`/`unmap`.
+> **Parameter Naming:** All parameters use camelCase to align with Kubernetes conventions.
 
-#### Filesystem Types by Platform
+#### Supported Filesystem Types
 
-| Platform | Supported fs_type | Default |
-|----------|-----------------|---------|
-| Linux | `ext4`, `xfs` | `ext4` |
-| FreeBSD | `ufs` | `ufs` |
-
-> **Note:** `zfs` cannot be used as `fs_type` because ZFS manages its own storage layer and cannot format block devices.
+| fsType | Description |
+|--------|-------------|
+| `ext4` | Default. Recommended for most workloads. |
+| `xfs` | Recommended for large files and high throughput workloads. |
 
 #### Example StorageClasses
 
@@ -317,7 +315,7 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
-  fs_type: ext4
+  fsType: ext4
   endpoints: "192.168.1.100:3260"  # REQUIRED for Linux (default port: 3260)
   blockSize: "4096"                # Optional: 4K block size
   enableUnmap: "true"              # Optional: Enable TRIM/discard
@@ -335,7 +333,7 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
-  fs_type: ext4
+  fsType: ext4
   # Multiple endpoints for multipath - dm-multipath combines paths automatically
   endpoints: "10.0.0.1:3260,10.0.0.2:3260"
   blockSize: "4096"
@@ -354,7 +352,7 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: nvmeof
-  fs_type: ext4
+  fsType: ext4
   endpoints: "192.168.1.100:4420"  # REQUIRED (default port: 4420)
   blockSize: "4096"
   enableUnmap: "true"
@@ -372,7 +370,7 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: nvmeof
-  fs_type: ext4
+  fsType: ext4
   # Multiple endpoints for multipath - native NVMe multipath combines paths
   endpoints: "10.0.0.1:4420,10.0.0.2:4420"
   blockSize: "4096"
@@ -390,7 +388,7 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
-  fs_type: ext4
+  fsType: ext4
   endpoints: "192.168.1.100:3260"
 allowVolumeExpansion: true
 reclaimPolicy: Retain
@@ -561,7 +559,7 @@ zfs allow -u csi-user create,destroy,mount,snapshot tank/csi
 
 ### Linux Worker Nodes
 
-Linux worker nodes are the primary deployment target. Required packages:
+The CSI driver runs on Linux worker nodes (kubelet cannot run on FreeBSD). Required packages:
 
 **For iSCSI:**
 ```bash
@@ -596,15 +594,9 @@ apt-get install e2fsprogs
 apt-get install xfsprogs
 ```
 
-### FreeBSD Worker Nodes
+### FreeBSD Storage Node
 
-FreeBSD worker nodes are supported but experimental (Kubernetes on FreeBSD is limited).
-
-**Required packages:**
-- iSCSI initiator (built-in)
-- NVMe support (built-in)
-
-**Filesystem:** UFS (the default on FreeBSD)
+The ctld-agent runs on FreeBSD (14.0+) as the storage backend. See [ctld-agent Configuration](#ctld-agent-configuration) for setup details.
 
 ---
 

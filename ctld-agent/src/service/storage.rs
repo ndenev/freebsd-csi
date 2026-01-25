@@ -88,26 +88,21 @@ fn proto_to_ctl_auth(auth: Option<&AuthCredentials>) -> AuthConfig {
 /// Parse CTL options from request parameters.
 ///
 /// Supports the following StorageClass parameters:
-/// - `blockSize` (or `block_size`): Logical block size (512 or 4096)
-/// - `physicalBlockSize` (or `physical_block_size`, `pblocksize`): Physical block hint
-/// - `enableUnmap` (or `enable_unmap`, `unmap`): Enable TRIM/discard ("true" or "false")
+/// - `blockSize`: Logical block size (512 or 4096)
+/// - `physicalBlockSize`: Physical block hint
+/// - `enableUnmap`: Enable TRIM/discard ("true" or "false")
 fn parse_ctl_options(params: &HashMap<String, String>) -> CtlOptions {
     let blocksize = params
         .get("blockSize")
-        .or_else(|| params.get("block_size"))
         .and_then(|v| v.parse::<u32>().ok())
         .filter(|&bs| bs == 512 || bs == 4096);
 
     let pblocksize = params
         .get("physicalBlockSize")
-        .or_else(|| params.get("physical_block_size"))
-        .or_else(|| params.get("pblocksize"))
         .and_then(|v| v.parse::<u32>().ok());
 
     let unmap = params
         .get("enableUnmap")
-        .or_else(|| params.get("enable_unmap"))
-        .or_else(|| params.get("unmap"))
         .and_then(|v| match v.to_lowercase().as_str() {
             "true" | "1" | "on" | "yes" => Some(true),
             "false" | "0" | "off" | "no" => Some(false),
@@ -560,15 +555,15 @@ impl StorageAgent for StorageService {
         // Build ZFS metadata to set atomically during volume creation
         // SECURITY: Only the auth-group NAME is stored, not credentials.
         // Credentials are persisted in /etc/ctl.conf (root-only).
-        let zfs_metadata = ZfsVolumeMetadata {
-            export_type: ctl_export_type,
-            target_name: target_name.clone(),
-            lun_id: Some(lun_id),
-            namespace_id: None,
-            parameters: req.parameters.clone(),
-            created_at: unix_timestamp_now(),
-            auth_group: auth_group_name,
-        };
+        let zfs_metadata = ZfsVolumeMetadata::new(
+            ctl_export_type,
+            target_name.clone(),
+            Some(lun_id),
+            None, // namespace_id
+            req.parameters.clone(),
+            unix_timestamp_now(),
+            auth_group_name,
+        );
 
         // Create ZFS volume - either fresh or from content source (snapshot/volume)
         let dataset = if let Some(ref content_source) = req.content_source {

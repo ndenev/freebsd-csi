@@ -138,7 +138,6 @@ impl ControllerService {
     fn parse_export_type(parameters: &HashMap<String, String>) -> ExportType {
         parameters
             .get("exportType")
-            .or_else(|| parameters.get("export_type"))
             .and_then(|s| s.parse().ok())
             .unwrap_or_default()
     }
@@ -258,7 +257,6 @@ impl ControllerService {
         // Parse clone mode from StorageClass parameters
         let clone_mode: crate::agent::CloneMode = parameters
             .get(CLONE_MODE_PARAM)
-            .or_else(|| parameters.get("clone_mode"))
             .and_then(|s| s.parse::<CloneMode>().ok())
             .unwrap_or_default()
             .into();
@@ -332,9 +330,10 @@ impl ControllerService {
         content_source: Option<csi::VolumeContentSource>,
     ) -> csi::Volume {
         let mut volume_context = HashMap::new();
-        volume_context.insert("target_name".to_string(), volume.target_name.clone());
-        volume_context.insert("lun_id".to_string(), volume.lun_id.to_string());
-        volume_context.insert("zfs_dataset".to_string(), volume.zfs_dataset.clone());
+        // Volume context keys use camelCase (Kubernetes convention)
+        volume_context.insert("targetName".to_string(), volume.target_name.clone());
+        volume_context.insert("lunId".to_string(), volume.lun_id.to_string());
+        volume_context.insert("zfsDataset".to_string(), volume.zfs_dataset.clone());
 
         // Convert proto ExportType to our typed enum for type-safe matching
         let export_type = match crate::agent::ExportType::try_from(volume.export_type) {
@@ -342,7 +341,7 @@ impl ControllerService {
             Ok(crate::agent::ExportType::Nvmeof) => ExportType::Nvmeof,
             _ => ExportType::Iscsi, // Default to iSCSI for unspecified
         };
-        volume_context.insert("export_type".to_string(), export_type.to_string());
+        volume_context.insert("exportType".to_string(), export_type.to_string());
 
         // Pass through portal/address info for node service (required on Linux)
         // endpoints format: "ip:port,ip:port,..." (first endpoint used for single-path)
@@ -369,8 +368,8 @@ impl ControllerService {
         }
 
         // Pass through filesystem type for node service
-        if let Some(fs_type) = parameters.get("fs_type") {
-            volume_context.insert("fs_type".to_string(), fs_type.clone());
+        if let Some(fs_type) = parameters.get("fsType") {
+            volume_context.insert("fsType".to_string(), fs_type.clone());
         }
 
         csi::Volume {
@@ -1083,9 +1082,9 @@ mod tests {
             ExportType::Nvmeof
         );
 
-        // Alternative key
+        // "nvme" alias also works
         params.clear();
-        params.insert("export_type".to_string(), "nvme".to_string());
+        params.insert("exportType".to_string(), "nvme".to_string());
         assert_eq!(
             ControllerService::parse_export_type(&params),
             ExportType::Nvmeof
