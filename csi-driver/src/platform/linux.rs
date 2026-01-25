@@ -13,7 +13,7 @@ use std::process::Command;
 use tonic::Status;
 use tracing::{debug, error, info, warn};
 
-use super::{PlatformResult, StorageOps};
+use super::PlatformResult;
 
 /// Default filesystem type for Linux
 pub const DEFAULT_FS_TYPE: &str = "ext4";
@@ -982,28 +982,28 @@ pub fn default_fs_type() -> &'static str {
 /// Linux platform marker struct for compile-time platform selection.
 pub struct LinuxPlatform;
 
-impl StorageOps for LinuxPlatform {
-    fn is_iscsi_connected(target_iqn: &str) -> bool {
+impl LinuxPlatform {
+    pub fn is_iscsi_connected(target_iqn: &str) -> bool {
         is_iscsi_connected(target_iqn)
     }
 
-    fn is_nvmeof_connected(target_nqn: &str) -> bool {
+    pub fn is_nvmeof_connected(target_nqn: &str) -> bool {
         is_nvmeof_connected(target_nqn)
     }
 
-    fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<String> {
+    pub fn connect_iscsi(target_iqn: &str, portal: Option<&str>) -> PlatformResult<String> {
         connect_iscsi(target_iqn, portal)
     }
 
-    fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
+    pub fn find_iscsi_device(target_iqn: &str) -> PlatformResult<String> {
         find_iscsi_device(target_iqn)
     }
 
-    fn disconnect_iscsi(target_iqn: &str) -> PlatformResult<()> {
+    pub fn disconnect_iscsi(target_iqn: &str) -> PlatformResult<()> {
         disconnect_iscsi(target_iqn)
     }
 
-    fn connect_nvmeof(
+    pub fn connect_nvmeof(
         target_nqn: &str,
         transport_addr: Option<&str>,
         transport_port: Option<&str>,
@@ -1011,43 +1011,43 @@ impl StorageOps for LinuxPlatform {
         connect_nvmeof(target_nqn, transport_addr, transport_port)
     }
 
-    fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
+    pub fn find_nvmeof_device(target_nqn: &str) -> PlatformResult<String> {
         find_nvmeof_device(target_nqn)
     }
 
-    fn disconnect_nvmeof(target_nqn: &str) -> PlatformResult<()> {
+    pub fn disconnect_nvmeof(target_nqn: &str) -> PlatformResult<()> {
         disconnect_nvmeof(target_nqn)
     }
 
-    fn format_device(device: &str, fs_type: &str) -> PlatformResult<()> {
+    pub fn format_device(device: &str, fs_type: &str) -> PlatformResult<()> {
         format_device(device, fs_type)
     }
 
-    fn needs_formatting(device: &str) -> PlatformResult<bool> {
+    pub fn needs_formatting(device: &str) -> PlatformResult<bool> {
         needs_formatting(device)
     }
 
-    fn mount_device(device: &str, target: &str, fs_type: &str) -> PlatformResult<()> {
+    pub fn mount_device(device: &str, target: &str, fs_type: &str) -> PlatformResult<()> {
         mount_device(device, target, fs_type)
     }
 
-    fn bind_mount(source: &str, target: &str) -> PlatformResult<()> {
+    pub fn bind_mount(source: &str, target: &str) -> PlatformResult<()> {
         bind_mount(source, target)
     }
 
-    fn unmount(target: &str) -> PlatformResult<()> {
+    pub fn unmount(target: &str) -> PlatformResult<()> {
         unmount(target)
     }
 
-    fn is_mounted(target: &str) -> PlatformResult<bool> {
+    pub fn is_mounted(target: &str) -> PlatformResult<bool> {
         is_mounted(target)
     }
 
-    fn validate_fs_type(fs_type: &str) -> PlatformResult<&'static str> {
+    pub fn validate_fs_type(fs_type: &str) -> PlatformResult<&'static str> {
         validate_fs_type(fs_type)
     }
 
-    fn default_fs_type() -> &'static str {
+    pub fn default_fs_type() -> &'static str {
         default_fs_type()
     }
 }

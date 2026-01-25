@@ -26,7 +26,7 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
 use crate::csi;
-use crate::platform::{Platform, StorageOps};
+use crate::platform::Platform;
 use crate::types::ExportType;
 
 /// Base IQN prefix for iSCSI targets (must match ctld-agent configuration)
