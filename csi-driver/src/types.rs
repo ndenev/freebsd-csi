@@ -153,6 +153,70 @@ impl From<CloneMode> for agent::CloneMode {
 // Tests
 // ============================================================================
 
+
+// ============================================================================
+// ProvisioningMode
+// ============================================================================
+
+/// Volume provisioning mode for space allocation.
+///
+/// Controls whether ZFS reserves space upfront (thick) or allocates on write (thin).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProvisioningMode {
+    /// Thin provisioning (default): no reservation, space allocated on write
+    #[default]
+    Thin,
+    /// Thick provisioning: refreservation=volsize, guarantees space upfront
+    Thick,
+}
+
+impl ProvisioningMode {
+    /// Parameter name in StorageClass parameters
+    pub const PARAM_NAME: &'static str = "provisioningMode";
+
+    /// Returns true if this mode requires space reservation
+    pub const fn requires_reservation(self) -> bool {
+        matches!(self, ProvisioningMode::Thick)
+    }
+}
+
+impl Display for ProvisioningMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProvisioningMode::Thin => write!(f, "thin"),
+            ProvisioningMode::Thick => write!(f, "thick"),
+        }
+    }
+}
+
+impl FromStr for ProvisioningMode {
+    type Err = ProvisioningModeParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "thin" | "" => Ok(ProvisioningMode::Thin),
+            "thick" => Ok(ProvisioningMode::Thick),
+            _ => Err(ProvisioningModeParseError(s.to_string())),
+        }
+    }
+}
+
+/// Error returned when parsing an invalid provisioning mode.
+#[derive(Debug, Clone)]
+pub struct ProvisioningModeParseError(String);
+
+impl Display for ProvisioningModeParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unknown provisioning mode '{}': expected 'thin' or 'thick'",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ProvisioningModeParseError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +291,43 @@ mod tests {
 
         let proto: agent::CloneMode = CloneMode::Copy.into();
         assert_eq!(proto, agent::CloneMode::Copy);
+    }
+
+
+    #[test]
+    fn test_provisioning_mode_from_str() {
+        assert_eq!(
+            "thin".parse::<ProvisioningMode>().unwrap(),
+            ProvisioningMode::Thin
+        );
+        assert_eq!(
+            "THIN".parse::<ProvisioningMode>().unwrap(),
+            ProvisioningMode::Thin
+        );
+        assert_eq!(
+            "".parse::<ProvisioningMode>().unwrap(),
+            ProvisioningMode::Thin
+        );
+        assert_eq!(
+            "thick".parse::<ProvisioningMode>().unwrap(),
+            ProvisioningMode::Thick
+        );
+        assert_eq!(
+            "THICK".parse::<ProvisioningMode>().unwrap(),
+            ProvisioningMode::Thick
+        );
+        assert!("unknown".parse::<ProvisioningMode>().is_err());
+    }
+
+    #[test]
+    fn test_provisioning_mode_display() {
+        assert_eq!(ProvisioningMode::Thin.to_string(), "thin");
+        assert_eq!(ProvisioningMode::Thick.to_string(), "thick");
+    }
+
+    #[test]
+    fn test_provisioning_mode_requires_reservation() {
+        assert!(!ProvisioningMode::Thin.requires_reservation());
+        assert!(ProvisioningMode::Thick.requires_reservation());
     }
 }

@@ -149,6 +149,10 @@ impl ZfsManager {
     ///
     /// The metadata is set as a ZFS user property during creation, ensuring
     /// that volumes always have metadata even if the agent crashes after creation.
+    ///
+    /// Supports thin/thick provisioning via `provisioningMode` parameter:
+    /// - "thin" (default): No reservation, space allocated on write
+    /// - "thick": Sets refreservation=volsize to guarantee space upfront
     #[instrument(skip(self, metadata))]
     pub fn create_volume(
         &self,
@@ -163,21 +167,43 @@ impl ZfsManager {
 
         let metadata_property = format_metadata_property(metadata)?;
 
-        info!(volume = %full_name, size_bytes, "Creating ZFS volume with metadata");
+        // Check provisioning mode from StorageClass parameters
+        let is_thick = metadata
+            .parameters
+            .get("provisioningMode")
+            .map(|v| v.eq_ignore_ascii_case("thick"))
+            .unwrap_or(false);
+
+        info!(
+            volume = %full_name,
+            size_bytes,
+            provisioning_mode = if is_thick { "thick" } else { "thin" },
+            "Creating ZFS volume with metadata"
+        );
+
+        // Build command arguments
+        let mut args = vec![
+            "create".to_string(),
+            "-V".to_string(),
+            size_bytes.to_string(),
+            "-o".to_string(),
+            "volmode=dev".to_string(),
+            "-o".to_string(),
+            metadata_property,
+        ];
+
+        // For thick provisioning, set refreservation to guarantee space
+        if is_thick {
+            args.push("-o".to_string());
+            args.push(format!("refreservation={}", size_bytes));
+        }
+
+        args.push(full_name.clone());
 
         // Create the volume with volmode=dev and metadata set atomically
         // Let zfs create fail if already exists (avoids TOCTOU race)
         let output = Command::new("zfs")
-            .args([
-                "create",
-                "-V",
-                &size_bytes.to_string(),
-                "-o",
-                "volmode=dev",
-                "-o",
-                &metadata_property,
-                &full_name,
-            ])
+            .args(&args)
             .output()?;
 
         if let Err(e) = check_command_result(&output, &full_name) {
@@ -185,7 +211,12 @@ impl ZfsManager {
             return Err(e);
         }
 
-        info!(volume = %full_name, size_bytes, "ZFS volume created successfully with metadata");
+        info!(
+            volume = %full_name,
+            size_bytes,
+            provisioning_mode = if is_thick { "thick" } else { "thin" },
+            "ZFS volume created successfully with metadata"
+        );
         // Return the created dataset info
         self.get_dataset(name)
     }
