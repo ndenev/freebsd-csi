@@ -184,16 +184,10 @@ mod tests {
     #[test]
     fn test_clone_mode_from_str() {
         assert_eq!("copy".parse::<CloneMode>().unwrap(), CloneMode::Copy);
-        assert_eq!(
-            "independent".parse::<CloneMode>().unwrap(),
-            CloneMode::Copy
-        );
+        assert_eq!("independent".parse::<CloneMode>().unwrap(), CloneMode::Copy);
         assert_eq!("linked".parse::<CloneMode>().unwrap(), CloneMode::Linked);
         assert_eq!("clone".parse::<CloneMode>().unwrap(), CloneMode::Linked);
-        assert_eq!(
-            "".parse::<CloneMode>().unwrap(),
-            CloneMode::Unspecified
-        );
+        assert_eq!("".parse::<CloneMode>().unwrap(), CloneMode::Unspecified);
         assert_eq!(
             "unspecified".parse::<CloneMode>().unwrap(),
             CloneMode::Unspecified

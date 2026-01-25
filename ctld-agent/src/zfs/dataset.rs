@@ -15,7 +15,6 @@ pub enum FindSnapshotResult {
     Ambiguous(usize),
 }
 
-
 /// Information about a CSI snapshot retrieved from ZFS
 #[derive(Debug, Clone)]
 pub struct CsiSnapshotInfo {
@@ -436,7 +435,6 @@ impl ZfsManager {
             }
         }
     }
-
 
     /// List all ZFS snapshots with CSI metadata
     ///

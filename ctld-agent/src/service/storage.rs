@@ -130,7 +130,11 @@ fn unix_timestamp_now() -> i64 {
 }
 
 /// Apply pagination to a list of items
-fn paginate<T>(items: Vec<T>, max_entries: i32, starting_token: &str) -> Result<(Vec<T>, String), Status> {
+fn paginate<T>(
+    items: Vec<T>,
+    max_entries: i32,
+    starting_token: &str,
+) -> Result<(Vec<T>, String), Status> {
     let max_entries = if max_entries > 0 {
         max_entries as usize
     } else {
