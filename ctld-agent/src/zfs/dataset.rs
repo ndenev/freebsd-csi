@@ -760,7 +760,16 @@ impl ZfsManager {
                 .to_string();
 
             match serde_json::from_str::<VolumeMetadata>(metadata_json) {
-                Ok(metadata) => {
+                Ok(mut metadata) => {
+                    // Migrate old metadata formats to current version
+                    if metadata.needs_migration() {
+                        debug!(
+                            volume = %vol_name,
+                            from_version = metadata.schema_version,
+                            "Migrating metadata to current schema"
+                        );
+                        metadata.migrate();
+                    }
                     debug!(volume = %vol_name, "Found volume with valid CSI metadata");
                     results.push((vol_name, metadata));
                 }

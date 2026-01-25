@@ -555,15 +555,15 @@ impl StorageAgent for StorageService {
         // Build ZFS metadata to set atomically during volume creation
         // SECURITY: Only the auth-group NAME is stored, not credentials.
         // Credentials are persisted in /etc/ctl.conf (root-only).
-        let zfs_metadata = ZfsVolumeMetadata {
-            export_type: ctl_export_type,
-            target_name: target_name.clone(),
-            lun_id: Some(lun_id),
-            namespace_id: None,
-            parameters: req.parameters.clone(),
-            created_at: unix_timestamp_now(),
-            auth_group: auth_group_name,
-        };
+        let zfs_metadata = ZfsVolumeMetadata::new(
+            ctl_export_type,
+            target_name.clone(),
+            Some(lun_id),
+            None, // namespace_id
+            req.parameters.clone(),
+            unix_timestamp_now(),
+            auth_group_name,
+        );
 
         // Create ZFS volume - either fresh or from content source (snapshot/volume)
         let dataset = if let Some(ref content_source) = req.content_source {
