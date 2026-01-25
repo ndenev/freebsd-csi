@@ -218,10 +218,14 @@ class TestChapAuthentication:
 
             # Verify ZFS dataset exists
             dataset = f"{storage.csi_path}/{pv_name}"
-            assert storage.verify_dataset_exists(dataset), f"Dataset {dataset} not found"
+            assert storage.verify_dataset_exists(
+                dataset
+            ), f"Dataset {dataset} not found"
 
             # Verify volume is exported via iSCSI
-            assert storage.verify_volume_exported(pv_name, "iscsi"), "Volume not exported"
+            assert storage.verify_volume_exported(
+                pv_name, "iscsi"
+            ), "Volume not exported"
 
             # Verify auth-group was created with CHAP
             # The CSI driver creates auth-group named "ag-{volume_id}"
@@ -323,16 +327,16 @@ class TestChapAuthentication:
             ag_info = storage.get_auth_group(auth_group_name)
 
             assert ag_info is not None, f"Auth-group {auth_group_name} not found"
-            assert ag_info.chap_username == chap_username, (
-                f"Username mismatch: {ag_info.chap_username} != {chap_username}"
-            )
+            assert (
+                ag_info.chap_username == chap_username
+            ), f"Username mismatch: {ag_info.chap_username} != {chap_username}"
             assert ag_info.chap_secret == chap_password, "Password mismatch"
 
             # Verify target references the auth-group
             target_ag = storage.get_target_auth_group(pv_name)
-            assert target_ag == auth_group_name, (
-                f"Target auth-group mismatch: {target_ag} != {auth_group_name}"
-            )
+            assert (
+                target_ag == auth_group_name
+            ), f"Target auth-group mismatch: {target_ag} != {auth_group_name}"
 
         finally:
             k8s.delete_secret(secret_name, ignore_not_found=True)
@@ -438,7 +442,9 @@ class TestChapAuthentication:
             warning_events = [e for e in events if e.get("type") == "Warning"]
             # At minimum, we expect the system to have noticed the missing secret
             # The exact behavior may vary
-            pytest.skip("PVC bound despite missing secret - driver may have fallback behavior")
+            pytest.skip(
+                "PVC bound despite missing secret - driver may have fallback behavior"
+            )
         else:
             # PVC should be Pending
             assert phase == "Pending", f"Unexpected PVC phase: {phase}"
@@ -449,6 +455,7 @@ class TestChapAuthentication:
         storage: StorageMonitor,
         unique_name: str,
         wait_pvc_bound: Callable,
+        wait_pv_deleted: Callable,
     ):
         """Test that deleting a CHAP volume also removes its auth-group."""
         chap_username = "cleanup-test-user"
@@ -481,13 +488,13 @@ class TestChapAuthentication:
             # Delete the PVC (with Delete reclaim policy, PV should also be deleted)
             k8s.delete("pvc", pvc_name, wait=True, timeout=120)
 
-            # Wait for cleanup
-            time.sleep(10)
+            # Wait for PV to be deleted (indicates cleanup is complete)
+            assert wait_pv_deleted(pv_name, timeout=60), f"PV {pv_name} not deleted"
 
             # Auth-group should be removed
-            assert not storage.verify_auth_group_exists(auth_group_name), (
-                f"Auth-group {auth_group_name} not cleaned up after volume deletion"
-            )
+            assert not storage.verify_auth_group_exists(
+                auth_group_name
+            ), f"Auth-group {auth_group_name} not cleaned up after volume deletion"
 
         finally:
             k8s.delete_secret(secret_name, ignore_not_found=True)

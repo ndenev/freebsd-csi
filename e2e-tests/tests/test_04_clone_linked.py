@@ -3,7 +3,6 @@
 Tests cloning from snapshots using zfs clone (fast, with dependency).
 """
 
-import time
 from typing import Callable
 
 import pytest
@@ -26,7 +25,9 @@ class TestLinkedCloneMode:
     ):
         """Clone from snapshot using LINKED mode, verify ZFS clone has origin."""
         # Create source and snapshot
-        source_pvc = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source")
+        source_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source"
+        )
         assert wait_pvc_bound(source_pvc, timeout=60)
 
         snap_name = snapshot_factory(source_pvc)
@@ -43,7 +44,9 @@ class TestLinkedCloneMode:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
+        assert wait_pvc_bound(
+            clone_pvc, timeout=120
+        ), f"Clone PVC {clone_pvc} not bound"
 
         # Verify it's a ZFS clone (has origin)
         clone_pv = k8s.get_pvc_volume(clone_pvc)
@@ -64,7 +67,9 @@ class TestLinkedCloneMode:
     ):
         """LINKED clone has correct data from snapshot."""
         # Create source with data
-        source_pvc = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source")
+        source_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source"
+        )
         assert wait_pvc_bound(source_pvc, timeout=60)
 
         pod = pod_factory(source_pvc, name_suffix="writer")
@@ -93,7 +98,9 @@ class TestLinkedCloneMode:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
+        assert wait_pvc_bound(
+            clone_pvc, timeout=120
+        ), f"Clone PVC {clone_pvc} not bound"
 
         # Verify data
         clone_pod = pod_factory(clone_pvc, name_suffix="reader")
@@ -115,7 +122,9 @@ class TestLinkedCloneMode:
     ):
         """LINKED clone can be written to independently."""
         # Create source and snapshot
-        source_pvc = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source")
+        source_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source"
+        )
         assert wait_pvc_bound(source_pvc, timeout=60)
 
         snap_name = snapshot_factory(source_pvc)
@@ -132,7 +141,9 @@ class TestLinkedCloneMode:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
+        assert wait_pvc_bound(
+            clone_pvc, timeout=120
+        ), f"Clone PVC {clone_pvc} not bound"
 
         # Write to clone
         clone_pod = pod_factory(clone_pvc)
@@ -158,10 +169,13 @@ class TestLinkedCloneMode:
         snapshot_factory: Callable,
         wait_pvc_bound: Callable,
         wait_snapshot_ready: Callable,
+        wait_pv_deleted: Callable,
     ):
         """Delete source volume - should auto-promote clone."""
         # Create source
-        source_pvc = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source")
+        source_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source"
+        )
         assert wait_pvc_bound(source_pvc, timeout=60)
 
         source_pv = k8s.get_pvc_volume(source_pvc)
@@ -180,7 +194,9 @@ class TestLinkedCloneMode:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
+        assert wait_pvc_bound(
+            clone_pvc, timeout=120
+        ), f"Clone PVC {clone_pvc} not bound"
 
         clone_pv = k8s.get_pvc_volume(clone_pvc)
         clone_dataset = f"{storage.csi_path}/{clone_pv}"
@@ -192,10 +208,14 @@ class TestLinkedCloneMode:
         # Delete source PVC first - this should trigger auto-promote of the clone
         # NOTE: Don't delete snapshot first - ZFS won't allow it while clone depends on it
         k8s.delete("pvc", source_pvc, wait=True)
-        time.sleep(5)
+
+        # Wait for source PV deletion (indicates promotion completed)
+        assert wait_pv_deleted(source_pv, timeout=60), "Source PV not deleted"
 
         # Clone should still exist after source deletion
-        assert storage.verify_dataset_exists(clone_dataset), "Clone deleted unexpectedly"
+        assert storage.verify_dataset_exists(
+            clone_dataset
+        ), "Clone deleted unexpectedly"
 
         # After auto-promote, clone may no longer have origin
         # (or origin points to a local snapshot)
@@ -215,7 +235,9 @@ class TestLinkedCloneMode:
     ):
         """Create multiple clones from single snapshot."""
         # Create source and snapshot
-        source_pvc = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source")
+        source_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source"
+        )
         assert wait_pvc_bound(source_pvc, timeout=60)
 
         snap_name = snapshot_factory(source_pvc)
@@ -235,7 +257,9 @@ class TestLinkedCloneMode:
                 name_suffix=f"clone-{i}",
             )
             clones.append(clone_pvc)
-            assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
+            assert wait_pvc_bound(
+                clone_pvc, timeout=120
+            ), f"Clone PVC {clone_pvc} not bound"
 
         # Verify all clones exist with origins
         for clone_pvc in clones:

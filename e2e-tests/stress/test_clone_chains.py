@@ -72,7 +72,9 @@ class TestCloneChains:
             print(f"Deleting volume {i}: {vol}")
             # Delete associated snapshot first (if any)
             if i < len(snapshots):
-                k8s.delete("volumesnapshot", snapshots[i], wait=True, ignore_not_found=True)
+                k8s.delete(
+                    "volumesnapshot", snapshots[i], wait=True, ignore_not_found=True
+                )
                 time.sleep(2)
 
             k8s.delete("pvc", vol, wait=True)
@@ -200,6 +202,7 @@ class TestCloneChains:
 
         # Delete in "random" order: D, B, E, C
         import random
+
         delete_order = clones.copy()
         random.shuffle(delete_order)
 

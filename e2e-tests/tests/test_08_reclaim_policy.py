@@ -3,7 +3,6 @@
 Tests Delete vs Retain reclaim policies.
 """
 
-import time
 from typing import Callable
 
 import pytest
@@ -21,10 +20,13 @@ class TestReclaimPolicy:
         storage: StorageMonitor,
         pvc_factory: Callable,
         wait_pvc_bound: Callable,
+        wait_pv_deleted: Callable,
     ):
         """Delete policy removes PV and backend storage."""
         # Use StorageClass with Delete policy
-        pvc_name = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi")  # reclaimPolicy: Delete
+        pvc_name = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi"
+        )  # reclaimPolicy: Delete
         assert wait_pvc_bound(pvc_name, timeout=60)
 
         pv_name = k8s.get_pvc_volume(pvc_name)
@@ -36,10 +38,11 @@ class TestReclaimPolicy:
 
         # Delete PVC
         k8s.delete("pvc", pvc_name, wait=True)
-        time.sleep(5)
 
-        # PV and backend should be gone
-        assert k8s.get("pv", pv_name) is None, "PV not deleted with Delete policy"
+        # Wait for PV to be deleted (includes backend cleanup)
+        assert wait_pv_deleted(pv_name, timeout=60), "PV not deleted with Delete policy"
+
+        # Verify backend is gone
         assert not storage.verify_dataset_exists(dataset), "Dataset not deleted"
 
     def test_retain_policy(
@@ -51,24 +54,31 @@ class TestReclaimPolicy:
     ):
         """Retain policy keeps PV and backend storage after PVC delete."""
         # Use StorageClass with Retain policy
-        pvc_name = pvc_factory("freebsd-e2e-iscsi-retain", "1Gi")  # reclaimPolicy: Retain
+        pvc_name = pvc_factory(
+            "freebsd-e2e-iscsi-retain", "1Gi"
+        )  # reclaimPolicy: Retain
         assert wait_pvc_bound(pvc_name, timeout=60)
 
         pv_name = k8s.get_pvc_volume(pvc_name)
         dataset = f"{storage.csi_path}/{pv_name}"
 
-        # Delete PVC
+        # Delete PVC and wait for PV to transition to Released
         k8s.delete("pvc", pvc_name, wait=True)
-        time.sleep(5)
+
+        # Wait for PV phase to become Released
+        assert k8s.wait_for(
+            "pv", pv_name, "jsonpath={.status.phase}=Released", timeout=30
+        ), "PV did not transition to Released"
 
         # PV should still exist with Released status
         pv = k8s.get("pv", pv_name)
         assert pv is not None, "PV deleted with Retain policy"
-        assert pv.get("status", {}).get("phase") == "Released"
 
         # Backend storage should still exist
         assert storage.verify_dataset_exists(dataset), "Dataset deleted with Retain"
-        assert storage.verify_volume_exported(pv_name, "iscsi"), "Export removed with Retain"
+        assert storage.verify_volume_exported(
+            pv_name, "iscsi"
+        ), "Export removed with Retain"
 
         # Manual cleanup for test hygiene:
         # 1. Delete the PV from Kubernetes
@@ -84,6 +94,7 @@ class TestReclaimPolicy:
         snapshot_factory: Callable,
         wait_pvc_bound: Callable,
         wait_snapshot_ready: Callable,
+        wait_pv_deleted: Callable,
     ):
         """Delete policy with snapshots - volume deleted when last snapshot gone."""
         # Create volume and snapshot
@@ -91,24 +102,21 @@ class TestReclaimPolicy:
         assert wait_pvc_bound(pvc_name, timeout=60)
 
         pv_name = k8s.get_pvc_volume(pvc_name)
-        dataset = f"{storage.csi_path}/{pv_name}"
 
         snap_name = snapshot_factory(pvc_name)
         assert wait_snapshot_ready(snap_name, timeout=60)
 
         # Delete PVC first
         k8s.delete("pvc", pvc_name, wait=True)
-        time.sleep(5)
 
         # PV may still exist due to snapshot dependency
         # This depends on the VolumeSnapshotContent deletion policy
 
-        # Delete snapshot
+        # Delete snapshot and wait for cascading cleanup
         k8s.delete("volumesnapshot", snap_name, wait=True)
-        time.sleep(5)
 
-        # Now everything should be cleaned up
-        # Note: May need additional time for cascading deletes
+        # Wait for PV to be deleted (cascading from snapshot deletion)
+        wait_pv_deleted(pv_name, timeout=60)
 
     def test_mixed_policies_independent(
         self,
@@ -116,11 +124,16 @@ class TestReclaimPolicy:
         storage: StorageMonitor,
         pvc_factory: Callable,
         wait_pvc_bound: Callable,
+        wait_pv_deleted: Callable,
     ):
         """Volumes with different reclaim policies behave independently."""
         # Create one with Delete and one with Retain
-        delete_pvc = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix="delete")
-        retain_pvc = pvc_factory("freebsd-e2e-iscsi-retain", "1Gi", name_suffix="retain")
+        delete_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi", name_suffix="delete"
+        )
+        retain_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-retain", "1Gi", name_suffix="retain"
+        )
 
         assert wait_pvc_bound(delete_pvc, timeout=60)
         assert wait_pvc_bound(retain_pvc, timeout=60)
@@ -134,10 +147,9 @@ class TestReclaimPolicy:
         # Delete both PVCs
         k8s.delete("pvc", delete_pvc, wait=True)
         k8s.delete("pvc", retain_pvc, wait=True)
-        time.sleep(5)
 
-        # Delete policy volume should be gone
-        assert k8s.get("pv", delete_pv) is None
+        # Wait for Delete policy PV to be removed
+        assert wait_pv_deleted(delete_pv, timeout=60), "Delete policy PV not deleted"
         assert not storage.verify_dataset_exists(delete_dataset)
 
         # Retain policy volume should remain

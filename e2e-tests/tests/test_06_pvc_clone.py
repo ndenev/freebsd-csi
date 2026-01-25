@@ -4,7 +4,6 @@ Tests cloning directly from PVC (not snapshot) as dataSource.
 Internal temp snapshot (pvc-clone-*) should be created and cleaned up.
 """
 
-import time
 from typing import Callable
 
 import pytest
@@ -27,7 +26,9 @@ class TestPvcCloning:
     ):
         """Clone directly from PVC (creates temp snapshot internally)."""
         # Create source with data
-        source_pvc = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source")
+        source_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source"
+        )
         assert wait_pvc_bound(source_pvc, timeout=60)
 
         pod = pod_factory(source_pvc, name_suffix="writer")
@@ -48,7 +49,9 @@ class TestPvcCloning:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
+        assert wait_pvc_bound(
+            clone_pvc, timeout=120
+        ), f"Clone PVC {clone_pvc} not bound"
 
         # Verify clone has data
         clone_pod = pod_factory(clone_pvc, name_suffix="reader")
@@ -67,7 +70,9 @@ class TestPvcCloning:
     ):
         """PVC cloning creates internal pvc-clone-* snapshot."""
         # Create source
-        source_pvc = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source")
+        source_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source"
+        )
         assert wait_pvc_bound(source_pvc, timeout=60)
 
         source_pv = k8s.get_pvc_volume(source_pvc)
@@ -89,17 +94,17 @@ class TestPvcCloning:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
+        assert wait_pvc_bound(
+            clone_pvc, timeout=120
+        ), f"Clone PVC {clone_pvc} not bound"
 
         # Verify temp snapshot was created
         snaps_after = storage.list_snapshots(source_dataset)
-        pvc_clone_snaps_after = [
-            s for s in snaps_after if "pvc-clone-" in s.snap_name
-        ]
+        pvc_clone_snaps_after = [s for s in snaps_after if "pvc-clone-" in s.snap_name]
 
-        assert len(pvc_clone_snaps_after) > len(pvc_clone_snaps_before), (
-            "No pvc-clone-* snapshot created"
-        )
+        assert len(pvc_clone_snaps_after) > len(
+            pvc_clone_snaps_before
+        ), "No pvc-clone-* snapshot created"
 
     def test_pvc_clone_temp_snapshot_cleanup(
         self,
@@ -107,10 +112,13 @@ class TestPvcCloning:
         storage: StorageMonitor,
         pvc_factory: Callable,
         wait_pvc_bound: Callable,
+        wait_pv_deleted: Callable,
     ):
         """Temp snapshot (pvc-clone-*) cleaned up when clone deleted."""
         # Create source
-        source_pvc = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source")
+        source_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source"
+        )
         assert wait_pvc_bound(source_pvc, timeout=60)
 
         source_pv = k8s.get_pvc_volume(source_pvc)
@@ -126,25 +134,29 @@ class TestPvcCloning:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
+        assert wait_pvc_bound(
+            clone_pvc, timeout=120
+        ), f"Clone PVC {clone_pvc} not bound"
+
+        clone_pv = k8s.get_pvc_volume(clone_pvc)
 
         # Verify temp snapshot exists
         snaps = storage.list_snapshots(source_dataset)
         pvc_clone_snaps = [s for s in snaps if "pvc-clone-" in s.snap_name]
         assert len(pvc_clone_snaps) >= 1
 
-        # Delete clone
+        # Delete clone and wait for PV cleanup
         k8s.delete("pvc", clone_pvc, wait=True)
-        time.sleep(5)
+        assert wait_pv_deleted(clone_pv, timeout=60), "Clone PV not deleted"
 
         # Temp snapshot should be cleaned up
         snaps_after = storage.list_snapshots(source_dataset)
         pvc_clone_snaps_after = [s for s in snaps_after if "pvc-clone-" in s.snap_name]
 
         # Should have fewer temp snapshots (or none if only one clone existed)
-        assert len(pvc_clone_snaps_after) < len(pvc_clone_snaps), (
-            "Temp snapshot not cleaned up"
-        )
+        assert len(pvc_clone_snaps_after) < len(
+            pvc_clone_snaps
+        ), "Temp snapshot not cleaned up"
 
     def test_pvc_clone_independence(
         self,
@@ -156,7 +168,9 @@ class TestPvcCloning:
     ):
         """Clone from PVC is independent - can modify without affecting source."""
         # Create source with data
-        source_pvc = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source")
+        source_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source"
+        )
         assert wait_pvc_bound(source_pvc, timeout=60)
 
         source_pod = pod_factory(source_pvc, name_suffix="source-pod")
@@ -180,7 +194,9 @@ class TestPvcCloning:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
+        assert wait_pvc_bound(
+            clone_pvc, timeout=120
+        ), f"Clone PVC {clone_pvc} not bound"
 
         # Modify clone
         clone_pod = pod_factory(clone_pvc, name_suffix="clone-pod")
@@ -215,7 +231,9 @@ class TestPvcCloning:
     ):
         """Create multiple clones from same PVC."""
         # Create source
-        source_pvc = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source")
+        source_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source"
+        )
         assert wait_pvc_bound(source_pvc, timeout=60)
 
         source_pv = k8s.get_pvc_volume(source_pvc)
@@ -234,7 +252,9 @@ class TestPvcCloning:
                 name_suffix=f"clone-{i}",
             )
             clones.append(clone_pvc)
-            assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
+            assert wait_pvc_bound(
+                clone_pvc, timeout=120
+            ), f"Clone PVC {clone_pvc} not bound"
 
         # Each clone should have its own temp snapshot (or share one)
         # Main verification: all clones exist

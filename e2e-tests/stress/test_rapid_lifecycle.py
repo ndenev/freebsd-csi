@@ -64,7 +64,9 @@ class TestRapidLifecycle:
     ):
         """Create and delete snapshots rapidly on same volume."""
         # Create source volume
-        source_pvc = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source")
+        source_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source"
+        )
         assert wait_pvc_bound(source_pvc, timeout=60)
 
         pv_name = k8s.get_pvc_volume(source_pvc)
@@ -163,7 +165,9 @@ class TestRapidLifecycle:
     ):
         """Rapidly create and delete clones from same snapshot."""
         # Create source and snapshot
-        source_pvc = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source")
+        source_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source"
+        )
         assert wait_pvc_bound(source_pvc, timeout=60)
 
         snap_name = snapshot_factory(source_pvc)
@@ -227,9 +231,7 @@ class TestRapidLifecycle:
 
         # No unexpected datasets should remain
         unexpected = [
-            ds
-            for ds in diff["datasets"]["added"]
-            if f"consistency-{unique_name}" in ds
+            ds for ds in diff["datasets"]["added"] if f"consistency-{unique_name}" in ds
         ]
         assert len(unexpected) == 0, f"Unexpected datasets remain: {unexpected}"
 

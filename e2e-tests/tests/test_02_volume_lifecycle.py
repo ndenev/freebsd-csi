@@ -3,7 +3,6 @@
 Tests CreateVolume, DeleteVolume, ExpandVolume, and data persistence.
 """
 
-import time
 from typing import Callable
 
 import pytest
@@ -67,6 +66,7 @@ class TestVolumeLifecycle:
         storage: StorageMonitor,
         pvc_factory: Callable,
         wait_pvc_bound: Callable,
+        wait_pv_deleted: Callable,
     ):
         """Delete volume, verify ZFS dataset and export removed."""
         pvc_name = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi")
@@ -81,8 +81,8 @@ class TestVolumeLifecycle:
         # Delete PVC (with Delete reclaim policy, PV should also be deleted)
         k8s.delete("pvc", pvc_name, wait=True)
 
-        # Wait a bit for cleanup
-        time.sleep(5)
+        # Wait for PV to be deleted (indicates backend cleanup is complete)
+        assert wait_pv_deleted(pv_name, timeout=60), f"PV {pv_name} not deleted"
 
         # Verify ZFS dataset is gone
         assert not storage.verify_dataset_exists(dataset), "Dataset not cleaned up"
@@ -98,6 +98,7 @@ class TestVolumeLifecycle:
         pod_factory: Callable,
         wait_pvc_bound: Callable,
         wait_pod_ready: Callable,
+        wait_pvc_resized: Callable,
     ):
         """Expand volume online, verify new size in ZFS."""
         pvc_name = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi")
@@ -118,10 +119,10 @@ class TestVolumeLifecycle:
         # Expand PVC to 2Gi
         k8s.expand_pvc(pvc_name, "2Gi")
 
-        # Wait for expansion
-        time.sleep(10)
+        # Wait for PVC expansion to complete
+        assert wait_pvc_resized(pvc_name, "2Gi", timeout=60), "PVC expansion failed"
 
-        # Verify new size
+        # Verify new size in ZFS
         info_after = storage.get_dataset_info(dataset)
         assert info_after is not None
         new_size = info_after.volsize
@@ -180,7 +181,9 @@ class TestVolumeLifecycle:
         """Create multiple volumes, verify independent datasets."""
         pvcs = []
         for i in range(3):
-            pvc_name = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix=f"multi-{i}")
+            pvc_name = pvc_factory(
+                "freebsd-e2e-iscsi-linked", "1Gi", name_suffix=f"multi-{i}"
+            )
             pvcs.append(pvc_name)
 
         # Wait for all to be bound

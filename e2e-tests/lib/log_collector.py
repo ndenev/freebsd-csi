@@ -131,7 +131,9 @@ class LogCollector:
                 if container:
                     cmd.extend(["-c", container])
 
-                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, check=False
+                )
                 if result.stdout:
                     all_logs.append(f"=== Pod: {pod} ===")
                     all_logs.append(result.stdout)

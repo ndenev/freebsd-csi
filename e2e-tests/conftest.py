@@ -13,7 +13,6 @@ from lib.log_collector import LogCollector
 from lib.storage_monitor import StorageMonitor, StorageState
 from lib.resource_tracker import ResourceTracker
 
-
 # -------------------------------------------------------------------------
 # Configuration
 # -------------------------------------------------------------------------
@@ -102,7 +101,9 @@ def resources_dir() -> Path:
 
 
 @pytest.fixture(scope="session")
-def setup_storageclasses(k8s: K8sClient, resources_dir: Path) -> Generator[list[str], None, None]:
+def setup_storageclasses(
+    k8s: K8sClient, resources_dir: Path
+) -> Generator[list[str], None, None]:
     """Create test StorageClasses and VolumeSnapshotClass at session start, cleanup at end."""
     storage_class_dir = resources_dir / "storageclasses"
     snapshot_class_dir = resources_dir / "snapshotclasses"
@@ -126,7 +127,9 @@ def setup_storageclasses(k8s: K8sClient, resources_dir: Path) -> Generator[list[
                 k8s.apply_file(str(yaml_file))
                 created_snapshot_classes.append("freebsd-e2e-snapclass")
             except Exception as e:
-                print(f"Warning: Failed to create VolumeSnapshotClass from {yaml_file}: {e}")
+                print(
+                    f"Warning: Failed to create VolumeSnapshotClass from {yaml_file}: {e}"
+                )
 
     yield created_classes
 
@@ -344,6 +347,26 @@ def wait_snapshot_ready(k8s: K8sClient) -> Callable[[str, int], bool]:
 
     def _wait(name: str, timeout: int = 60) -> bool:
         return k8s.wait_snapshot_ready(name, timeout)
+
+    return _wait
+
+
+@pytest.fixture
+def wait_pv_deleted(k8s: K8sClient) -> Callable[[str, int], bool]:
+    """Helper to wait for PV to be deleted."""
+
+    def _wait(pv_name: str, timeout: int = 60) -> bool:
+        return k8s.wait_pv_deleted(pv_name, timeout)
+
+    return _wait
+
+
+@pytest.fixture
+def wait_pvc_resized(k8s: K8sClient) -> Callable[[str, str, int], bool]:
+    """Helper to wait for PVC expansion to complete."""
+
+    def _wait(name: str, expected_size: str, timeout: int = 60) -> bool:
+        return k8s.wait_pvc_resized(name, expected_size, timeout)
 
     return _wait
 

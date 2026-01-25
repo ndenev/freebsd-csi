@@ -47,7 +47,9 @@ class TestConcurrentOperations:
 
         # Wait for all to be bound
         for pvc_name in created_pvcs:
-            assert k8s.wait_pvc_bound(pvc_name, timeout=120), f"PVC {pvc_name} not bound"
+            assert k8s.wait_pvc_bound(
+                pvc_name, timeout=120
+            ), f"PVC {pvc_name} not bound"
 
         # Verify all have ZFS datasets
         for pvc_name in created_pvcs:
@@ -95,7 +97,9 @@ class TestConcurrentOperations:
         time.sleep(10)
         for pv_name in pv_names:
             dataset = f"{storage.csi_path}/{pv_name}"
-            assert not storage.verify_dataset_exists(dataset), f"Dataset {dataset} not cleaned up"
+            assert not storage.verify_dataset_exists(
+                dataset
+            ), f"Dataset {dataset} not cleaned up"
 
     def test_parallel_snapshot_creation(
         self,
@@ -107,7 +111,9 @@ class TestConcurrentOperations:
     ):
         """Create multiple snapshots of same volume in parallel."""
         # Create source volume
-        source_pvc = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source")
+        source_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source"
+        )
         assert wait_pvc_bound(source_pvc, timeout=60)
 
         num_snapshots = 5
@@ -119,8 +125,12 @@ class TestConcurrentOperations:
             return name
 
         # Create snapshots in parallel
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_snapshots) as executor:
-            futures = [executor.submit(create_snapshot, i) for i in range(num_snapshots)]
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=num_snapshots
+        ) as executor:
+            futures = [
+                executor.submit(create_snapshot, i) for i in range(num_snapshots)
+            ]
             for future in concurrent.futures.as_completed(futures):
                 try:
                     snap_name = future.result()
@@ -152,7 +162,9 @@ class TestConcurrentOperations:
     ):
         """Create and delete clones in parallel from same snapshot."""
         # Create source and snapshot
-        source_pvc = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source")
+        source_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source"
+        )
         assert wait_pvc_bound(source_pvc, timeout=60)
 
         snap_name = snapshot_factory(source_pvc)
@@ -189,7 +201,9 @@ class TestConcurrentOperations:
 
         # Most operations should succeed
         success_count = sum(results)
-        assert success_count >= num_clones // 2, f"Too many failures: {success_count}/{num_clones}"
+        assert (
+            success_count >= num_clones // 2
+        ), f"Too many failures: {success_count}/{num_clones}"
 
     def test_mixed_operations_parallel(
         self,

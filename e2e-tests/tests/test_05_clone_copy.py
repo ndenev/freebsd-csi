@@ -3,7 +3,6 @@
 Tests cloning from snapshots using zfs send/recv (slow, independent).
 """
 
-import time
 from typing import Callable
 
 import pytest
@@ -115,6 +114,7 @@ class TestCopyCloneMode:
         snapshot_factory: Callable,
         wait_pvc_bound: Callable,
         wait_snapshot_ready: Callable,
+        wait_pv_deleted: Callable,
     ):
         """Source can be deleted immediately after COPY clone completes."""
         # Create source
@@ -147,7 +147,8 @@ class TestCopyCloneMode:
         k8s.delete("volumesnapshot", snap_name, wait=True)
         k8s.delete("pvc", source_pvc, wait=True)
 
-        time.sleep(5)
+        # Wait for source PV to be deleted
+        assert wait_pv_deleted(source_pv, timeout=60), "Source PV not deleted"
 
         # Source should be gone
         assert not storage.verify_dataset_exists(source_dataset)

@@ -169,7 +169,9 @@ class K8sClient:
         """
         return self._kubectl_json(["-n", self.namespace, "get", kind, name])
 
-    def list_resources(self, kind: str, label_selector: str | None = None) -> list[dict]:
+    def list_resources(
+        self, kind: str, label_selector: str | None = None
+    ) -> list[dict]:
         """List resources of a kind.
 
         Args:
@@ -188,7 +190,9 @@ class K8sClient:
             return result["items"]
         return []
 
-    def patch(self, kind: str, name: str, patch: dict, patch_type: str = "merge") -> dict:
+    def patch(
+        self, kind: str, name: str, patch: dict, patch_type: str = "merge"
+    ) -> dict:
         """Patch a resource.
 
         Args:
@@ -251,6 +255,146 @@ class K8sClient:
         except subprocess.CalledProcessError:
             return False
 
+    def wait_for_delete(
+        self,
+        kind: str,
+        name: str,
+        timeout: int = 60,
+        cluster_scoped: bool = False,
+    ) -> bool:
+        """Wait for a resource to be deleted.
+
+        Args:
+            kind: Resource kind
+            name: Resource name
+            timeout: Wait timeout in seconds
+            cluster_scoped: If True, don't use namespace (for PV, StorageClass, etc.)
+
+        Returns:
+            True if deleted (or already gone), False on timeout
+        """
+        args = ["wait", f"{kind}/{name}", "--for=delete", f"--timeout={timeout}s"]
+        if not cluster_scoped:
+            args = ["-n", self.namespace] + args
+
+        try:
+            self._kubectl(args, timeout=timeout + 10)
+            return True
+        except subprocess.CalledProcessError:
+            # Check if resource is already gone
+            if cluster_scoped:
+                result = self._kubectl(["get", kind, name], check=False)
+            else:
+                result = self._kubectl(
+                    ["-n", self.namespace, "get", kind, name], check=False
+                )
+            return result.returncode != 0
+
+    def wait_pv_deleted(self, pv_name: str, timeout: int = 60) -> bool:
+        """Wait for a PersistentVolume to be deleted.
+
+        Used after deleting a PVC with Delete reclaim policy to verify
+        the PV and backend storage are cleaned up.
+
+        Args:
+            pv_name: PV name
+            timeout: Wait timeout in seconds
+
+        Returns:
+            True if deleted, False on timeout
+        """
+        return self.wait_for_delete("pv", pv_name, timeout, cluster_scoped=True)
+
+    def wait_pvc_resized(
+        self,
+        name: str,
+        expected_size: str,
+        timeout: int = 60,
+    ) -> bool:
+        """Wait for PVC expansion to complete.
+
+        Args:
+            name: PVC name
+            expected_size: Expected size after expansion (e.g., "2Gi")
+            timeout: Wait timeout in seconds
+
+        Returns:
+            True if resized, False on timeout
+        """
+        expected_bytes = self._parse_size(expected_size)
+        deadline = time.time() + timeout
+
+        while time.time() < deadline:
+            pvc = self.get("pvc", name)
+            if pvc:
+                # Check for resize conditions
+                conditions = pvc.get("status", {}).get("conditions", [])
+                for cond in conditions:
+                    # FileSystemResizePending means resize is still in progress
+                    if (
+                        cond.get("type") == "FileSystemResizePending"
+                        and cond.get("status") == "True"
+                    ):
+                        break
+                else:
+                    # No pending resize, check actual capacity
+                    capacity = pvc.get("status", {}).get("capacity", {}).get("storage")
+                    if capacity and self._parse_size(capacity) >= expected_bytes:
+                        return True
+            time.sleep(2)
+
+        return False
+
+    def _parse_size(self, size_str: str) -> int:
+        """Parse Kubernetes size string to bytes.
+
+        Args:
+            size_str: Size string (e.g., "1Gi", "500Mi", "1000000")
+
+        Returns:
+            Size in bytes
+        """
+        if not size_str:
+            return 0
+
+        # Try parsing as plain integer (bytes)
+        try:
+            return int(size_str)
+        except ValueError:
+            pass
+
+        # Binary units (Ki, Mi, Gi, Ti)
+        binary_units = {
+            "Ki": 1024,
+            "Mi": 1024**2,
+            "Gi": 1024**3,
+            "Ti": 1024**4,
+        }
+
+        # Decimal units (K, M, G, T) - less common in K8s but supported
+        decimal_units = {
+            "K": 1000,
+            "M": 1000**2,
+            "G": 1000**3,
+            "T": 1000**4,
+        }
+
+        for suffix, multiplier in binary_units.items():
+            if size_str.endswith(suffix):
+                try:
+                    return int(float(size_str[: -len(suffix)]) * multiplier)
+                except ValueError:
+                    pass
+
+        for suffix, multiplier in decimal_units.items():
+            if size_str.endswith(suffix):
+                try:
+                    return int(float(size_str[: -len(suffix)]) * multiplier)
+                except ValueError:
+                    pass
+
+        return 0
+
     # -------------------------------------------------------------------------
     # PVC Operations
     # -------------------------------------------------------------------------
@@ -292,7 +436,7 @@ class K8sClient:
         return self.apply(pvc)
 
     def wait_pvc_bound(self, name: str, timeout: int = 60) -> bool:
-        """Wait for PVC to be bound.
+        """Wait for PVC to be bound using kubectl wait.
 
         Args:
             name: PVC name
@@ -301,13 +445,7 @@ class K8sClient:
         Returns:
             True if bound, False on timeout
         """
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            pvc = self.get("pvc", name)
-            if pvc and pvc.get("status", {}).get("phase") == "Bound":
-                return True
-            time.sleep(2)
-        return False
+        return self.wait_for("pvc", name, "jsonpath={.status.phase}=Bound", timeout)
 
     def get_pvc_volume(self, name: str) -> str | None:
         """Get the PV name bound to a PVC.
@@ -388,7 +526,7 @@ class K8sClient:
         return self.apply(pod)
 
     def wait_pod_ready(self, pod_name: str, timeout: int = 120) -> bool:
-        """Wait for Pod to be ready/running.
+        """Wait for Pod to be ready using kubectl wait.
 
         Args:
             pod_name: Pod name
@@ -397,22 +535,7 @@ class K8sClient:
         Returns:
             True if ready, False on timeout
         """
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            pod = self.get("pod", pod_name)
-            if pod:
-                phase = pod.get("status", {}).get("phase")
-                if phase == "Running":
-                    # Check container ready
-                    conditions = pod.get("status", {}).get("conditions", [])
-                    for cond in conditions:
-                        if cond.get("type") == "Ready" and cond.get("status") == "True":
-                            return True
-                elif phase in ("Failed", "Succeeded"):
-                    # Pod terminated
-                    return False
-            time.sleep(2)
-        return False
+        return self.wait_for("pod", pod_name, "condition=Ready", timeout)
 
     def exec_in_pod(
         self,
@@ -476,7 +599,7 @@ class K8sClient:
         return self.apply(snapshot)
 
     def wait_snapshot_ready(self, name: str, timeout: int = 60) -> bool:
-        """Wait for VolumeSnapshot to be ready.
+        """Wait for VolumeSnapshot to be ready using kubectl wait.
 
         Args:
             name: Snapshot name
@@ -485,18 +608,10 @@ class K8sClient:
         Returns:
             True if ready, False on timeout
         """
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            snap = self.get("volumesnapshot", name)
-            if snap:
-                status = snap.get("status", {})
-                if status.get("readyToUse") is True:
-                    return True
-                # Check for error
-                if status.get("error"):
-                    return False
-            time.sleep(2)
-        return False
+        # kubectl wait with jsonpath for boolean true
+        return self.wait_for(
+            "volumesnapshot", name, "jsonpath={.status.readyToUse}=true", timeout
+        )
 
     def get_snapshot_content(self, name: str) -> str | None:
         """Get the VolumeSnapshotContent bound to a snapshot.
@@ -620,7 +735,9 @@ class K8sClient:
         Returns:
             True if deleted, False if not found
         """
-        return self.delete("secret", name, wait=False, ignore_not_found=ignore_not_found)
+        return self.delete(
+            "secret", name, wait=False, ignore_not_found=ignore_not_found
+        )
 
     def create_chap_secret(
         self,

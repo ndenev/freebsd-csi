@@ -74,7 +74,9 @@ class StorageState:
 class StorageMonitor:
     """Monitor FreeBSD storage state: ZFS, CTL, iSCSI."""
 
-    def __init__(self, pool: str = "tank", csi_prefix: str = "csi", use_sudo: bool = True):
+    def __init__(
+        self, pool: str = "tank", csi_prefix: str = "csi", use_sudo: bool = True
+    ):
         """Initialize storage monitor.
 
         Args:
@@ -248,7 +250,16 @@ class StorageMonitor:
         Returns:
             List of SnapshotInfo
         """
-        cmd = ["zfs", "list", "-H", "-p", "-t", "snapshot", "-o", "name,used,refer,clones"]
+        cmd = [
+            "zfs",
+            "list",
+            "-H",
+            "-p",
+            "-t",
+            "snapshot",
+            "-o",
+            "name,used,refer,clones",
+        ]
         if dataset:
             cmd.extend(["-r", dataset])
         else:
@@ -308,7 +319,9 @@ class StorageMonitor:
         Returns:
             True if exists
         """
-        result = self._run(["zfs", "list", "-H", "-t", "snapshot", snapshot], check=False)
+        result = self._run(
+            ["zfs", "list", "-H", "-t", "snapshot", snapshot], check=False
+        )
         return result.returncode == 0
 
     def get_origin(self, dataset: str) -> str | None:
@@ -403,7 +416,8 @@ class StorageMonitor:
                     backend=get_text("backend_type", "unknown"),
                     serial=get_text("serial_number"),
                     device_id=get_text("device_id"),
-                    size=get_int("size") * get_int("blocksize", 512),  # Convert to bytes
+                    size=get_int("size")
+                    * get_int("blocksize", 512),  # Convert to bytes
                     blocksize=get_int("blocksize", 512),
                     path=get_text("file") or None,
                 )
@@ -459,7 +473,9 @@ class StorageMonitor:
 
         return ports
 
-    def verify_volume_exported(self, volume_id: str, export_type: str = "iscsi") -> bool:
+    def verify_volume_exported(
+        self, volume_id: str, export_type: str = "iscsi"
+    ) -> bool:
         """Check if a volume is exported via CTL.
 
         Args:
@@ -496,7 +512,9 @@ class StorageMonitor:
     # Cleanup Operations (for Retain policy tests)
     # -------------------------------------------------------------------------
 
-    def cleanup_volume(self, volume_id: str, agent_address: str = "10.0.0.10:50051") -> bool:
+    def cleanup_volume(
+        self, volume_id: str, agent_address: str = "10.0.0.10:50051"
+    ) -> bool:
         """Clean up a volume's backend storage via ctld-agent.
 
         This is used for cleanup of Retain policy volumes where Kubernetes
@@ -570,10 +588,12 @@ class StorageMonitor:
             # Extract LUNs
             lun_pattern = re.compile(r'lun\s+(\d+)\s+"([^"]+)"')
             for lun_match in lun_pattern.finditer(target_body):
-                target["luns"].append({
-                    "id": int(lun_match.group(1)),
-                    "name": lun_match.group(2),
-                })
+                target["luns"].append(
+                    {
+                        "id": int(lun_match.group(1)),
+                        "name": lun_match.group(2),
+                    }
+                )
 
             targets.append(target)
 
@@ -699,7 +719,10 @@ class StorageMonitor:
             return False
         if expected_username and ag.chap_username != expected_username:
             return False
-        if expected_mutual_username and ag.chap_mutual_username != expected_mutual_username:
+        if (
+            expected_mutual_username
+            and ag.chap_mutual_username != expected_mutual_username
+        ):
             return False
         return True
 

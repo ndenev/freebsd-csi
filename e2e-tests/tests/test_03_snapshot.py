@@ -3,7 +3,6 @@
 Tests CreateSnapshot, DeleteSnapshot, and snapshot data consistency.
 """
 
-import time
 from typing import Callable
 
 import pytest
@@ -34,7 +33,9 @@ class TestSnapshotOperations:
 
         # Create snapshot
         snap_name = snapshot_factory(pvc_name)
-        assert wait_snapshot_ready(snap_name, timeout=60), f"Snapshot {snap_name} not ready"
+        assert wait_snapshot_ready(
+            snap_name, timeout=60
+        ), f"Snapshot {snap_name} not ready"
 
         # Verify ZFS snapshot exists
         snapshots = storage.list_snapshots(dataset)
@@ -62,18 +63,19 @@ class TestSnapshotOperations:
 
         # Count snapshots before delete
         snaps_before = storage.list_snapshots(dataset)
-        count_before = len(snaps_before)
 
-        # Delete snapshot
+        # Delete snapshot and wait for it to be removed
         k8s.delete("volumesnapshot", snap_name, wait=True)
 
-        # Wait for cleanup
-        time.sleep(5)
+        # Wait for VolumeSnapshot to be fully deleted
+        assert k8s.wait_for_delete(
+            "volumesnapshot", snap_name, timeout=30
+        ), f"VolumeSnapshot {snap_name} not deleted"
 
-        # Verify snapshot removed (unless it has clones)
+        # Verify ZFS snapshot removed (unless it has clones)
         snaps_after = storage.list_snapshots(dataset)
-        # Note: Snapshot may remain if it has clones
-        # For now just verify the delete completed without error
+        # Note: ZFS snapshot may remain if it has clones
+        # For now just verify the K8s delete completed without error
 
     def test_snapshot_data_consistency(
         self,
@@ -87,7 +89,9 @@ class TestSnapshotOperations:
     ):
         """Snapshot captures point-in-time data correctly."""
         # Create source with data
-        source_pvc = pvc_factory("freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source")
+        source_pvc = pvc_factory(
+            "freebsd-e2e-iscsi-linked", "1Gi", name_suffix="source"
+        )
         assert wait_pvc_bound(source_pvc, timeout=60)
 
         # Write initial data
@@ -130,7 +134,9 @@ class TestSnapshotOperations:
             },
             name_suffix="clone",
         )
-        assert wait_pvc_bound(clone_pvc, timeout=120), f"Clone PVC {clone_pvc} not bound"
+        assert wait_pvc_bound(
+            clone_pvc, timeout=120
+        ), f"Clone PVC {clone_pvc} not bound"
 
         # Delete source pod before mounting clone
         k8s.delete("pod", pod_name, wait=True)
@@ -141,7 +147,9 @@ class TestSnapshotOperations:
 
         stdout, _, rc = k8s.exec_in_pod(clone_pod, ["cat", "/mnt/data/test.txt"])
         assert rc == 0
-        assert original_data in stdout, f"Clone should have original data, got: {stdout}"
+        assert (
+            original_data in stdout
+        ), f"Clone should have original data, got: {stdout}"
         assert modified_data not in stdout, "Clone should NOT have modified data"
 
     def test_multiple_snapshots(
@@ -167,8 +175,6 @@ class TestSnapshotOperations:
             snap_name = snapshot_factory(pvc_name, name_suffix=f"multi-{i}")
             snap_names.append(snap_name)
             assert wait_snapshot_ready(snap_name, timeout=60)
-            # Small delay between snapshots
-            time.sleep(1)
 
         # Verify multiple ZFS snapshots exist
         zfs_snaps = storage.list_snapshots(dataset)
