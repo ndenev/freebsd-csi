@@ -401,7 +401,7 @@ impl NodeService {
 
         // Fall back to volume_context
         let fs_type_raw = volume_context
-            .get("fs_type")
+            .get("fsType")
             .map(|s| s.as_str())
             .unwrap_or("");
 
@@ -480,15 +480,13 @@ impl csi::node_server::Node for NodeService {
 
         // Get volume context parameters
         let target_name = volume_context
-            .get("target_name")
-            .or_else(|| volume_context.get("targetName"))
-            .ok_or_else(|| Status::invalid_argument("target_name is required in volume context"))?;
+            .get("targetName")
+            .ok_or_else(|| Status::invalid_argument("targetName is required in volume context"))?;
 
         Self::validate_target_name(target_name)?;
 
         let export_type: ExportType = volume_context
-            .get("export_type")
-            .or_else(|| volume_context.get("exportType"))
+            .get("exportType")
             .and_then(|s| s.parse().ok())
             .unwrap_or_default();
 

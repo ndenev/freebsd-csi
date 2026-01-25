@@ -88,26 +88,21 @@ fn proto_to_ctl_auth(auth: Option<&AuthCredentials>) -> AuthConfig {
 /// Parse CTL options from request parameters.
 ///
 /// Supports the following StorageClass parameters:
-/// - `blockSize` (or `block_size`): Logical block size (512 or 4096)
-/// - `physicalBlockSize` (or `physical_block_size`, `pblocksize`): Physical block hint
-/// - `enableUnmap` (or `enable_unmap`, `unmap`): Enable TRIM/discard ("true" or "false")
+/// - `blockSize`: Logical block size (512 or 4096)
+/// - `physicalBlockSize`: Physical block hint
+/// - `enableUnmap`: Enable TRIM/discard ("true" or "false")
 fn parse_ctl_options(params: &HashMap<String, String>) -> CtlOptions {
     let blocksize = params
         .get("blockSize")
-        .or_else(|| params.get("block_size"))
         .and_then(|v| v.parse::<u32>().ok())
         .filter(|&bs| bs == 512 || bs == 4096);
 
     let pblocksize = params
         .get("physicalBlockSize")
-        .or_else(|| params.get("physical_block_size"))
-        .or_else(|| params.get("pblocksize"))
         .and_then(|v| v.parse::<u32>().ok());
 
     let unmap = params
         .get("enableUnmap")
-        .or_else(|| params.get("enable_unmap"))
-        .or_else(|| params.get("unmap"))
         .and_then(|v| match v.to_lowercase().as_str() {
             "true" | "1" | "on" | "yes" => Some(true),
             "false" | "0" | "off" | "no" => Some(false),
