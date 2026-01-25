@@ -1,23 +1,17 @@
 //! Platform abstraction for CSI Node operations
 //!
-//! Provides platform-specific implementations for iSCSI, NVMeoF, filesystem
-//! operations, and bind mounts. Uses compile-time platform selection via
-//! `#[cfg(target_os)]` for zero runtime overhead.
+//! Provides Linux-specific implementations for iSCSI, NVMeoF, filesystem
+//! operations, and bind mounts.
 //!
 //! # Usage
 //!
 //! ```ignore
 //! use crate::platform::Platform;
 //!
-//! // Platform is a type alias to the current OS implementation
 //! let device = Platform::connect_iscsi(target_iqn, portal)?;
 //! Platform::format_device(&device, "ext4")?;
 //! ```
 
-#[cfg(target_os = "freebsd")]
-mod freebsd;
-
-#[cfg(target_os = "linux")]
 mod linux;
 
 use tonic::Status;
@@ -25,11 +19,10 @@ use tonic::Status;
 /// Result type for platform operations
 pub type PlatformResult<T> = Result<T, Status>;
 
-/// Platform-agnostic interface for storage operations.
+/// Platform interface for storage operations.
 ///
-/// Each platform (FreeBSD, Linux) implements this trait on a marker struct,
-/// providing compile-time enforcement that all platforms support the same
-/// operations with matching signatures.
+/// Defines the required operations for iSCSI, NVMeoF, filesystem formatting,
+/// and mount operations.
 pub trait StorageOps {
     /// Check if an iSCSI target is currently connected.
     fn is_iscsi_connected(target_iqn: &str) -> bool;
@@ -68,7 +61,7 @@ pub trait StorageOps {
     /// Mount a device to a target path.
     fn mount_device(device: &str, target: &str, fs_type: &str) -> PlatformResult<()>;
 
-    /// Create a bind mount (nullfs on FreeBSD, --bind on Linux).
+    /// Create a bind mount.
     fn bind_mount(source: &str, target: &str) -> PlatformResult<()>;
 
     /// Unmount a path.
@@ -84,9 +77,4 @@ pub trait StorageOps {
     fn default_fs_type() -> &'static str;
 }
 
-// Re-export the platform-specific marker struct as `Platform`
-#[cfg(target_os = "freebsd")]
-pub use freebsd::FreeBsdPlatform as Platform;
-
-#[cfg(target_os = "linux")]
 pub use linux::LinuxPlatform as Platform;

@@ -336,36 +336,34 @@ impl ControllerService {
         volume_context.insert("lun_id".to_string(), volume.lun_id.to_string());
         volume_context.insert("zfs_dataset".to_string(), volume.zfs_dataset.clone());
 
-        let export_type_str = match crate::agent::ExportType::try_from(volume.export_type) {
-            Ok(crate::agent::ExportType::Iscsi) => "iscsi",
-            Ok(crate::agent::ExportType::Nvmeof) => "nvmeof",
-            _ => "iscsi", // Default to iSCSI for unspecified
+        // Convert proto ExportType to our typed enum for type-safe matching
+        let export_type = match crate::agent::ExportType::try_from(volume.export_type) {
+            Ok(crate::agent::ExportType::Iscsi) => ExportType::Iscsi,
+            Ok(crate::agent::ExportType::Nvmeof) => ExportType::Nvmeof,
+            _ => ExportType::Iscsi, // Default to iSCSI for unspecified
         };
-        volume_context.insert("export_type".to_string(), export_type_str.to_string());
+        volume_context.insert("export_type".to_string(), export_type.to_string());
 
         // Pass through portal/address info for node service (required on Linux)
         // endpoints format: "ip:port,ip:port,..." (first endpoint used for single-path)
-        if let Some(endpoints) = parameters.get("endpoints") {
-            // Parse endpoints - take first one for connection
-            if let Some(first_endpoint) = endpoints.split(',').next() {
-                let endpoint = first_endpoint.trim();
-                match export_type_str {
-                    "iscsi" => {
-                        // For iSCSI, pass as portal (ip:port format)
-                        volume_context.insert("portal".to_string(), endpoint.to_string());
+        if let Some(endpoints) = parameters.get("endpoints")
+            && let Some(first_endpoint) = endpoints.split(',').next()
+        {
+            let endpoint = first_endpoint.trim();
+            match export_type {
+                ExportType::Iscsi => {
+                    // For iSCSI, pass as portal (ip:port format)
+                    volume_context.insert("portal".to_string(), endpoint.to_string());
+                }
+                ExportType::Nvmeof => {
+                    // For NVMeoF, split into addr and port
+                    if let Some((addr, port)) = endpoint.rsplit_once(':') {
+                        volume_context.insert("transport_addr".to_string(), addr.to_string());
+                        volume_context.insert("transport_port".to_string(), port.to_string());
+                    } else {
+                        // No port specified, use just the address
+                        volume_context.insert("transport_addr".to_string(), endpoint.to_string());
                     }
-                    "nvmeof" => {
-                        // For NVMeoF, split into addr and port
-                        if let Some((addr, port)) = endpoint.rsplit_once(':') {
-                            volume_context.insert("transport_addr".to_string(), addr.to_string());
-                            volume_context.insert("transport_port".to_string(), port.to_string());
-                        } else {
-                            // No port specified, use just the address
-                            volume_context
-                                .insert("transport_addr".to_string(), endpoint.to_string());
-                        }
-                    }
-                    _ => {}
                 }
             }
         }
