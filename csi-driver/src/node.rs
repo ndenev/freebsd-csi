@@ -310,9 +310,14 @@ impl NodeService {
     /// Returning success when still connected would lie to Kubernetes and
     /// could cause data corruption (zombie LUNs, dual-attach scenarios).
     fn disconnect_volume_targets(volume_id: &str) -> Result<(), Status> {
+        debug!(volume_id = %volume_id, "Attempting to disconnect volume targets");
+
         // Try iSCSI first
         let iqn = Self::derive_iqn(volume_id);
-        if Platform::is_iscsi_connected(&iqn) {
+        let iscsi_connected = Platform::is_iscsi_connected(&iqn);
+        debug!(target = %iqn, connected = %iscsi_connected, "Checking iSCSI target");
+
+        if iscsi_connected {
             info!(target = %iqn, "Disconnecting iSCSI target");
             Platform::disconnect_iscsi(&iqn).map_err(|e| {
                 error!(error = %e, target = %iqn, "Failed to disconnect iSCSI target");
@@ -321,11 +326,23 @@ impl NodeService {
                     iqn, e
                 ))
             })?;
+
+            // Verify disconnect succeeded
+            if Platform::is_iscsi_connected(&iqn) {
+                error!(target = %iqn, "iSCSI target still connected after disconnect");
+                return Err(Status::internal(format!(
+                    "iSCSI target {} still connected after disconnect attempt",
+                    iqn
+                )));
+            }
         }
 
         // Try NVMeoF
         let nqn = Self::derive_nqn(volume_id);
-        if Platform::is_nvmeof_connected(&nqn) {
+        let nvme_connected = Platform::is_nvmeof_connected(&nqn);
+        debug!(target = %nqn, connected = %nvme_connected, "Checking NVMeoF target");
+
+        if nvme_connected {
             info!(target = %nqn, "Disconnecting NVMeoF target");
             Platform::disconnect_nvmeof(&nqn).map_err(|e| {
                 error!(error = %e, target = %nqn, "Failed to disconnect NVMeoF target");
@@ -334,6 +351,18 @@ impl NodeService {
                     nqn, e
                 ))
             })?;
+
+            // Verify disconnect succeeded
+            if Platform::is_nvmeof_connected(&nqn) {
+                error!(target = %nqn, "NVMeoF target still connected after disconnect");
+                return Err(Status::internal(format!(
+                    "NVMeoF target {} still connected after disconnect attempt",
+                    nqn
+                )));
+            }
+            info!(target = %nqn, "NVMeoF disconnect verified successful");
+        } else {
+            debug!(target = %nqn, "NVMeoF target not connected (nothing to disconnect)");
         }
 
         Ok(())
