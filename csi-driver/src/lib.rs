@@ -24,6 +24,7 @@ pub mod identity;
 pub mod metrics;
 pub mod node;
 pub mod platform;
+pub mod types;
 
 pub use agent_client::AgentClient;
 pub use controller::ControllerService;

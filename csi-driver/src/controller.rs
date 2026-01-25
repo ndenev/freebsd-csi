@@ -10,12 +10,13 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
 use crate::agent::{
-    AuthCredentials, CloneMode, ExportType, IscsiChapCredentials, NvmeAuthCredentials,
-    VolumeContentSource, auth_credentials,
+    AuthCredentials, IscsiChapCredentials, NvmeAuthCredentials, VolumeContentSource,
+    auth_credentials,
 };
 use crate::agent_client::{AgentClient, TlsConfig};
 use crate::csi;
 use crate::metrics::{self, OperationTimer};
+use crate::types::{CloneMode, ExportType};
 
 // Standard CSI secret keys for iSCSI CHAP authentication
 // These follow the Linux open-iscsi naming conventions used by the CSI spec
@@ -138,12 +139,8 @@ impl ControllerService {
         parameters
             .get("exportType")
             .or_else(|| parameters.get("export_type"))
-            .map(|s| match s.to_lowercase().as_str() {
-                "iscsi" => ExportType::Iscsi,
-                "nvmeof" | "nvme" => ExportType::Nvmeof,
-                _ => ExportType::Iscsi, // Default to iSCSI
-            })
-            .unwrap_or(ExportType::Iscsi)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_default()
     }
 
     /// Extract authentication credentials from CSI secrets based on export type.
@@ -160,7 +157,6 @@ impl ControllerService {
         match export_type {
             ExportType::Iscsi => Self::extract_iscsi_chap(secrets),
             ExportType::Nvmeof => Self::extract_nvme_auth(secrets),
-            ExportType::Unspecified => None,
         }
     }
 
@@ -260,15 +256,12 @@ impl ControllerService {
         };
 
         // Parse clone mode from StorageClass parameters
-        let clone_mode = parameters
+        let clone_mode: crate::agent::CloneMode = parameters
             .get(CLONE_MODE_PARAM)
             .or_else(|| parameters.get("clone_mode"))
-            .map(|s| match s.to_lowercase().as_str() {
-                "copy" | "independent" => CloneMode::Copy,
-                "linked" | "clone" => CloneMode::Linked,
-                _ => CloneMode::Unspecified,
-            })
-            .unwrap_or(CloneMode::Unspecified);
+            .and_then(|s| s.parse::<CloneMode>().ok())
+            .unwrap_or_default()
+            .into();
 
         match source_type {
             Type::Snapshot(snapshot_source) => {
@@ -343,12 +336,11 @@ impl ControllerService {
         volume_context.insert("lun_id".to_string(), volume.lun_id.to_string());
         volume_context.insert("zfs_dataset".to_string(), volume.zfs_dataset.clone());
 
-        let export_type_str =
-            match ExportType::try_from(volume.export_type).unwrap_or(ExportType::Unspecified) {
-                ExportType::Iscsi => "iscsi",
-                ExportType::Nvmeof => "nvmeof",
-                ExportType::Unspecified => "unspecified",
-            };
+        let export_type_str = match crate::agent::ExportType::try_from(volume.export_type) {
+            Ok(crate::agent::ExportType::Iscsi) => "iscsi",
+            Ok(crate::agent::ExportType::Nvmeof) => "nvmeof",
+            _ => "iscsi", // Default to iSCSI for unspecified
+        };
         volume_context.insert("export_type".to_string(), export_type_str.to_string());
 
         // Pass through portal/address info for node service (required on Linux)
@@ -450,7 +442,7 @@ impl csi::controller_server::Controller for ControllerService {
             .create_volume(
                 name,
                 size_bytes,
-                export_type,
+                export_type.into(),
                 req.parameters.clone(),
                 auth,
                 content_source,
@@ -1378,17 +1370,6 @@ mod tests {
             result.unwrap().credentials,
             Some(auth_credentials::Credentials::NvmeAuth(_))
         ));
-    }
-
-    #[test]
-    fn test_extract_auth_credentials_unspecified() {
-        let mut secrets = HashMap::new();
-        secrets.insert("node.session.auth.username".to_string(), "user".to_string());
-        secrets.insert("node.session.auth.password".to_string(), "pass".to_string());
-
-        // Even with valid iSCSI secrets, Unspecified export type returns None
-        let result = ControllerService::extract_auth_credentials(&secrets, ExportType::Unspecified);
-        assert!(result.is_none());
     }
 
     #[test]
