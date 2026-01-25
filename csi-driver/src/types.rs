@@ -216,6 +216,189 @@ impl Display for ProvisioningModeParseError {
 
 impl std::error::Error for ProvisioningModeParseError {}
 
+// ============================================================================
+// Endpoint
+// ============================================================================
+
+/// A storage target endpoint (host:port).
+///
+/// Represents a single endpoint for iSCSI or NVMeoF connections.
+/// The host can be an IP address (v4 or v6) or a hostname - no resolution is attempted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    /// Host address (IP or hostname, not resolved)
+    pub host: String,
+    /// Port number
+    pub port: u16,
+}
+
+impl Endpoint {
+    /// Create a new endpoint with explicit host and port.
+    pub fn new(host: impl Into<String>, port: u16) -> Self {
+        Self {
+            host: host.into(),
+            port,
+        }
+    }
+
+    /// Format as "host:port" string for platform functions.
+    pub fn to_portal_string(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
+impl Display for Endpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.host, self.port)
+    }
+}
+
+/// Error returned when parsing an invalid endpoint.
+#[derive(Debug, Clone)]
+pub struct EndpointParseError(String);
+
+impl Display for EndpointParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid endpoint '{}': expected 'host:port' or 'host'", self.0)
+    }
+}
+
+impl std::error::Error for EndpointParseError {}
+
+/// A list of endpoints for multipath support.
+///
+/// Parses comma-separated endpoints from volume_context and provides
+/// the full list to platform functions for multipath connections.
+#[derive(Debug, Clone)]
+pub struct Endpoints {
+    endpoints: Vec<Endpoint>,
+}
+
+impl Endpoints {
+    /// Parse endpoints from a comma-separated string with a default port.
+    ///
+    /// Format: "host1:port1,host2:port2,..." or "host1,host2,..." (uses default_port)
+    /// Supports IPv4, IPv6 (with brackets for port), and hostnames.
+    ///
+    /// # Examples
+    /// - "10.0.0.1:3260,10.0.0.2:3260" → two endpoints with explicit ports
+    /// - "10.0.0.1,10.0.0.2" → two endpoints with default port
+    /// - "[::1]:3260" → IPv6 with port
+    /// - "storage.local:3260" → hostname with port
+    pub fn parse(s: &str, default_port: u16) -> Result<Self, EndpointParseError> {
+        let mut endpoints = Vec::new();
+
+        for part in s.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+
+            let endpoint = Self::parse_single(part, default_port)?;
+            endpoints.push(endpoint);
+        }
+
+        if endpoints.is_empty() {
+            return Err(EndpointParseError(s.to_string()));
+        }
+
+        Ok(Self { endpoints })
+    }
+
+    /// Parse a single endpoint string.
+    fn parse_single(s: &str, default_port: u16) -> Result<Endpoint, EndpointParseError> {
+        // Handle IPv6 with brackets: [::1]:port
+        if s.starts_with('[') {
+            if let Some(bracket_end) = s.find(']') {
+                let host = &s[1..bracket_end];
+                let rest = &s[bracket_end + 1..];
+
+                if rest.is_empty() {
+                    return Ok(Endpoint::new(host, default_port));
+                } else if let Some(port_str) = rest.strip_prefix(':') {
+                    let port = port_str
+                        .parse::<u16>()
+                        .map_err(|_| EndpointParseError(s.to_string()))?;
+                    return Ok(Endpoint::new(host, port));
+                }
+            }
+            return Err(EndpointParseError(s.to_string()));
+        }
+
+        // Handle host:port or host (use rfind for IPv6 without brackets)
+        // For "host:port", the last colon separates host from port
+        // For IPv6 without brackets like "::1", we can't distinguish, so treat as host-only
+        if let Some(colon_idx) = s.rfind(':') {
+            let potential_host = &s[..colon_idx];
+            let potential_port = &s[colon_idx + 1..];
+
+            // If potential_port is numeric, treat as host:port
+            // Otherwise treat the whole string as a host (e.g., IPv6 "::1")
+            if let Ok(port) = potential_port.parse::<u16>()
+                && !potential_host.is_empty()
+            {
+                return Ok(Endpoint::new(potential_host, port));
+            }
+        }
+
+        // No valid port found, use default
+        Ok(Endpoint::new(s, default_port))
+    }
+
+    /// Get the list of endpoints.
+    pub fn as_slice(&self) -> &[Endpoint] {
+        &self.endpoints
+    }
+
+    /// Get the number of endpoints.
+    pub fn len(&self) -> usize {
+        self.endpoints.len()
+    }
+
+    /// Check if empty.
+    pub fn is_empty(&self) -> bool {
+        self.endpoints.is_empty()
+    }
+
+    /// Check if multipath (more than one endpoint).
+    pub fn is_multipath(&self) -> bool {
+        self.endpoints.len() > 1
+    }
+
+    /// Format all endpoints as comma-separated "host:port" strings.
+    /// This is the format expected by platform::connect_iscsi/connect_nvmeof.
+    pub fn to_portal_string(&self) -> String {
+        self.endpoints
+            .iter()
+            .map(|e| e.to_portal_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// Get the first endpoint (for single-path fallback or display).
+    pub fn first(&self) -> Option<&Endpoint> {
+        self.endpoints.first()
+    }
+}
+
+impl IntoIterator for Endpoints {
+    type Item = Endpoint;
+    type IntoIter = std::vec::IntoIter<Endpoint>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.endpoints.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Endpoints {
+    type Item = &'a Endpoint;
+    type IntoIter = std::slice::Iter<'a, Endpoint>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.endpoints.iter()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +504,106 @@ mod tests {
     fn test_provisioning_mode_requires_reservation() {
         assert!(!ProvisioningMode::Thin.requires_reservation());
         assert!(ProvisioningMode::Thick.requires_reservation());
+    }
+
+    // Endpoint tests
+
+    #[test]
+    fn test_endpoint_new_and_display() {
+        let ep = Endpoint::new("10.0.0.1", 3260);
+        assert_eq!(ep.host, "10.0.0.1");
+        assert_eq!(ep.port, 3260);
+        assert_eq!(ep.to_string(), "10.0.0.1:3260");
+        assert_eq!(ep.to_portal_string(), "10.0.0.1:3260");
+    }
+
+    #[test]
+    fn test_endpoints_parse_single() {
+        let eps = Endpoints::parse("10.0.0.1:3260", 9999).unwrap();
+        assert_eq!(eps.len(), 1);
+        assert!(!eps.is_multipath());
+        assert_eq!(eps.first().unwrap().host, "10.0.0.1");
+        assert_eq!(eps.first().unwrap().port, 3260);
+    }
+
+    #[test]
+    fn test_endpoints_parse_single_default_port() {
+        let eps = Endpoints::parse("10.0.0.1", 3260).unwrap();
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps.first().unwrap().host, "10.0.0.1");
+        assert_eq!(eps.first().unwrap().port, 3260);
+    }
+
+    #[test]
+    fn test_endpoints_parse_multipath() {
+        let eps = Endpoints::parse("10.0.0.1:3260,10.0.0.2:3260", 9999).unwrap();
+        assert_eq!(eps.len(), 2);
+        assert!(eps.is_multipath());
+        assert_eq!(eps.to_portal_string(), "10.0.0.1:3260,10.0.0.2:3260");
+    }
+
+    #[test]
+    fn test_endpoints_parse_multipath_default_ports() {
+        let eps = Endpoints::parse("10.0.0.1,10.0.0.2", 4420).unwrap();
+        assert_eq!(eps.len(), 2);
+        assert!(eps.is_multipath());
+        assert_eq!(eps.to_portal_string(), "10.0.0.1:4420,10.0.0.2:4420");
+    }
+
+    #[test]
+    fn test_endpoints_parse_mixed_ports() {
+        let eps = Endpoints::parse("10.0.0.1:3260,10.0.0.2", 4420).unwrap();
+        assert_eq!(eps.len(), 2);
+        let endpoints: Vec<_> = eps.as_slice().to_vec();
+        assert_eq!(endpoints[0].port, 3260);
+        assert_eq!(endpoints[1].port, 4420);
+    }
+
+    #[test]
+    fn test_endpoints_parse_with_whitespace() {
+        let eps = Endpoints::parse("  10.0.0.1:3260 , 10.0.0.2:3260  ", 9999).unwrap();
+        assert_eq!(eps.len(), 2);
+        assert_eq!(eps.to_portal_string(), "10.0.0.1:3260,10.0.0.2:3260");
+    }
+
+    #[test]
+    fn test_endpoints_parse_hostname() {
+        let eps = Endpoints::parse("storage.example.com:3260", 9999).unwrap();
+        assert_eq!(eps.first().unwrap().host, "storage.example.com");
+        assert_eq!(eps.first().unwrap().port, 3260);
+    }
+
+    #[test]
+    fn test_endpoints_parse_hostname_default_port() {
+        let eps = Endpoints::parse("storage.example.com", 3260).unwrap();
+        assert_eq!(eps.first().unwrap().host, "storage.example.com");
+        assert_eq!(eps.first().unwrap().port, 3260);
+    }
+
+    #[test]
+    fn test_endpoints_parse_ipv6_bracketed() {
+        let eps = Endpoints::parse("[::1]:3260", 9999).unwrap();
+        assert_eq!(eps.first().unwrap().host, "::1");
+        assert_eq!(eps.first().unwrap().port, 3260);
+    }
+
+    #[test]
+    fn test_endpoints_parse_ipv6_bracketed_default_port() {
+        let eps = Endpoints::parse("[2001:db8::1]", 3260).unwrap();
+        assert_eq!(eps.first().unwrap().host, "2001:db8::1");
+        assert_eq!(eps.first().unwrap().port, 3260);
+    }
+
+    #[test]
+    fn test_endpoints_parse_empty_fails() {
+        assert!(Endpoints::parse("", 3260).is_err());
+        assert!(Endpoints::parse("   ", 3260).is_err());
+    }
+
+    #[test]
+    fn test_endpoints_iterate() {
+        let eps = Endpoints::parse("10.0.0.1:3260,10.0.0.2:3260", 9999).unwrap();
+        let hosts: Vec<_> = eps.into_iter().map(|e| e.host).collect();
+        assert_eq!(hosts, vec!["10.0.0.1", "10.0.0.2"]);
     }
 }
