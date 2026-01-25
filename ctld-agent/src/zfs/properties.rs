@@ -197,9 +197,9 @@ mod tests {
         );
 
         // Old keys should be removed
-        assert!(metadata.parameters.get("fs_type").is_none());
-        assert!(metadata.parameters.get("block_size").is_none());
-        assert!(metadata.parameters.get("enable_unmap").is_none());
+        assert!(!metadata.parameters.contains_key("fs_type"));
+        assert!(!metadata.parameters.contains_key("block_size"));
+        assert!(!metadata.parameters.contains_key("enable_unmap"));
     }
 
     #[test]
