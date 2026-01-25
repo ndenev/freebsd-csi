@@ -271,26 +271,88 @@ impl NodeService {
     }
 
     /// Get the device backing a mount point.
+    ///
+    /// Uses platform-specific tools for reliable device lookup:
+    /// - Linux: `findmnt -n -o SOURCE` (preferred over df parsing)
+    /// - FreeBSD: parse `mount` output
     fn get_mount_device(path: &str) -> Result<String, Status> {
         Self::validate_path(path)?;
 
-        let output = std::process::Command::new("df")
-            .arg(path)
-            .output()
-            .map_err(|e| {
-                error!(error = %e, "Failed to execute df");
+        #[cfg(target_os = "linux")]
+        {
+            // Use findmnt for reliable device lookup on Linux
+            // findmnt -n -o SOURCE returns just the device path
+            let output = std::process::Command::new("findmnt")
+                .args(["-n", "-o", "SOURCE", path])
+                .output()
+                .map_err(|e| {
+                    error!(error = %e, "Failed to execute findmnt");
+                    Status::internal(format!("Failed to get mount device: {}", e))
+                })?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                error!(path = %path, stderr = %stderr, "findmnt failed");
+                return Err(Status::internal(format!(
+                    "Path {} is not a mount point",
+                    path
+                )));
+            }
+
+            let device = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if device.is_empty() {
+                return Err(Status::internal(format!(
+                    "Could not determine device for mount point {}",
+                    path
+                )));
+            }
+
+            // Validate device path looks reasonable (starts with /dev/)
+            if !device.starts_with("/dev/") {
+                warn!(
+                    device = %device,
+                    path = %path,
+                    "Mount device is not a block device path"
+                );
+            }
+
+            Ok(device)
+        }
+
+        #[cfg(target_os = "freebsd")]
+        {
+            // Parse mount output on FreeBSD: device on /path (fstype, options)
+            let output = std::process::Command::new("mount").output().map_err(|e| {
+                error!(error = %e, "Failed to execute mount");
                 Status::internal(format!("Failed to get mount device: {}", e))
             })?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // df output: Filesystem ... (first column is device)
-        if let Some(line) = stdout.lines().nth(1)
-            && let Some(device) = line.split_whitespace().next()
-        {
-            return Ok(device.to_string());
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                // Match "device on /exact/path (" or "device on /exact/path ("
+                if line.contains(&format!(" on {} ", path))
+                    || line.contains(&format!(" on {} (", path))
+                {
+                    // Device is the first field before " on "
+                    if let Some(device) = line.split(" on ").next() {
+                        let device = device.trim().to_string();
+                        if !device.is_empty() {
+                            return Ok(device);
+                        }
+                    }
+                }
+            }
+
+            Err(Status::internal(format!(
+                "Could not find mount point {} in mount output",
+                path
+            )))
         }
 
-        Err(Status::internal("Could not determine mount device"))
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        {
+            Err(Status::internal("Unsupported platform"))
+        }
     }
 
     /// Derive the iSCSI target IQN from a volume ID.
