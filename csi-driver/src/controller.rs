@@ -16,7 +16,7 @@ use crate::agent::{
 use crate::agent_client::{AgentClient, TlsConfig};
 use crate::csi;
 use crate::metrics::{self, OperationTimer};
-use crate::types::{CloneMode, ExportType};
+use crate::types::{CloneMode, ExportType, ProvisioningMode};
 
 // Standard CSI secret keys for iSCSI CHAP authentication
 // These follow the Linux open-iscsi naming conventions used by the CSI spec
@@ -426,10 +426,18 @@ impl csi::controller_server::Controller for ControllerService {
         let content_source =
             Self::extract_content_source(req.volume_content_source.as_ref(), &req.parameters)?;
 
+        // Parse provisioning mode (thin/thick) - passed through to agent
+        let provisioning_mode: ProvisioningMode = req
+            .parameters
+            .get(ProvisioningMode::PARAM_NAME)
+            .map(|s| s.parse().unwrap_or_default())
+            .unwrap_or_default();
+
         debug!(
             name = %name,
             size_bytes = size_bytes,
             export_type = ?export_type,
+            provisioning_mode = %provisioning_mode,
             has_auth = auth.is_some(),
             has_content_source = content_source.is_some(),
             "Creating volume"
