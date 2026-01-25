@@ -200,13 +200,14 @@ pub struct Namespace {
     /// Device ID for unique namespace identification
     #[ucl(path = "device-id", default)]
     pub device_id: Option<String>,
-    /// UUID for unique namespace identification (RFC 4122 format).
-    /// This is CRITICAL for NVMe multipath - ctld ignores the serial field
-    /// for NVMe namespaces and uses UUID/EUI/NAA for WWID construction.
-    /// Without a unique UUID, all namespaces get the same WWID causing
-    /// multipath to incorrectly combine different volumes.
+    /// NAA (Network Address Authority) identifier for unique namespace identification.
+    /// This is CRITICAL for NVMe multipath - FreeBSD's CTL kernel populates
+    /// nsdata->nguid ONLY from NAA/EUI64 identifiers, NOT from UUID.
+    /// Without a unique NAA, all namespaces get the same nguid causing
+    /// Linux multipath to incorrectly combine different volumes.
+    /// Format: NAA Type 6 (128-bit), 32 hex chars, first nibble = '6'.
     #[ucl(default)]
-    pub uuid: Option<String>,
+    pub naa: Option<String>,
 }
 
 impl Namespace {
@@ -215,7 +216,7 @@ impl Namespace {
         // Generate unique identifiers from volume name for multipath support
         let serial = Self::generate_serial(volume_name);
         let device_id = Self::generate_device_id(volume_name);
-        let uuid = Self::generate_uuid(volume_name);
+        let naa = Self::generate_naa(volume_name);
         Self {
             path,
             blocksize: None,
@@ -223,7 +224,7 @@ impl Namespace {
             unmap: None,
             serial: Some(serial),
             device_id: Some(device_id),
-            uuid: Some(uuid),
+            naa: Some(naa),
         }
     }
 
@@ -231,7 +232,7 @@ impl Namespace {
     pub fn with_options(path: String, volume_name: &str, options: &CtlOptions) -> Self {
         let serial = Self::generate_serial(volume_name);
         let device_id = Self::generate_device_id(volume_name);
-        let uuid = Self::generate_uuid(volume_name);
+        let naa = Self::generate_naa(volume_name);
         Self {
             path,
             blocksize: options.blocksize,
@@ -245,7 +246,7 @@ impl Namespace {
             }),
             serial: Some(serial),
             device_id: Some(device_id),
-            uuid: Some(uuid),
+            naa: Some(naa),
         }
     }
 
@@ -270,53 +271,36 @@ impl Namespace {
         format!("FreeBSD {}", volume_name)
     }
 
-    /// Generate a unique UUID from volume name for NVMe namespace identification.
+    /// Generate a unique NAA Type 6 identifier from volume name for NVMe namespace.
     ///
-    /// This is CRITICAL for NVMe multipath support. ctld ignores the `serial`
-    /// field for NVMe namespaces and uses UUID/EUI/NAA for WWID construction.
-    /// Without a unique UUID, all namespaces get the same WWID (based on host
-    /// identifier), causing dm-multipath to incorrectly combine different volumes.
+    /// This is CRITICAL for NVMe multipath support. FreeBSD's CTL kernel
+    /// populates nsdata->nguid ONLY from NAA/EUI64 device ID descriptors,
+    /// NOT from UUID. Without a unique NAA, all namespaces get the same nguid
+    /// (all zeros), causing Linux dm-multipath to incorrectly combine different
+    /// volumes.
     ///
-    /// Uses SHA-256 hash formatted as RFC 4122 UUID (version 4 variant).
-    fn generate_uuid(volume_name: &str) -> String {
+    /// NAA Type 6 format: 32 hex chars (16 bytes / 128 bits)
+    /// - First nibble: 6 (NAA Type 6)
+    /// - Remaining 120 bits: unique identifier from SHA-256 hash
+    fn generate_naa(volume_name: &str) -> String {
         use sha2::{Digest, Sha256};
 
         let mut hasher = Sha256::new();
-        // Use "nvme-uuid:" prefix to get different hash than serial
-        hasher.update(b"nvme-uuid:");
+        // Use "nvme-naa:" prefix to get different hash than serial
+        hasher.update(b"nvme-naa:");
         hasher.update(volume_name.as_bytes());
         let hash = hasher.finalize();
 
-        // Format as RFC 4122 UUID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
         // Use first 16 bytes of SHA-256 hash
-        // Set version (4) and variant (RFC 4122) bits for valid UUID format
-        let mut uuid_bytes = [0u8; 16];
-        uuid_bytes.copy_from_slice(&hash[..16]);
+        let mut naa_bytes = [0u8; 16];
+        naa_bytes.copy_from_slice(&hash[..16]);
 
-        // Set version to 4 (random UUID) - bits 12-15 of time_hi_and_version
-        uuid_bytes[6] = (uuid_bytes[6] & 0x0f) | 0x40;
-        // Set variant to RFC 4122 - bits 6-7 of clock_seq_hi_and_reserved
-        uuid_bytes[8] = (uuid_bytes[8] & 0x3f) | 0x80;
+        // Set first nibble to 6 (NAA Type 6)
+        // NAA Type 6 = IEEE Registered Extended (128-bit)
+        naa_bytes[0] = (naa_bytes[0] & 0x0f) | 0x60;
 
-        format!(
-            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            uuid_bytes[0],
-            uuid_bytes[1],
-            uuid_bytes[2],
-            uuid_bytes[3],
-            uuid_bytes[4],
-            uuid_bytes[5],
-            uuid_bytes[6],
-            uuid_bytes[7],
-            uuid_bytes[8],
-            uuid_bytes[9],
-            uuid_bytes[10],
-            uuid_bytes[11],
-            uuid_bytes[12],
-            uuid_bytes[13],
-            uuid_bytes[14],
-            uuid_bytes[15]
-        )
+        // Format as 32 hex chars (no separators for ctld)
+        hex::encode(naa_bytes)
     }
 }
 
@@ -335,9 +319,9 @@ impl ToUcl for Namespace {
             writeln!(s, "{}device-id = {};", ind, ucl_quote(device_id)).unwrap();
         }
         // CTL backend options go in an options { } block.
-        // CRITICAL: The uuid option is required for NVMe multipath support.
-        // ctld ignores the serial field for NVMe and uses uuid for WWID construction.
-        let has_options = self.pblocksize.is_some() || self.unmap.is_some() || self.uuid.is_some();
+        // CRITICAL: The naa option is required for NVMe multipath support.
+        // FreeBSD's CTL kernel populates nsdata->nguid ONLY from NAA/EUI64.
+        let has_options = self.pblocksize.is_some() || self.unmap.is_some() || self.naa.is_some();
         if has_options {
             writeln!(s, "{}options {{", ind).unwrap();
             let opts_ind = indent(level + 1);
@@ -347,9 +331,9 @@ impl ToUcl for Namespace {
             if let Some(ref unmap) = self.unmap {
                 writeln!(s, "{}unmap = {};", opts_ind, ucl_quote(unmap)).unwrap();
             }
-            // UUID is CRITICAL for NVMe multipath - ensures unique WWID per namespace
-            if let Some(ref uuid) = self.uuid {
-                writeln!(s, "{}uuid = {};", opts_ind, ucl_quote(uuid)).unwrap();
+            // NAA is CRITICAL for NVMe multipath - populates nsdata->nguid
+            if let Some(ref naa) = self.naa {
+                writeln!(s, "{}naa = {};", opts_ind, ucl_quote(naa)).unwrap();
             }
             writeln!(s, "{}}}", ind).unwrap();
         }
@@ -1010,63 +994,45 @@ mod tests {
         assert!(ucl.contains("namespace 1 {"));
         assert!(ucl.contains("path = \"/dev/zvol/tank/csi/vol1\";"));
         assert!(ucl.contains("device-id = \"FreeBSD pvc-test-volume\";"));
-        // CRITICAL: Verify UUID is included in options block for NVMe multipath
+        // CRITICAL: Verify NAA is included in options block for NVMe multipath
         assert!(
             ucl.contains("options {"),
-            "UCL should have options block for UUID: {}",
+            "UCL should have options block for NAA: {}",
             ucl
         );
         assert!(
-            ucl.contains("uuid = \""),
-            "UCL should contain uuid for NVMe multipath: {}",
+            ucl.contains("naa = \""),
+            "UCL should contain naa for NVMe multipath: {}",
             ucl
         );
     }
 
     #[test]
-    fn test_namespace_uuid_generation() {
-        // Test PVC name with UUID - generates unique UUID
-        let uuid = Namespace::generate_uuid("pvc-c2e56d00-9afa-42ec-9404-22e317aadd8f");
-        assert_eq!(uuid.len(), 36, "UUID must be 36 chars (RFC 4122 format)");
-        assert!(uuid.contains('-'), "UUID must contain hyphens");
-        // Verify UUID format: 8-4-4-4-12
-        let parts: Vec<&str> = uuid.split('-').collect();
-        assert_eq!(
-            parts.len(),
-            5,
-            "UUID must have 5 parts separated by hyphens"
-        );
-        assert_eq!(parts[0].len(), 8);
-        assert_eq!(parts[1].len(), 4);
-        assert_eq!(parts[2].len(), 4);
-        assert_eq!(parts[3].len(), 4);
-        assert_eq!(parts[4].len(), 12);
-
-        // Verify version 4 and RFC 4122 variant bits
-        let version_char = parts[2].chars().next().unwrap();
-        assert_eq!(version_char, '4', "UUID version must be 4");
-        let variant_char = parts[3].chars().next().unwrap();
+    fn test_namespace_naa_generation() {
+        // Test PVC name - generates unique NAA Type 6 identifier
+        let naa = Namespace::generate_naa("pvc-c2e56d00-9afa-42ec-9404-22e317aadd8f");
+        assert_eq!(naa.len(), 32, "NAA must be 32 hex chars (16 bytes)");
         assert!(
-            "89ab".contains(variant_char),
-            "UUID variant must be RFC 4122 (8, 9, a, or b)"
+            naa.chars().all(|c| c.is_ascii_hexdigit()),
+            "NAA must be hex"
         );
 
-        // Test another PVC - must produce different UUID
-        let uuid2 = Namespace::generate_uuid("pvc-5c1830ef-0beb-412d-8015-5a6a941b7390");
-        assert_eq!(uuid2.len(), 36);
-        assert_ne!(uuid, uuid2, "Different volumes must have different UUIDs");
+        // Verify NAA Type 6 - first nibble must be '6'
+        let first_char = naa.chars().next().unwrap();
+        assert_eq!(first_char, '6', "NAA Type must be 6, got: {}", first_char);
+
+        // Test another PVC - must produce different NAA
+        let naa2 = Namespace::generate_naa("pvc-5c1830ef-0beb-412d-8015-5a6a941b7390");
+        assert_eq!(naa2.len(), 32);
+        assert_ne!(naa, naa2, "Different volumes must have different NAAs");
 
         // Same input always produces same output (deterministic)
-        let uuid_repeat = Namespace::generate_uuid("pvc-c2e56d00-9afa-42ec-9404-22e317aadd8f");
-        assert_eq!(uuid, uuid_repeat, "Same input must produce same UUID");
+        let naa_repeat = Namespace::generate_naa("pvc-c2e56d00-9afa-42ec-9404-22e317aadd8f");
+        assert_eq!(naa, naa_repeat, "Same input must produce same NAA");
 
-        // UUID must be different from serial for same volume
+        // NAA must be different from serial for same volume
         let serial = Namespace::generate_serial("pvc-c2e56d00-9afa-42ec-9404-22e317aadd8f");
-        assert_ne!(
-            uuid.replace('-', ""),
-            serial,
-            "UUID must be different from serial"
-        );
+        assert_ne!(naa, serial, "NAA must be different from serial");
     }
 
     #[test]
@@ -1407,10 +1373,10 @@ mod tests {
         assert!(ucl.contains("unmap = \"on\";"), "UCL: {}", ucl);
         assert!(ucl.contains("serial ="), "UCL: {}", ucl);
         assert!(ucl.contains("device-id ="), "UCL: {}", ucl);
-        // CRITICAL: Verify UUID is included for NVMe multipath support
+        // CRITICAL: Verify NAA is included for NVMe multipath support
         assert!(
-            ucl.contains("uuid = \""),
-            "UCL should contain uuid for NVMe multipath: {}",
+            ucl.contains("naa = \""),
+            "UCL should contain naa for NVMe multipath: {}",
             ucl
         );
     }
