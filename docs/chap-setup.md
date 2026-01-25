@@ -93,7 +93,7 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
-  portal: "192.168.1.100:3260"
+  endpoints: "192.168.1.100:3260"
 # Reference the CHAP secret for volume provisioning
 csi.storage.k8s.io/provisioner-secret-name: iscsi-chap-secret
 csi.storage.k8s.io/provisioner-secret-namespace: default

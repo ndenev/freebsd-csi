@@ -280,12 +280,10 @@ StorageClass parameters control how volumes are provisioned:
 | Parameter | Values | Default | Description |
 |-----------|--------|---------|-------------|
 | `exportType` | `iscsi`, `nvmeof` | `iscsi` | Protocol for exporting volumes |
-| `fsType` | `ext4`, `xfs` (Linux); `ufs` (FreeBSD) | `ext4` | Filesystem type for formatting volumes |
-| `portal` | `<ip>:<port>[,<ip2>:<port2>...]` | - | **Required for iSCSI on Linux.** iSCSI portal address(es). Default port: 3260 |
-| `transportAddr` | `<ip>[,<ip2>...]` | - | **Required for NVMeoF.** NVMe-oF transport address(es) |
-| `transportPort` | `<port>` | `4420` | NVMe-oF transport port |
+| `fs_type` | `ext4`, `xfs` (Linux); `ufs` (FreeBSD) | `ext4` | Filesystem type for formatting volumes |
+| `endpoints` | `<ip>:<port>[,<ip2>:<port2>...]` | - | **Required on Linux.** Comma-separated list of target endpoints. Default ports: iSCSI=3260, NVMeoF=4420 |
 
-> **Multipath Support:** Both `portal` and `transportAddr` accept comma-separated values for multipath configurations.
+> **Multipath Support:** The `endpoints` parameter accepts comma-separated values for multipath configurations.
 > For iSCSI, each portal will be discovered and logged into separately. For NVMeoF, each address will be connected separately.
 > Native multipath (NVMe) or dm-multipath (iSCSI) will combine the paths automatically.
 
@@ -301,12 +299,12 @@ StorageClass parameters control how volumes are provisioned:
 
 #### Filesystem Types by Platform
 
-| Platform | Supported fsType | Default |
+| Platform | Supported fs_type | Default |
 |----------|-----------------|---------|
 | Linux | `ext4`, `xfs` | `ext4` |
 | FreeBSD | `ufs` | `ufs` |
 
-> **Note:** `zfs` cannot be used as `fsType` because ZFS manages its own storage layer and cannot format block devices.
+> **Note:** `zfs` cannot be used as `fs_type` because ZFS manages its own storage layer and cannot format block devices.
 
 #### Example StorageClasses
 
@@ -319,10 +317,10 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
-  fsType: ext4
-  portal: "192.168.1.100:3260"  # REQUIRED for Linux (default port: 3260)
-  blockSize: "4096"             # Optional: 4K block size
-  enableUnmap: "true"           # Optional: Enable TRIM/discard
+  fs_type: ext4
+  endpoints: "192.168.1.100:3260"  # REQUIRED for Linux (default port: 3260)
+  blockSize: "4096"                # Optional: 4K block size
+  enableUnmap: "true"              # Optional: Enable TRIM/discard
 allowVolumeExpansion: true
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
@@ -337,9 +335,9 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
-  fsType: ext4
-  # Multiple portals for multipath - dm-multipath combines paths automatically
-  portal: "10.0.0.1:3260,10.0.0.2:3260"
+  fs_type: ext4
+  # Multiple endpoints for multipath - dm-multipath combines paths automatically
+  endpoints: "10.0.0.1:3260,10.0.0.2:3260"
   blockSize: "4096"
   enableUnmap: "true"
 allowVolumeExpansion: true
@@ -356,9 +354,8 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: nvmeof
-  fsType: ext4
-  transportAddr: "192.168.1.100"  # REQUIRED (default port: 4420)
-  transportPort: "4420"
+  fs_type: ext4
+  endpoints: "192.168.1.100:4420"  # REQUIRED (default port: 4420)
   blockSize: "4096"
   enableUnmap: "true"
 allowVolumeExpansion: true
@@ -375,10 +372,9 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: nvmeof
-  fsType: ext4
-  # Multiple addresses for multipath - native NVMe multipath combines paths
-  transportAddr: "10.0.0.1,10.0.0.2"
-  transportPort: "4420"
+  fs_type: ext4
+  # Multiple endpoints for multipath - native NVMe multipath combines paths
+  endpoints: "10.0.0.1:4420,10.0.0.2:4420"
   blockSize: "4096"
 allowVolumeExpansion: true
 reclaimPolicy: Delete
@@ -394,8 +390,8 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
-  fsType: ext4
-  portal: "192.168.1.100:3260"
+  fs_type: ext4
+  endpoints: "192.168.1.100:3260"
 allowVolumeExpansion: true
 reclaimPolicy: Retain
 volumeBindingMode: Immediate

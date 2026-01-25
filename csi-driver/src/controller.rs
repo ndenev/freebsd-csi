@@ -344,7 +344,6 @@ impl ControllerService {
         volume_context.insert("export_type".to_string(), export_type_str.to_string());
 
         // Pass through portal/address info for node service (required on Linux)
-        // Supports both legacy parameters (portal, transportAddr) and new unified 'endpoints'
         // endpoints format: "ip:port,ip:port,..." (first endpoint used for single-path)
         if let Some(endpoints) = parameters.get("endpoints") {
             // Parse endpoints - take first one for connection
@@ -369,35 +368,10 @@ impl ControllerService {
                     _ => {}
                 }
             }
-        } else {
-            // Legacy parameter support
-            if let Some(portal) = parameters
-                .get("portal")
-                .or_else(|| parameters.get("targetPortal"))
-            {
-                volume_context.insert("portal".to_string(), portal.clone());
-            }
-
-            // For NVMeoF, pass transport address and port
-            if let Some(addr) = parameters
-                .get("transportAddr")
-                .or_else(|| parameters.get("transport_addr"))
-            {
-                volume_context.insert("transport_addr".to_string(), addr.clone());
-            }
-            if let Some(port) = parameters
-                .get("transportPort")
-                .or_else(|| parameters.get("transport_port"))
-            {
-                volume_context.insert("transport_port".to_string(), port.clone());
-            }
         }
 
         // Pass through filesystem type for node service
-        if let Some(fs_type) = parameters
-            .get("fsType")
-            .or_else(|| parameters.get("fs_type"))
-        {
+        if let Some(fs_type) = parameters.get("fs_type") {
             volume_context.insert("fs_type".to_string(), fs_type.clone());
         }
 
