@@ -300,11 +300,22 @@ impl Namespace {
 
         format!(
             "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            uuid_bytes[0], uuid_bytes[1], uuid_bytes[2], uuid_bytes[3],
-            uuid_bytes[4], uuid_bytes[5],
-            uuid_bytes[6], uuid_bytes[7],
-            uuid_bytes[8], uuid_bytes[9],
-            uuid_bytes[10], uuid_bytes[11], uuid_bytes[12], uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]
+            uuid_bytes[0],
+            uuid_bytes[1],
+            uuid_bytes[2],
+            uuid_bytes[3],
+            uuid_bytes[4],
+            uuid_bytes[5],
+            uuid_bytes[6],
+            uuid_bytes[7],
+            uuid_bytes[8],
+            uuid_bytes[9],
+            uuid_bytes[10],
+            uuid_bytes[11],
+            uuid_bytes[12],
+            uuid_bytes[13],
+            uuid_bytes[14],
+            uuid_bytes[15]
         )
     }
 }
@@ -326,8 +337,7 @@ impl ToUcl for Namespace {
         // CTL backend options go in an options { } block.
         // CRITICAL: The uuid option is required for NVMe multipath support.
         // ctld ignores the serial field for NVMe and uses uuid for WWID construction.
-        let has_options =
-            self.pblocksize.is_some() || self.unmap.is_some() || self.uuid.is_some();
+        let has_options = self.pblocksize.is_some() || self.unmap.is_some() || self.uuid.is_some();
         if has_options {
             writeln!(s, "{}options {{", ind).unwrap();
             let opts_ind = indent(level + 1);
@@ -1021,7 +1031,11 @@ mod tests {
         assert!(uuid.contains('-'), "UUID must contain hyphens");
         // Verify UUID format: 8-4-4-4-12
         let parts: Vec<&str> = uuid.split('-').collect();
-        assert_eq!(parts.len(), 5, "UUID must have 5 parts separated by hyphens");
+        assert_eq!(
+            parts.len(),
+            5,
+            "UUID must have 5 parts separated by hyphens"
+        );
         assert_eq!(parts[0].len(), 8);
         assert_eq!(parts[1].len(), 4);
         assert_eq!(parts[2].len(), 4);
