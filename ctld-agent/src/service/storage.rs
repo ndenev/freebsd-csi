@@ -364,14 +364,16 @@ impl StorageService {
             // Auth-group NAME is stored in ZFS metadata; credentials are in ctl.conf.
             // GroupRef tells write_config() to reference the existing auth-group
             // without creating a new one (credentials already persisted in ctl.conf).
-            // CTL options are not persisted in ZFS metadata, so use defaults on reconciliation.
+            // CTL options (blockSize, physicalBlockSize, enableUnmap) are stored in
+            // metadata.parameters - parse them to restore the original configuration.
+            let ctl_options = parse_ctl_options(&metadata.parameters);
             match ctl.export_volume(
                 vol_name,
                 &device_path,
                 ctl_export_type,
                 lun_id,
                 metadata.auth.clone(),
-                CtlOptions::default(),
+                ctl_options,
             ) {
                 Ok(_) => {
                     info!(
