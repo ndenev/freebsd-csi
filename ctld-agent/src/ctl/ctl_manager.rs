@@ -124,9 +124,9 @@ impl CtlManager {
     /// Kept for potential debugging/recovery purposes.
     #[allow(dead_code)]
     #[instrument(skip(self))]
-    pub fn load_config(&mut self) -> Result<()> {
+    pub async fn load_config(&mut self) -> Result<()> {
         let config_path = &self.ucl_manager.config_path;
-        let config = CtlConfig::from_file(config_path)?;
+        let config = CtlConfig::from_file(config_path).await?;
 
         let mut exports = self
             .exports
@@ -357,7 +357,7 @@ impl CtlManager {
         );
 
         // Read user content (non-CSI targets)
-        let user_content = self.ucl_manager.read_user_content()?;
+        let user_content = self.ucl_manager.read_user_content().await?;
 
         // Write config with CSI targets and auth groups
         self.ucl_manager.write_config_with_auth(

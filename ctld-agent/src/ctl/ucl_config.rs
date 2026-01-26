@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::fs;
 use std::io::Write as IoWrite;
 use std::path::Path;
 
@@ -697,15 +696,15 @@ pub struct CtlConfig {
 #[allow(dead_code)]
 impl CtlConfig {
     /// Parse a UCL config file
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+    pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
 
-        if !path.exists() {
+        if !tokio::fs::try_exists(path).await.unwrap_or(false) {
             return Ok(Self::default());
         }
 
         // Read file content
-        let content = fs::read_to_string(path).map_err(|e| {
+        let content = tokio::fs::read_to_string(path).await.map_err(|e| {
             CtlError::ConfigError(format!("Failed to read {}: {}", path.display(), e))
         })?;
 
@@ -763,13 +762,13 @@ impl UclConfigManager {
     }
 
     /// Read the user-managed portion of the config (excluding CSI section)
-    pub fn read_user_content(&self) -> Result<String> {
+    pub async fn read_user_content(&self) -> Result<String> {
         let path = Path::new(&self.config_path);
-        if !path.exists() {
+        if !tokio::fs::try_exists(path).await.unwrap_or(false) {
             return Ok(String::new());
         }
 
-        let content = fs::read_to_string(path)?;
+        let content = tokio::fs::read_to_string(path).await?;
         let mut user_content = String::new();
         let mut in_csi_section = false;
 

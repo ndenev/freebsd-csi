@@ -180,11 +180,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Create parent directory if needed
         if let Some(parent) = std::path::Path::new(path).parent() {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
 
         // Remove existing socket file
-        let _ = std::fs::remove_file(path);
+        let _ = tokio::fs::remove_file(path).await;
 
         // Use tokio UnixListener for Unix sockets
         use tokio::net::UnixListener;
