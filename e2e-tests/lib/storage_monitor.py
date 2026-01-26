@@ -376,7 +376,13 @@ class StorageMonitor:
         except PermissionError:
             # May need sudo in non-root context
             try:
-                result = self._run(["cat", "/etc/ctl.ucl"])
+                # Note: cat is not in PRIVILEGED_COMMANDS, so we need to use sudo explicitly
+                result = subprocess.run(
+                    ["sudo", "cat", "/etc/ctl.ucl"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
                 return result.stdout
             except subprocess.CalledProcessError:
                 return ""
@@ -559,14 +565,24 @@ class StorageMonitor:
         config = self.get_ctld_config()
         targets = []
 
-        # Simple regex to find target blocks
-        target_pattern = re.compile(
-            r'target\s+"([^"]+)"\s*\{([^}]*)\}', re.DOTALL | re.MULTILINE
-        )
+        # Find target blocks with nested braces support
+        target_start_pattern = re.compile(r'target\s+"([^"]+)"\s*\{')
 
-        for match in target_pattern.finditer(config):
+        for match in target_start_pattern.finditer(config):
             target_name = match.group(1)
-            target_body = match.group(2)
+            start = match.end()
+
+            # Find the matching closing brace (handle nested braces)
+            brace_count = 1
+            end = start
+            while brace_count > 0 and end < len(config):
+                if config[end] == "{":
+                    brace_count += 1
+                elif config[end] == "}":
+                    brace_count -= 1
+                end += 1
+
+            target_body = config[start : end - 1]
 
             target = {
                 "name": target_name,
@@ -575,25 +591,37 @@ class StorageMonitor:
                 "luns": [],
             }
 
-            # Extract portal-group
-            pg_match = re.search(r"portal-group\s+(\S+)", target_body)
+            # Extract portal-group name from: portal-group { name = "pg0"; }
+            # or from: portal-group = "pg0";
+            pg_match = re.search(r'portal-group\s*=\s*"([^"]+)"', target_body)
             if pg_match:
                 target["portal_group"] = pg_match.group(1)
+            else:
+                # Try nested format: portal-group { name = "pg0"; }
+                pg_block_match = re.search(
+                    r'portal-group\s*\{[^}]*name\s*=\s*"([^"]+)"', target_body
+                )
+                if pg_block_match:
+                    target["portal_group"] = pg_block_match.group(1)
 
-            # Extract auth-group
-            ag_match = re.search(r"auth-group\s+(\S+)", target_body)
+            # Extract auth-group from: auth-group = "ag-xxx";
+            ag_match = re.search(r'auth-group\s*=\s*"([^"]+)"', target_body)
             if ag_match:
                 target["auth_group"] = ag_match.group(1)
 
-            # Extract LUNs
-            lun_pattern = re.compile(r'lun\s+(\d+)\s+"([^"]+)"')
-            for lun_match in lun_pattern.finditer(target_body):
-                target["luns"].append(
-                    {
-                        "id": int(lun_match.group(1)),
-                        "name": lun_match.group(2),
-                    }
-                )
+            # Extract LUNs - handle nested format: lun { 0 { number = 0; name = "..."; } }
+            # CSI format: name = "/dev/zvol/...";
+            lun_name_pattern = re.compile(r'name\s*=\s*"([^"]+)"')
+            for lun_match in lun_name_pattern.finditer(target_body):
+                lun_name = lun_match.group(1)
+                # Only include device paths (not portal-group names)
+                if lun_name.startswith("/dev/"):
+                    target["luns"].append(
+                        {
+                            "id": 0,  # LUN ID is in nested block, but we just need the name
+                            "name": lun_name,
+                        }
+                    )
 
             targets.append(target)
 
@@ -622,29 +650,61 @@ class StorageMonitor:
         config = self.get_ctld_config()
         auth_groups = []
 
-        # Pattern to match auth-group blocks
+        # Pattern to match auth-group blocks with nested braces
         # UCL format: auth-group "name" { ... }
-        ag_pattern = re.compile(
-            r'auth-group\s+"([^"]+)"\s*\{([^}]*)\}', re.DOTALL | re.MULTILINE
-        )
+        # Use a simple approach: find auth-group blocks and extract balanced braces
+        ag_start_pattern = re.compile(r'auth-group\s+"([^"]+)"\s*\{')
 
-        for match in ag_pattern.finditer(config):
+        for match in ag_start_pattern.finditer(config):
             name = match.group(1)
-            body = match.group(2)
+            start = match.end()
+
+            # Find the matching closing brace (handle nested braces)
+            brace_count = 1
+            end = start
+            while brace_count > 0 and end < len(config):
+                if config[end] == "{":
+                    brace_count += 1
+                elif config[end] == "}":
+                    brace_count -= 1
+                end += 1
+
+            body = config[start : end - 1]
 
             info = StorageMonitor.AuthGroupInfo(name=name)
 
-            # Parse chap "username" "secret"
-            chap_match = re.search(r'chap\s+"([^"]+)"\s+"([^"]+)"', body)
-            if chap_match:
-                info.chap_username = chap_match.group(1)
-                info.chap_secret = chap_match.group(2)
+            # Parse UCL array format: chap [ { user = "..."; secret = "..."; } ]
+            # or chap-mutual [ { user = "..."; secret = "..."; mutual-user = "..."; mutual-secret = "..."; } ]
 
-            # Parse chap-mutual "username" "secret"
-            mutual_match = re.search(r'chap-mutual\s+"([^"]+)"\s+"([^"]+)"', body)
+            # Check for chap-mutual first (since it contains 'chap')
+            mutual_match = re.search(r"chap-mutual\s*\[", body)
             if mutual_match:
-                info.chap_mutual_username = mutual_match.group(1)
-                info.chap_mutual_secret = mutual_match.group(2)
+                # Parse chap-mutual UCL array
+                user_match = re.search(r'user\s*=\s*"([^"]+)"', body)
+                secret_match = re.search(r'(?<!mutual-)secret\s*=\s*"([^"]+)"', body)
+                mutual_user_match = re.search(r'mutual-user\s*=\s*"([^"]+)"', body)
+                mutual_secret_match = re.search(r'mutual-secret\s*=\s*"([^"]+)"', body)
+
+                if user_match:
+                    info.chap_username = user_match.group(1)
+                if secret_match:
+                    info.chap_secret = secret_match.group(1)
+                if mutual_user_match:
+                    info.chap_mutual_username = mutual_user_match.group(1)
+                if mutual_secret_match:
+                    info.chap_mutual_secret = mutual_secret_match.group(1)
+            else:
+                # Check for basic chap
+                chap_match = re.search(r"chap\s*\[", body)
+                if chap_match:
+                    # Parse chap UCL array
+                    user_match = re.search(r'user\s*=\s*"([^"]+)"', body)
+                    secret_match = re.search(r'secret\s*=\s*"([^"]+)"', body)
+
+                    if user_match:
+                        info.chap_username = user_match.group(1)
+                    if secret_match:
+                        info.chap_secret = secret_match.group(1)
 
             auth_groups.append(info)
 

@@ -5,6 +5,7 @@ Ensures resources are deleted in the correct dependency order:
 2. Clone PVCs (depend on snapshots)
 3. Snapshots (depend on source volumes)
 4. Source PVCs (base volumes)
+5. Secrets (deleted after PVCs so provisioner can access credentials)
 
 This prevents "cannot delete snapshot with dependent clones" errors
 and other dependency-related cleanup failures.
@@ -25,6 +26,7 @@ class ResourceType(IntEnum):
     CLONE_PVC = 2  # PVC created from snapshot or another PVC
     SNAPSHOT = 3
     SOURCE_PVC = 4  # Original PVC (no data source)
+    SECRET = 5  # Secrets deleted LAST (after PVCs, so provisioner can access credentials)
 
 
 @dataclass
@@ -99,6 +101,23 @@ class ResourceTracker:
                 name=name,
                 resource_type=ResourceType.SNAPSHOT,
                 depends_on=source_pvc,
+            )
+        )
+
+    def track_secret(self, name: str) -> None:
+        """Track a secret for cleanup.
+
+        Secrets are deleted AFTER PVCs to ensure the CSI provisioner can
+        access credentials when deleting volumes.
+
+        Args:
+            name: Secret name
+        """
+        self.resources.append(
+            TrackedResource(
+                kind="secret",
+                name=name,
+                resource_type=ResourceType.SECRET,
             )
         )
 
