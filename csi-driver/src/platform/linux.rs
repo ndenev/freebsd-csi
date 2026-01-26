@@ -234,12 +234,18 @@ pub async fn connect_iscsi(
             // Set authentication method to CHAP
             let auth_method_output = Command::new("iscsiadm")
                 .args([
-                    "-m", "node",
-                    "-T", target_iqn,
-                    "-p", &portal,
-                    "-o", "update",
-                    "-n", "node.session.auth.authmethod",
-                    "-v", "CHAP",
+                    "-m",
+                    "node",
+                    "-T",
+                    target_iqn,
+                    "-p",
+                    &portal,
+                    "-o",
+                    "update",
+                    "-n",
+                    "node.session.auth.authmethod",
+                    "-v",
+                    "CHAP",
                 ])
                 .output()
                 .await
@@ -260,12 +266,18 @@ pub async fn connect_iscsi(
             // Set CHAP username
             let username_output = Command::new("iscsiadm")
                 .args([
-                    "-m", "node",
-                    "-T", target_iqn,
-                    "-p", &portal,
-                    "-o", "update",
-                    "-n", "node.session.auth.username",
-                    "-v", &chap.username,
+                    "-m",
+                    "node",
+                    "-T",
+                    target_iqn,
+                    "-p",
+                    &portal,
+                    "-o",
+                    "update",
+                    "-n",
+                    "node.session.auth.username",
+                    "-v",
+                    &chap.username,
                 ])
                 .output()
                 .await
@@ -286,12 +298,18 @@ pub async fn connect_iscsi(
             // Set CHAP password
             let password_output = Command::new("iscsiadm")
                 .args([
-                    "-m", "node",
-                    "-T", target_iqn,
-                    "-p", &portal,
-                    "-o", "update",
-                    "-n", "node.session.auth.password",
-                    "-v", &chap.password,
+                    "-m",
+                    "node",
+                    "-T",
+                    target_iqn,
+                    "-p",
+                    &portal,
+                    "-o",
+                    "update",
+                    "-n",
+                    "node.session.auth.password",
+                    "-v",
+                    &chap.password,
                 ])
                 .output()
                 .await
@@ -316,12 +334,18 @@ pub async fn connect_iscsi(
                 // Set mutual CHAP username (target authenticates to initiator)
                 let mutual_user_output = Command::new("iscsiadm")
                     .args([
-                        "-m", "node",
-                        "-T", target_iqn,
-                        "-p", &portal,
-                        "-o", "update",
-                        "-n", "node.session.auth.username_in",
-                        "-v", mutual_user,
+                        "-m",
+                        "node",
+                        "-T",
+                        target_iqn,
+                        "-p",
+                        &portal,
+                        "-o",
+                        "update",
+                        "-n",
+                        "node.session.auth.username_in",
+                        "-v",
+                        mutual_user,
                     ])
                     .output()
                     .await
@@ -342,12 +366,18 @@ pub async fn connect_iscsi(
                 // Set mutual CHAP password
                 let mutual_pass_output = Command::new("iscsiadm")
                     .args([
-                        "-m", "node",
-                        "-T", target_iqn,
-                        "-p", &portal,
-                        "-o", "update",
-                        "-n", "node.session.auth.password_in",
-                        "-v", mutual_pass,
+                        "-m",
+                        "node",
+                        "-T",
+                        target_iqn,
+                        "-p",
+                        &portal,
+                        "-o",
+                        "update",
+                        "-n",
+                        "node.session.auth.password_in",
+                        "-v",
+                        mutual_pass,
                     ])
                     .output()
                     .await
@@ -640,7 +670,9 @@ pub async fn connect_nvmeof(
 
         // Build nvme connect command with optional authentication
         let mut cmd = Command::new("nvme");
-        cmd.args(["connect", "-t", "tcp", "-a", addr, "-s", &port, "-n", target_nqn]);
+        cmd.args([
+            "connect", "-t", "tcp", "-a", addr, "-s", &port, "-n", target_nqn,
+        ]);
 
         if let Some(auth) = auth_credentials {
             debug!(

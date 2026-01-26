@@ -1070,9 +1070,21 @@ mod tests {
         let ucl = auth_group.to_ucl(0);
 
         // UCL array format for basic CHAP
-        assert!(ucl.contains("chap ["), "UCL should contain 'chap [': {}", ucl);
-        assert!(ucl.contains("user = \"testuser\";"), "UCL should contain user: {}", ucl);
-        assert!(ucl.contains("secret = \"testsecret\";"), "UCL should contain secret: {}", ucl);
+        assert!(
+            ucl.contains("chap ["),
+            "UCL should contain 'chap [': {}",
+            ucl
+        );
+        assert!(
+            ucl.contains("user = \"testuser\";"),
+            "UCL should contain user: {}",
+            ucl
+        );
+        assert!(
+            ucl.contains("secret = \"testsecret\";"),
+            "UCL should contain secret: {}",
+            ucl
+        );
         assert!(!ucl.contains("chap-mutual"));
         assert!(!ucl.contains("host-nqn"));
     }
@@ -1093,14 +1105,38 @@ mod tests {
         let ucl = auth_group.to_ucl(0);
 
         // UCL array format for mutual CHAP - uses chap-mutual only (not both chap and chap-mutual)
-        assert!(ucl.contains("chap-mutual ["), "UCL should contain 'chap-mutual [': {}", ucl);
-        assert!(ucl.contains("user = \"initiator\";"), "UCL should contain user: {}", ucl);
-        assert!(ucl.contains("secret = \"initsecret\";"), "UCL should contain secret: {}", ucl);
-        assert!(ucl.contains("mutual-user = \"target\";"), "UCL should contain mutual-user: {}", ucl);
-        assert!(ucl.contains("mutual-secret = \"targetsecret\";"), "UCL should contain mutual-secret: {}", ucl);
+        assert!(
+            ucl.contains("chap-mutual ["),
+            "UCL should contain 'chap-mutual [': {}",
+            ucl
+        );
+        assert!(
+            ucl.contains("user = \"initiator\";"),
+            "UCL should contain user: {}",
+            ucl
+        );
+        assert!(
+            ucl.contains("secret = \"initsecret\";"),
+            "UCL should contain secret: {}",
+            ucl
+        );
+        assert!(
+            ucl.contains("mutual-user = \"target\";"),
+            "UCL should contain mutual-user: {}",
+            ucl
+        );
+        assert!(
+            ucl.contains("mutual-secret = \"targetsecret\";"),
+            "UCL should contain mutual-secret: {}",
+            ucl
+        );
         assert!(!ucl.contains("host-nqn"));
         // Should NOT have separate chap section when mutual is present
-        assert!(!ucl.contains("chap ["), "Should not have separate chap section with mutual: {}", ucl);
+        assert!(
+            !ucl.contains("chap ["),
+            "Should not have separate chap section with mutual: {}",
+            ucl
+        );
     }
 
     #[test]

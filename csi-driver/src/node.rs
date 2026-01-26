@@ -1236,7 +1236,10 @@ mod tests {
     #[test]
     fn test_extract_nvme_auth_with_secret() {
         let mut secrets = HashMap::new();
-        secrets.insert("nvme.auth.secret".to_string(), "DHHC-1:00:test-secret-key".to_string());
+        secrets.insert(
+            "nvme.auth.secret".to_string(),
+            "DHHC-1:00:test-secret-key".to_string(),
+        );
 
         let creds = NodeService::extract_nvme_auth(&secrets).unwrap();
         assert_eq!(creds.secret, "DHHC-1:00:test-secret-key");
@@ -1246,8 +1249,14 @@ mod tests {
     #[test]
     fn test_extract_nvme_auth_with_ctrl_secret() {
         let mut secrets = HashMap::new();
-        secrets.insert("nvme.auth.secret".to_string(), "DHHC-1:00:host-secret".to_string());
-        secrets.insert("nvme.auth.ctrl_secret".to_string(), "DHHC-1:00:ctrl-secret".to_string());
+        secrets.insert(
+            "nvme.auth.secret".to_string(),
+            "DHHC-1:00:host-secret".to_string(),
+        );
+        secrets.insert(
+            "nvme.auth.ctrl_secret".to_string(),
+            "DHHC-1:00:ctrl-secret".to_string(),
+        );
 
         let creds = NodeService::extract_nvme_auth(&secrets).unwrap();
         assert_eq!(creds.secret, "DHHC-1:00:host-secret");
@@ -1270,7 +1279,10 @@ mod tests {
     #[test]
     fn test_extract_nvme_auth_empty_ctrl_secret_ignored() {
         let mut secrets = HashMap::new();
-        secrets.insert("nvme.auth.secret".to_string(), "DHHC-1:00:host-secret".to_string());
+        secrets.insert(
+            "nvme.auth.secret".to_string(),
+            "DHHC-1:00:host-secret".to_string(),
+        );
         secrets.insert("nvme.auth.ctrl_secret".to_string(), "".to_string());
 
         let creds = NodeService::extract_nvme_auth(&secrets).unwrap();
