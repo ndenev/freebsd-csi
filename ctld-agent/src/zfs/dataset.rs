@@ -48,6 +48,9 @@ fn check_command_result(output: &Output, context: &str) -> Result<()> {
     if stderr.contains("already exists") {
         return Err(ZfsError::DatasetExists(context.to_string()));
     }
+    if stderr.contains("dataset is busy") {
+        return Err(ZfsError::DatasetBusy(context.to_string()));
+    }
 
     Err(ZfsError::CommandFailed(format!("{}: {}", context, stderr)))
 }
@@ -223,6 +226,8 @@ impl ZfsManager {
     /// Delete a ZFS volume
     ///
     /// This operation is idempotent: if the volume doesn't exist, returns Ok.
+    /// Retries on "dataset is busy" errors, which can occur briefly after
+    /// unexport while ctld releases the device.
     #[instrument(skip(self))]
     pub fn delete_volume(&self, name: &str) -> Result<()> {
         // Validate name for command injection prevention
@@ -237,15 +242,38 @@ impl ZfsManager {
             return Ok(());
         }
 
-        let output = Command::new("zfs").args(["destroy", &full_name]).output()?;
+        // Retry loop for "dataset is busy" errors
+        // After unexport, ctld may take a moment to release the zvol device
+        const MAX_RETRIES: u32 = 5;
+        const RETRY_DELAY_MS: u64 = 200;
 
-        if let Err(e) = check_command_result(&output, &full_name) {
-            warn!(volume = %full_name, error = %e, "Failed to delete volume");
-            return Err(e);
+        for attempt in 1..=MAX_RETRIES {
+            let output = Command::new("zfs").args(["destroy", &full_name]).output()?;
+
+            match check_command_result(&output, &full_name) {
+                Ok(()) => {
+                    info!(volume = %full_name, "ZFS volume deleted successfully");
+                    return Ok(());
+                }
+                Err(ZfsError::DatasetBusy(_)) if attempt < MAX_RETRIES => {
+                    warn!(
+                        volume = %full_name,
+                        attempt = attempt,
+                        max_retries = MAX_RETRIES,
+                        "Dataset busy, retrying after {}ms",
+                        RETRY_DELAY_MS
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
+                }
+                Err(e) => {
+                    warn!(volume = %full_name, error = %e, "Failed to delete volume");
+                    return Err(e);
+                }
+            }
         }
 
-        info!(volume = %full_name, "ZFS volume deleted successfully");
-        Ok(())
+        // Should not reach here, but satisfy the compiler
+        Err(ZfsError::DatasetBusy(full_name))
     }
 
     /// Resize a ZFS volume

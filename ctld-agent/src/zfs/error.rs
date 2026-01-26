@@ -8,6 +8,9 @@ pub enum ZfsError {
     #[error("dataset '{0}' already exists")]
     DatasetExists(String),
 
+    #[error("dataset '{0}' is busy")]
+    DatasetBusy(String),
+
     #[error("invalid dataset name: {0}")]
     InvalidName(String),
 
