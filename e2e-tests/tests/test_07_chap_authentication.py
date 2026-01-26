@@ -32,8 +32,11 @@ class TestChapAuthentication:
         unique_name: str,
         resource_tracker,
     ) -> Callable:
-        """Factory for creating CHAP secrets with automatic cleanup."""
-        created_secrets = []
+        """Factory for creating CHAP secrets with automatic cleanup.
+
+        Secrets are tracked via resource_tracker and cleaned up AFTER PVCs,
+        ensuring the CSI provisioner can access credentials during volume deletion.
+        """
 
         def create(
             username: str = "e2e-chap-user",
@@ -64,17 +67,11 @@ class TestChapAuthentication:
                 mutual_username=mutual_username,
                 mutual_password=mutual_password,
             )
-            created_secrets.append(name)
+            # Track secret for cleanup AFTER PVCs
+            resource_tracker.track_secret(name)
             return name
 
-        yield create
-
-        # Cleanup secrets
-        for name in created_secrets:
-            try:
-                k8s.delete_secret(name, ignore_not_found=True)
-            except Exception:
-                pass
+        return create
 
     @pytest.fixture
     def chap_pvc_factory(
@@ -199,44 +196,41 @@ class TestChapAuthentication:
             username=chap_username,
             password=chap_password,
         )
+        # Track secret for cleanup AFTER PVC (so provisioner can access credentials)
+        resource_tracker.track_secret(secret_name)
 
-        try:
-            # Create PVC using the CHAP StorageClass
-            k8s.create_pvc(
-                name=pvc_name,
-                storage_class="freebsd-e2e-iscsi-chap-basic",
-                size="1Gi",
-            )
-            resource_tracker.track_pvc(pvc_name)
+        # Create PVC using the CHAP StorageClass
+        k8s.create_pvc(
+            name=pvc_name,
+            storage_class="freebsd-e2e-iscsi-chap-basic",
+            size="1Gi",
+        )
+        resource_tracker.track_pvc(pvc_name)
 
-            # Wait for PVC to be bound
-            assert wait_pvc_bound(pvc_name, timeout=120), f"PVC {pvc_name} not bound"
+        # Wait for PVC to be bound
+        assert wait_pvc_bound(pvc_name, timeout=120), f"PVC {pvc_name} not bound"
 
-            # Get PV name
-            pv_name = k8s.get_pvc_volume(pvc_name)
-            assert pv_name is not None, "PVC not bound to PV"
+        # Get PV name
+        pv_name = k8s.get_pvc_volume(pvc_name)
+        assert pv_name is not None, "PVC not bound to PV"
 
-            # Verify ZFS dataset exists
-            dataset = f"{storage.csi_path}/{pv_name}"
-            assert storage.verify_dataset_exists(
-                dataset
-            ), f"Dataset {dataset} not found"
+        # Verify ZFS dataset exists
+        dataset = f"{storage.csi_path}/{pv_name}"
+        assert storage.verify_dataset_exists(
+            dataset
+        ), f"Dataset {dataset} not found"
 
-            # Verify volume is exported via iSCSI
-            assert storage.verify_volume_exported(
-                pv_name, "iscsi"
-            ), "Volume not exported"
+        # Verify volume is exported via iSCSI
+        assert storage.verify_volume_exported(
+            pv_name, "iscsi"
+        ), "Volume not exported"
 
-            # Verify auth-group was created with CHAP
-            # The CSI driver creates auth-group named "ag-{volume_id}"
-            auth_group_name = f"ag-{pv_name}"
-            assert storage.verify_auth_group_has_chap(
-                auth_group_name, expected_username=chap_username
-            ), f"Auth-group {auth_group_name} doesn't have expected CHAP config"
-
-        finally:
-            # Cleanup secret
-            k8s.delete_secret(secret_name, ignore_not_found=True)
+        # Verify auth-group was created with CHAP
+        # The CSI driver creates auth-group named "ag-{volume_id}"
+        auth_group_name = f"ag-{pv_name}"
+        assert storage.verify_auth_group_has_chap(
+            auth_group_name, expected_username=chap_username
+        ), f"Auth-group {auth_group_name} doesn't have expected CHAP config"
 
     def test_mutual_chap_volume_creation(
         self,
@@ -263,31 +257,28 @@ class TestChapAuthentication:
             mutual_username=target_username,
             mutual_password=target_password,
         )
+        resource_tracker.track_secret(secret_name)
 
-        try:
-            # Create PVC using mutual CHAP StorageClass
-            k8s.create_pvc(
-                name=pvc_name,
-                storage_class="freebsd-e2e-iscsi-chap-mutual",
-                size="1Gi",
-            )
-            resource_tracker.track_pvc(pvc_name)
+        # Create PVC using mutual CHAP StorageClass
+        k8s.create_pvc(
+            name=pvc_name,
+            storage_class="freebsd-e2e-iscsi-chap-mutual",
+            size="1Gi",
+        )
+        resource_tracker.track_pvc(pvc_name)
 
-            assert wait_pvc_bound(pvc_name, timeout=120), f"PVC {pvc_name} not bound"
+        assert wait_pvc_bound(pvc_name, timeout=120), f"PVC {pvc_name} not bound"
 
-            pv_name = k8s.get_pvc_volume(pvc_name)
-            assert pv_name is not None
+        pv_name = k8s.get_pvc_volume(pvc_name)
+        assert pv_name is not None
 
-            # Verify mutual CHAP is configured
-            auth_group_name = f"ag-{pv_name}"
-            assert storage.verify_auth_group_has_mutual_chap(
-                auth_group_name,
-                expected_username=initiator_username,
-                expected_mutual_username=target_username,
-            ), f"Auth-group {auth_group_name} doesn't have expected mutual CHAP config"
-
-        finally:
-            k8s.delete_secret(secret_name, ignore_not_found=True)
+        # Verify mutual CHAP is configured
+        auth_group_name = f"ag-{pv_name}"
+        assert storage.verify_auth_group_has_mutual_chap(
+            auth_group_name,
+            expected_username=initiator_username,
+            expected_mutual_username=target_username,
+        ), f"Auth-group {auth_group_name} doesn't have expected mutual CHAP config"
 
     def test_verify_ucl_config_with_chap(
         self,
@@ -309,37 +300,34 @@ class TestChapAuthentication:
             username=chap_username,
             password=chap_password,
         )
+        resource_tracker.track_secret(secret_name)
 
-        try:
-            k8s.create_pvc(
-                name=pvc_name,
-                storage_class="freebsd-e2e-iscsi-chap-basic",
-                size="1Gi",
-            )
-            resource_tracker.track_pvc(pvc_name)
+        k8s.create_pvc(
+            name=pvc_name,
+            storage_class="freebsd-e2e-iscsi-chap-basic",
+            size="1Gi",
+        )
+        resource_tracker.track_pvc(pvc_name)
 
-            assert wait_pvc_bound(pvc_name, timeout=120)
+        assert wait_pvc_bound(pvc_name, timeout=120)
 
-            pv_name = k8s.get_pvc_volume(pvc_name)
+        pv_name = k8s.get_pvc_volume(pvc_name)
 
-            # Get the full auth-group info
-            auth_group_name = f"ag-{pv_name}"
-            ag_info = storage.get_auth_group(auth_group_name)
+        # Get the full auth-group info
+        auth_group_name = f"ag-{pv_name}"
+        ag_info = storage.get_auth_group(auth_group_name)
 
-            assert ag_info is not None, f"Auth-group {auth_group_name} not found"
-            assert (
-                ag_info.chap_username == chap_username
-            ), f"Username mismatch: {ag_info.chap_username} != {chap_username}"
-            assert ag_info.chap_secret == chap_password, "Password mismatch"
+        assert ag_info is not None, f"Auth-group {auth_group_name} not found"
+        assert (
+            ag_info.chap_username == chap_username
+        ), f"Username mismatch: {ag_info.chap_username} != {chap_username}"
+        assert ag_info.chap_secret == chap_password, "Password mismatch"
 
-            # Verify target references the auth-group
-            target_ag = storage.get_target_auth_group(pv_name)
-            assert (
-                target_ag == auth_group_name
-            ), f"Target auth-group mismatch: {target_ag} != {auth_group_name}"
-
-        finally:
-            k8s.delete_secret(secret_name, ignore_not_found=True)
+        # Verify target references the auth-group
+        target_ag = storage.get_target_auth_group(pv_name)
+        assert (
+            target_ag == auth_group_name
+        ), f"Target auth-group mismatch: {target_ag} != {auth_group_name}"
 
     # -------------------------------------------------------------------------
     # Pod Mount Tests
@@ -367,39 +355,36 @@ class TestChapAuthentication:
             username=chap_username,
             password=chap_password,
         )
+        resource_tracker.track_secret(secret_name)
 
-        try:
-            k8s.create_pvc(
-                name=pvc_name,
-                storage_class="freebsd-e2e-iscsi-chap-basic",
-                size="1Gi",
-            )
-            resource_tracker.track_pvc(pvc_name)
+        k8s.create_pvc(
+            name=pvc_name,
+            storage_class="freebsd-e2e-iscsi-chap-basic",
+            size="1Gi",
+        )
+        resource_tracker.track_pvc(pvc_name)
 
-            assert wait_pvc_bound(pvc_name, timeout=120)
+        assert wait_pvc_bound(pvc_name, timeout=120)
 
-            # Create pod that mounts the volume
-            pod_name = pod_factory(pvc_name)
-            assert wait_pod_ready(pod_name, timeout=180), f"Pod {pod_name} not ready"
+        # Create pod that mounts the volume
+        pod_name = pod_factory(pvc_name)
+        assert wait_pod_ready(pod_name, timeout=180), f"Pod {pod_name} not ready"
 
-            # Write test data
-            test_data = "chap-authenticated-data"
-            stdout, stderr, rc = k8s.exec_in_pod(
-                pod_name,
-                ["sh", "-c", f"echo '{test_data}' > /mnt/data/chap-test.txt"],
-            )
-            assert rc == 0, f"Failed to write data: {stderr}"
+        # Write test data
+        test_data = "chap-authenticated-data"
+        stdout, stderr, rc = k8s.exec_in_pod(
+            pod_name,
+            ["sh", "-c", f"echo '{test_data}' > /mnt/data/chap-test.txt"],
+        )
+        assert rc == 0, f"Failed to write data: {stderr}"
 
-            # Read back and verify
-            stdout, stderr, rc = k8s.exec_in_pod(
-                pod_name,
-                ["cat", "/mnt/data/chap-test.txt"],
-            )
-            assert rc == 0, f"Failed to read data: {stderr}"
-            assert test_data in stdout, "Data verification failed"
-
-        finally:
-            k8s.delete_secret(secret_name, ignore_not_found=True)
+        # Read back and verify
+        stdout, stderr, rc = k8s.exec_in_pod(
+            pod_name,
+            ["cat", "/mnt/data/chap-test.txt"],
+        )
+        assert rc == 0, f"Failed to read data: {stderr}"
+        assert test_data in stdout, "Data verification failed"
 
     # -------------------------------------------------------------------------
     # Error Handling Tests
@@ -454,6 +439,7 @@ class TestChapAuthentication:
         k8s: K8sClient,
         storage: StorageMonitor,
         unique_name: str,
+        resource_tracker,
         wait_pvc_bound: Callable,
         wait_pv_deleted: Callable,
     ):
@@ -469,37 +455,34 @@ class TestChapAuthentication:
             username=chap_username,
             password=chap_password,
         )
+        # Track secret - will be cleaned up after any PVC cleanup
+        resource_tracker.track_secret(secret_name)
 
-        try:
-            k8s.create_pvc(
-                name=pvc_name,
-                storage_class="freebsd-e2e-iscsi-chap-basic",
-                size="1Gi",
-            )
+        k8s.create_pvc(
+            name=pvc_name,
+            storage_class="freebsd-e2e-iscsi-chap-basic",
+            size="1Gi",
+        )
+        # Note: Not tracking PVC since we explicitly delete it in this test
 
-            assert wait_pvc_bound(pvc_name, timeout=120)
+        assert wait_pvc_bound(pvc_name, timeout=120)
 
-            pv_name = k8s.get_pvc_volume(pvc_name)
-            auth_group_name = f"ag-{pv_name}"
+        pv_name = k8s.get_pvc_volume(pvc_name)
+        auth_group_name = f"ag-{pv_name}"
 
-            # Verify auth-group exists before deletion
-            assert storage.verify_auth_group_exists(auth_group_name)
+        # Verify auth-group exists before deletion
+        assert storage.verify_auth_group_exists(auth_group_name)
 
-            # Delete the PVC (with Delete reclaim policy, PV should also be deleted)
-            k8s.delete("pvc", pvc_name, wait=True, timeout=120)
+        # Delete the PVC (with Delete reclaim policy, PV should also be deleted)
+        k8s.delete("pvc", pvc_name, wait=True, timeout=120)
 
-            # Wait for PV to be deleted (indicates cleanup is complete)
-            assert wait_pv_deleted(pv_name, timeout=60), f"PV {pv_name} not deleted"
+        # Wait for PV to be deleted (indicates cleanup is complete)
+        assert wait_pv_deleted(pv_name, timeout=60), f"PV {pv_name} not deleted"
 
-            # Auth-group should be removed
-            assert not storage.verify_auth_group_exists(
-                auth_group_name
-            ), f"Auth-group {auth_group_name} not cleaned up after volume deletion"
-
-        finally:
-            k8s.delete_secret(secret_name, ignore_not_found=True)
-            # Ensure PVC cleanup in case test failed early
-            k8s.delete("pvc", pvc_name, ignore_not_found=True)
+        # Auth-group should be removed
+        assert not storage.verify_auth_group_exists(
+            auth_group_name
+        ), f"Auth-group {auth_group_name} not cleaned up after volume deletion"
 
 
 class TestChapSecurityEdgeCases:
@@ -528,28 +511,25 @@ class TestChapSecurityEdgeCases:
             username=chap_username,
             password=chap_password,
         )
+        resource_tracker.track_secret(secret_name)
 
-        try:
-            k8s.create_pvc(
-                name=pvc_name,
-                storage_class="freebsd-e2e-iscsi-chap-basic",
-                size="1Gi",
-            )
-            resource_tracker.track_pvc(pvc_name)
+        k8s.create_pvc(
+            name=pvc_name,
+            storage_class="freebsd-e2e-iscsi-chap-basic",
+            size="1Gi",
+        )
+        resource_tracker.track_pvc(pvc_name)
 
-            assert wait_pvc_bound(pvc_name, timeout=120)
+        assert wait_pvc_bound(pvc_name, timeout=120)
 
-            pv_name = k8s.get_pvc_volume(pvc_name)
-            auth_group_name = f"ag-{pv_name}"
+        pv_name = k8s.get_pvc_volume(pvc_name)
+        auth_group_name = f"ag-{pv_name}"
 
-            # Verify the password was stored correctly (UCL escaping)
-            ag_info = storage.get_auth_group(auth_group_name)
-            assert ag_info is not None
-            # The password should match (UCL handles escaping internally)
-            assert ag_info.chap_username == chap_username
-
-        finally:
-            k8s.delete_secret(secret_name, ignore_not_found=True)
+        # Verify the password was stored correctly (UCL escaping)
+        ag_info = storage.get_auth_group(auth_group_name)
+        assert ag_info is not None
+        # The password should match (UCL handles escaping internally)
+        assert ag_info.chap_username == chap_username
 
     def test_long_chap_credentials(
         self,
@@ -575,27 +555,24 @@ class TestChapSecurityEdgeCases:
             username=chap_username,
             password=chap_password,
         )
+        resource_tracker.track_secret(secret_name)
 
-        try:
-            k8s.create_pvc(
-                name=pvc_name,
-                storage_class="freebsd-e2e-iscsi-chap-basic",
-                size="1Gi",
-            )
-            resource_tracker.track_pvc(pvc_name)
+        k8s.create_pvc(
+            name=pvc_name,
+            storage_class="freebsd-e2e-iscsi-chap-basic",
+            size="1Gi",
+        )
+        resource_tracker.track_pvc(pvc_name)
 
-            assert wait_pvc_bound(pvc_name, timeout=120)
+        assert wait_pvc_bound(pvc_name, timeout=120)
 
-            pv_name = k8s.get_pvc_volume(pvc_name)
-            auth_group_name = f"ag-{pv_name}"
+        pv_name = k8s.get_pvc_volume(pvc_name)
+        auth_group_name = f"ag-{pv_name}"
 
-            # Verify credentials were stored
-            ag_info = storage.get_auth_group(auth_group_name)
-            assert ag_info is not None
-            assert ag_info.chap_username == chap_username
-
-        finally:
-            k8s.delete_secret(secret_name, ignore_not_found=True)
+        # Verify credentials were stored
+        ag_info = storage.get_auth_group(auth_group_name)
+        assert ag_info is not None
+        assert ag_info.chap_username == chap_username
 
     def test_unicode_in_chap_username(
         self,
@@ -621,20 +598,17 @@ class TestChapSecurityEdgeCases:
             username=chap_username,
             password=chap_password,
         )
+        resource_tracker.track_secret(secret_name)
 
-        try:
-            k8s.create_pvc(
-                name=pvc_name,
-                storage_class="freebsd-e2e-iscsi-chap-basic",
-                size="1Gi",
-            )
-            resource_tracker.track_pvc(pvc_name)
+        k8s.create_pvc(
+            name=pvc_name,
+            storage_class="freebsd-e2e-iscsi-chap-basic",
+            size="1Gi",
+        )
+        resource_tracker.track_pvc(pvc_name)
 
-            # Should either work or fail gracefully
-            bound = wait_pvc_bound(pvc_name, timeout=60)
-            # Test passes if either bound successfully or failed gracefully
-            # (no crash, proper error handling)
-            assert True  # Just verify we didn't crash
-
-        finally:
-            k8s.delete_secret(secret_name, ignore_not_found=True)
+        # Should either work or fail gracefully
+        bound = wait_pvc_bound(pvc_name, timeout=60)
+        # Test passes if either bound successfully or failed gracefully
+        # (no crash, proper error handling)
+        assert True  # Just verify we didn't crash

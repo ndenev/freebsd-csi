@@ -18,6 +18,37 @@ use crate::types::Endpoint;
 /// Default filesystem type for Linux
 pub const DEFAULT_FS_TYPE: &str = "ext4";
 
+/// iSCSI CHAP credentials for initiator authentication
+#[derive(Debug, Clone)]
+pub struct IscsiChapCredentials {
+    /// Forward CHAP: initiator authenticates to target
+    pub username: String,
+    pub password: String,
+    /// Mutual CHAP (optional): target authenticates to initiator
+    pub mutual_username: Option<String>,
+    pub mutual_password: Option<String>,
+}
+
+/// NVMeoF DH-HMAC-CHAP credentials for initiator authentication
+///
+/// Used with nvme-cli's `--dhchap-secret` and `--dhchap-ctrl-secret` options.
+/// Secrets must be in ASCII format per NVMe 2.0 spec section 8.13.5.8.
+///
+/// Note: We intentionally don't support host_nqn restriction here because in
+/// Kubernetes each node has its own unique host NQN. Restricting by host_nqn
+/// would only allow one specific node to connect, breaking multi-node access.
+/// Instead, we rely on the shared secret for authentication - any node with
+/// the correct secret can authenticate using its own system host NQN.
+#[derive(Debug, Clone)]
+pub struct NvmeAuthCredentials {
+    /// DH-HMAC-CHAP secret for host-to-target authentication.
+    /// The initiator proves it has this secret to authenticate to the target.
+    pub secret: String,
+    /// Controller secret for bidirectional/mutual authentication (optional).
+    /// When set, the target also proves its identity to the host.
+    pub ctrl_secret: Option<String>,
+}
+
 /// Check if an iSCSI target is currently connected.
 pub async fn is_iscsi_connected(target_iqn: &str) -> bool {
     // Check iscsiadm session list for this target
@@ -130,14 +161,20 @@ async fn is_nvme_native_multipath_enabled() -> bool {
 ///
 /// When multiple endpoints are provided, this function will:
 /// 1. Run sendtargets discovery against each portal
-/// 2. Login to the target via each portal
-/// 3. Wait for dm-multipath to combine the paths
-/// 4. Return the multipath device (or single device if only one portal)
+/// 2. Configure CHAP authentication if credentials are provided
+/// 3. Login to the target via each portal
+/// 4. Wait for dm-multipath to combine the paths
+/// 5. Return the multipath device (or single device if only one portal)
 ///
 /// # Arguments
 /// * `target_iqn` - The iSCSI Qualified Name of the target
 /// * `endpoints` - One or more endpoints (host:port pairs) for multipath support
-pub async fn connect_iscsi(target_iqn: &str, endpoints: &[Endpoint]) -> PlatformResult<String> {
+/// * `chap_credentials` - Optional CHAP credentials for authentication
+pub async fn connect_iscsi(
+    target_iqn: &str,
+    endpoints: &[Endpoint],
+    chap_credentials: Option<&IscsiChapCredentials>,
+) -> PlatformResult<String> {
     if endpoints.is_empty() {
         return Err(Status::invalid_argument(
             "At least one endpoint is required for iSCSI connection",
@@ -182,6 +219,156 @@ pub async fn connect_iscsi(target_iqn: &str, endpoints: &[Endpoint]) -> Platform
         } else {
             let stdout = String::from_utf8_lossy(&discover_output.stdout);
             info!(output = %stdout, portal = %portal, "iSCSI discovery successful");
+        }
+
+        // Configure CHAP authentication if credentials are provided
+        if let Some(chap) = chap_credentials {
+            debug!(
+                target_iqn = %target_iqn,
+                portal = %portal,
+                username = %chap.username,
+                has_mutual = chap.mutual_username.is_some(),
+                "Configuring CHAP authentication"
+            );
+
+            // Set authentication method to CHAP
+            let auth_method_output = Command::new("iscsiadm")
+                .args([
+                    "-m", "node",
+                    "-T", target_iqn,
+                    "-p", &portal,
+                    "-o", "update",
+                    "-n", "node.session.auth.authmethod",
+                    "-v", "CHAP",
+                ])
+                .output()
+                .await
+                .map_err(|e| {
+                    error!(error = %e, "Failed to set CHAP auth method");
+                    Status::internal(format!("Failed to set CHAP auth method: {}", e))
+                })?;
+
+            if !auth_method_output.status.success() {
+                let stderr = String::from_utf8_lossy(&auth_method_output.stderr);
+                error!(stderr = %stderr, "Failed to set CHAP auth method");
+                return Err(Status::internal(format!(
+                    "Failed to set CHAP auth method: {}",
+                    stderr
+                )));
+            }
+
+            // Set CHAP username
+            let username_output = Command::new("iscsiadm")
+                .args([
+                    "-m", "node",
+                    "-T", target_iqn,
+                    "-p", &portal,
+                    "-o", "update",
+                    "-n", "node.session.auth.username",
+                    "-v", &chap.username,
+                ])
+                .output()
+                .await
+                .map_err(|e| {
+                    error!(error = %e, "Failed to set CHAP username");
+                    Status::internal(format!("Failed to set CHAP username: {}", e))
+                })?;
+
+            if !username_output.status.success() {
+                let stderr = String::from_utf8_lossy(&username_output.stderr);
+                error!(stderr = %stderr, "Failed to set CHAP username");
+                return Err(Status::internal(format!(
+                    "Failed to set CHAP username: {}",
+                    stderr
+                )));
+            }
+
+            // Set CHAP password
+            let password_output = Command::new("iscsiadm")
+                .args([
+                    "-m", "node",
+                    "-T", target_iqn,
+                    "-p", &portal,
+                    "-o", "update",
+                    "-n", "node.session.auth.password",
+                    "-v", &chap.password,
+                ])
+                .output()
+                .await
+                .map_err(|e| {
+                    error!(error = %e, "Failed to set CHAP password");
+                    Status::internal(format!("Failed to set CHAP password: {}", e))
+                })?;
+
+            if !password_output.status.success() {
+                let stderr = String::from_utf8_lossy(&password_output.stderr);
+                error!(stderr = %stderr, "Failed to set CHAP password");
+                return Err(Status::internal(format!(
+                    "Failed to set CHAP password: {}",
+                    stderr
+                )));
+            }
+
+            // Configure mutual CHAP if provided
+            if let (Some(mutual_user), Some(mutual_pass)) =
+                (&chap.mutual_username, &chap.mutual_password)
+            {
+                // Set mutual CHAP username (target authenticates to initiator)
+                let mutual_user_output = Command::new("iscsiadm")
+                    .args([
+                        "-m", "node",
+                        "-T", target_iqn,
+                        "-p", &portal,
+                        "-o", "update",
+                        "-n", "node.session.auth.username_in",
+                        "-v", mutual_user,
+                    ])
+                    .output()
+                    .await
+                    .map_err(|e| {
+                        error!(error = %e, "Failed to set mutual CHAP username");
+                        Status::internal(format!("Failed to set mutual CHAP username: {}", e))
+                    })?;
+
+                if !mutual_user_output.status.success() {
+                    let stderr = String::from_utf8_lossy(&mutual_user_output.stderr);
+                    error!(stderr = %stderr, "Failed to set mutual CHAP username");
+                    return Err(Status::internal(format!(
+                        "Failed to set mutual CHAP username: {}",
+                        stderr
+                    )));
+                }
+
+                // Set mutual CHAP password
+                let mutual_pass_output = Command::new("iscsiadm")
+                    .args([
+                        "-m", "node",
+                        "-T", target_iqn,
+                        "-p", &portal,
+                        "-o", "update",
+                        "-n", "node.session.auth.password_in",
+                        "-v", mutual_pass,
+                    ])
+                    .output()
+                    .await
+                    .map_err(|e| {
+                        error!(error = %e, "Failed to set mutual CHAP password");
+                        Status::internal(format!("Failed to set mutual CHAP password: {}", e))
+                    })?;
+
+                if !mutual_pass_output.status.success() {
+                    let stderr = String::from_utf8_lossy(&mutual_pass_output.stderr);
+                    error!(stderr = %stderr, "Failed to set mutual CHAP password");
+                    return Err(Status::internal(format!(
+                        "Failed to set mutual CHAP password: {}",
+                        stderr
+                    )));
+                }
+
+                debug!(portal = %portal, "Mutual CHAP configured");
+            }
+
+            info!(portal = %portal, "CHAP authentication configured");
         }
 
         // Login to the target via this portal
@@ -414,13 +601,19 @@ pub async fn disconnect_iscsi(target_iqn: &str) -> PlatformResult<()> {
 ///
 /// When multiple endpoints are provided, this function will:
 /// 1. Connect to each endpoint (each with its own host:port)
-/// 2. Wait for multipath to combine the paths (native NVMe multipath or dm-multipath)
-/// 3. Return the multipath device (or single device if only one endpoint)
+/// 2. Configure DH-HMAC-CHAP authentication if credentials are provided
+/// 3. Wait for multipath to combine the paths (native NVMe multipath or dm-multipath)
+/// 4. Return the multipath device (or single device if only one endpoint)
 ///
 /// # Arguments
 /// * `target_nqn` - The NVMe Qualified Name of the target
 /// * `endpoints` - One or more endpoints (host:port pairs) for multipath support
-pub async fn connect_nvmeof(target_nqn: &str, endpoints: &[Endpoint]) -> PlatformResult<String> {
+/// * `auth_credentials` - Optional DH-HMAC-CHAP credentials for authentication
+pub async fn connect_nvmeof(
+    target_nqn: &str,
+    endpoints: &[Endpoint],
+    auth_credentials: Option<&NvmeAuthCredentials>,
+) -> PlatformResult<String> {
     if endpoints.is_empty() {
         return Err(Status::invalid_argument(
             "At least one endpoint is required for NVMeoF connection",
@@ -433,6 +626,7 @@ pub async fn connect_nvmeof(target_nqn: &str, endpoints: &[Endpoint]) -> Platfor
         target_nqn = %target_nqn,
         endpoints = ?endpoints.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
         multipath = multipath_mode,
+        has_auth = auth_credentials.is_some(),
         "Connecting to NVMeoF target"
     );
 
@@ -444,16 +638,29 @@ pub async fn connect_nvmeof(target_nqn: &str, endpoints: &[Endpoint]) -> Platfor
         let addr = &endpoint.host;
         let port = endpoint.port.to_string();
 
-        let output = Command::new("nvme")
-            .args([
-                "connect", "-t", "tcp", "-a", addr, "-s", &port, "-n", target_nqn,
-            ])
-            .output()
-            .await
-            .map_err(|e| {
-                error!(error = %e, endpoint = %endpoint, "Failed to execute nvme connect");
-                Status::internal(format!("Failed to execute nvme connect: {}", e))
-            })?;
+        // Build nvme connect command with optional authentication
+        let mut cmd = Command::new("nvme");
+        cmd.args(["connect", "-t", "tcp", "-a", addr, "-s", &port, "-n", target_nqn]);
+
+        if let Some(auth) = auth_credentials {
+            debug!(
+                target_nqn = %target_nqn,
+                endpoint = %endpoint,
+                has_ctrl_secret = auth.ctrl_secret.is_some(),
+                "Configuring NVMeoF DH-HMAC-CHAP authentication"
+            );
+
+            cmd.args(["--dhchap-secret", &auth.secret]);
+
+            if let Some(ctrl_secret) = &auth.ctrl_secret {
+                cmd.args(["--dhchap-ctrl-secret", ctrl_secret]);
+            }
+        }
+
+        let output = cmd.output().await.map_err(|e| {
+            error!(error = %e, endpoint = %endpoint, "Failed to execute nvme connect");
+            Status::internal(format!("Failed to execute nvme connect: {}", e))
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

@@ -26,8 +26,11 @@ use tokio::process::Command;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
+use std::collections::HashMap;
+
 use crate::csi;
 use crate::platform;
+use crate::platform::{IscsiChapCredentials, NvmeAuthCredentials};
 use crate::types::{Endpoints, ExportType};
 
 /// Base IQN prefix for iSCSI targets (must match ctld-agent configuration)
@@ -35,6 +38,18 @@ const BASE_IQN: &str = "iqn.2024-01.org.freebsd.csi";
 
 /// Base NQN prefix for NVMeoF targets (must match ctld-agent configuration)
 const BASE_NQN: &str = "nqn.2024-01.org.freebsd.csi";
+
+// Standard CSI secret keys for iSCSI CHAP authentication
+// These follow the Linux open-iscsi naming conventions used by the CSI spec
+const CHAP_USERNAME_KEY: &str = "node.session.auth.username";
+const CHAP_PASSWORD_KEY: &str = "node.session.auth.password";
+const CHAP_MUTUAL_USERNAME_KEY: &str = "node.session.auth.username_in";
+const CHAP_MUTUAL_PASSWORD_KEY: &str = "node.session.auth.password_in";
+
+// Secret keys for NVMeoF DH-HMAC-CHAP authentication
+// These follow the nvme-cli naming conventions
+const NVME_SECRET_KEY: &str = "nvme.auth.secret";
+const NVME_CTRL_SECRET_KEY: &str = "nvme.auth.ctrl_secret";
 
 /// CSI Node Service
 ///
@@ -108,6 +123,68 @@ impl NodeService {
         }
 
         Ok(())
+    }
+
+    /// Extract iSCSI CHAP credentials from secrets map.
+    ///
+    /// Returns None if no CHAP credentials are present or if required fields are missing.
+    fn extract_iscsi_chap(secrets: &HashMap<String, String>) -> Option<IscsiChapCredentials> {
+        let username = secrets.get(CHAP_USERNAME_KEY)?;
+        let password = secrets.get(CHAP_PASSWORD_KEY)?;
+
+        // Username and password are required for CHAP
+        if username.is_empty() || password.is_empty() {
+            return None;
+        }
+
+        let credentials = IscsiChapCredentials {
+            username: username.clone(),
+            password: password.clone(),
+            // Mutual CHAP is optional
+            mutual_username: secrets
+                .get(CHAP_MUTUAL_USERNAME_KEY)
+                .filter(|s| !s.is_empty())
+                .cloned(),
+            mutual_password: secrets
+                .get(CHAP_MUTUAL_PASSWORD_KEY)
+                .filter(|s| !s.is_empty())
+                .cloned(),
+        };
+
+        debug!(
+            username = %credentials.username,
+            has_mutual = credentials.mutual_username.is_some(),
+            "Extracted iSCSI CHAP credentials from secrets"
+        );
+
+        Some(credentials)
+    }
+
+    /// Extract NVMeoF DH-HMAC-CHAP credentials from secrets map.
+    ///
+    /// Returns None if no NVMeoF auth credentials are present or if required fields are missing.
+    fn extract_nvme_auth(secrets: &HashMap<String, String>) -> Option<NvmeAuthCredentials> {
+        let secret = secrets.get(NVME_SECRET_KEY)?;
+
+        // Secret is required for DH-HMAC-CHAP
+        if secret.is_empty() {
+            return None;
+        }
+
+        let credentials = NvmeAuthCredentials {
+            secret: secret.clone(),
+            ctrl_secret: secrets
+                .get(NVME_CTRL_SECRET_KEY)
+                .filter(|s| !s.is_empty())
+                .cloned(),
+        };
+
+        debug!(
+            has_ctrl_secret = credentials.ctrl_secret.is_some(),
+            "Extracted NVMeoF DH-HMAC-CHAP credentials from secrets"
+        );
+
+        Some(credentials)
     }
 
     /// Get the current capacity of a mounted volume.
@@ -497,11 +574,20 @@ impl csi::node_server::Node for NodeService {
             }
         }
 
+        // Extract authentication credentials from secrets based on export type
+        let secrets = &req.secrets;
+
         // Connect to target and get device (multipath: connects to all endpoints)
         let device = match export_type {
-            ExportType::Iscsi => platform::connect_iscsi(target_name, endpoints.as_slice()).await?,
+            ExportType::Iscsi => {
+                let chap_creds = Self::extract_iscsi_chap(secrets);
+                platform::connect_iscsi(target_name, endpoints.as_slice(), chap_creds.as_ref())
+                    .await?
+            }
             ExportType::Nvmeof => {
-                platform::connect_nvmeof(target_name, endpoints.as_slice()).await?
+                let nvme_creds = Self::extract_nvme_auth(secrets);
+                platform::connect_nvmeof(target_name, endpoints.as_slice(), nvme_creds.as_ref())
+                    .await?
             }
         };
 
@@ -1039,5 +1125,156 @@ mod tests {
         let endpoints = NodeService::parse_endpoints(&ctx, ExportType::Iscsi).unwrap();
         assert_eq!(endpoints.first().unwrap().host, "192.168.1.1");
         assert_eq!(endpoints.first().unwrap().port, 3260);
+    }
+
+    #[test]
+    fn test_extract_iscsi_chap_full_credentials() {
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "node.session.auth.username".to_string(),
+            "test_user".to_string(),
+        );
+        secrets.insert(
+            "node.session.auth.password".to_string(),
+            "test_pass".to_string(),
+        );
+        secrets.insert(
+            "node.session.auth.username_in".to_string(),
+            "mutual_user".to_string(),
+        );
+        secrets.insert(
+            "node.session.auth.password_in".to_string(),
+            "mutual_pass".to_string(),
+        );
+
+        let creds = NodeService::extract_iscsi_chap(&secrets).unwrap();
+        assert_eq!(creds.username, "test_user");
+        assert_eq!(creds.password, "test_pass");
+        assert_eq!(creds.mutual_username, Some("mutual_user".to_string()));
+        assert_eq!(creds.mutual_password, Some("mutual_pass".to_string()));
+    }
+
+    #[test]
+    fn test_extract_iscsi_chap_basic_only() {
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "node.session.auth.username".to_string(),
+            "test_user".to_string(),
+        );
+        secrets.insert(
+            "node.session.auth.password".to_string(),
+            "test_pass".to_string(),
+        );
+
+        let creds = NodeService::extract_iscsi_chap(&secrets).unwrap();
+        assert_eq!(creds.username, "test_user");
+        assert_eq!(creds.password, "test_pass");
+        assert!(creds.mutual_username.is_none());
+        assert!(creds.mutual_password.is_none());
+    }
+
+    #[test]
+    fn test_extract_iscsi_chap_missing_username() {
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "node.session.auth.password".to_string(),
+            "test_pass".to_string(),
+        );
+
+        assert!(NodeService::extract_iscsi_chap(&secrets).is_none());
+    }
+
+    #[test]
+    fn test_extract_iscsi_chap_missing_password() {
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "node.session.auth.username".to_string(),
+            "test_user".to_string(),
+        );
+
+        assert!(NodeService::extract_iscsi_chap(&secrets).is_none());
+    }
+
+    #[test]
+    fn test_extract_iscsi_chap_empty_username() {
+        let mut secrets = HashMap::new();
+        secrets.insert("node.session.auth.username".to_string(), "".to_string());
+        secrets.insert(
+            "node.session.auth.password".to_string(),
+            "test_pass".to_string(),
+        );
+
+        assert!(NodeService::extract_iscsi_chap(&secrets).is_none());
+    }
+
+    #[test]
+    fn test_extract_iscsi_chap_empty_mutual_ignored() {
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "node.session.auth.username".to_string(),
+            "test_user".to_string(),
+        );
+        secrets.insert(
+            "node.session.auth.password".to_string(),
+            "test_pass".to_string(),
+        );
+        // Empty mutual credentials should be ignored
+        secrets.insert("node.session.auth.username_in".to_string(), "".to_string());
+        secrets.insert("node.session.auth.password_in".to_string(), "".to_string());
+
+        let creds = NodeService::extract_iscsi_chap(&secrets).unwrap();
+        assert!(creds.mutual_username.is_none());
+        assert!(creds.mutual_password.is_none());
+    }
+
+    #[test]
+    fn test_extract_iscsi_chap_empty_secrets() {
+        let secrets = HashMap::new();
+        assert!(NodeService::extract_iscsi_chap(&secrets).is_none());
+    }
+
+    #[test]
+    fn test_extract_nvme_auth_with_secret() {
+        let mut secrets = HashMap::new();
+        secrets.insert("nvme.auth.secret".to_string(), "DHHC-1:00:test-secret-key".to_string());
+
+        let creds = NodeService::extract_nvme_auth(&secrets).unwrap();
+        assert_eq!(creds.secret, "DHHC-1:00:test-secret-key");
+        assert!(creds.ctrl_secret.is_none());
+    }
+
+    #[test]
+    fn test_extract_nvme_auth_with_ctrl_secret() {
+        let mut secrets = HashMap::new();
+        secrets.insert("nvme.auth.secret".to_string(), "DHHC-1:00:host-secret".to_string());
+        secrets.insert("nvme.auth.ctrl_secret".to_string(), "DHHC-1:00:ctrl-secret".to_string());
+
+        let creds = NodeService::extract_nvme_auth(&secrets).unwrap();
+        assert_eq!(creds.secret, "DHHC-1:00:host-secret");
+        assert_eq!(creds.ctrl_secret, Some("DHHC-1:00:ctrl-secret".to_string()));
+    }
+
+    #[test]
+    fn test_extract_nvme_auth_missing_secret() {
+        let secrets = HashMap::new();
+        assert!(NodeService::extract_nvme_auth(&secrets).is_none());
+    }
+
+    #[test]
+    fn test_extract_nvme_auth_empty_secret() {
+        let mut secrets = HashMap::new();
+        secrets.insert("nvme.auth.secret".to_string(), "".to_string());
+        assert!(NodeService::extract_nvme_auth(&secrets).is_none());
+    }
+
+    #[test]
+    fn test_extract_nvme_auth_empty_ctrl_secret_ignored() {
+        let mut secrets = HashMap::new();
+        secrets.insert("nvme.auth.secret".to_string(), "DHHC-1:00:host-secret".to_string());
+        secrets.insert("nvme.auth.ctrl_secret".to_string(), "".to_string());
+
+        let creds = NodeService::extract_nvme_auth(&secrets).unwrap();
+        assert_eq!(creds.secret, "DHHC-1:00:host-secret");
+        assert!(creds.ctrl_secret.is_none());
     }
 }

@@ -550,6 +550,15 @@ impl StorageAgent for StorageService {
         // Extract auth config for CTL export (credentials used in ctl.conf)
         let auth_config = proto_to_ctl_auth(req.auth.as_ref());
 
+        // Reject NVMeoF authentication until FreeBSD supports DH-HMAC-CHAP
+        if export_type == ExportType::Nvmeof && matches!(auth_config, AuthConfig::NvmeAuth(_)) {
+            timer.failure("invalid_argument");
+            return Err(Status::invalid_argument(
+                "NVMeoF DH-HMAC-CHAP authentication is not yet supported on FreeBSD. \
+                 Use iSCSI with CHAP authentication, or NVMeoF without authentication.",
+            ));
+        }
+
         // Compute auth-group name for ZFS metadata (credentials NOT stored in ZFS)
         let auth_group_name = if auth_config.is_some() {
             Some(auth_config.auth_group_name(&req.name))

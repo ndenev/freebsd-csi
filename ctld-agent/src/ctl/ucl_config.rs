@@ -639,29 +639,43 @@ impl ToUcl for AuthGroup {
     fn to_ucl(&self, level: usize) -> String {
         let mut s = String::new();
         let ind = indent(level);
+        let inner_ind = indent(level + 1);
+        let entry_ind = indent(level + 2);
 
-        // Write CHAP credentials (iSCSI)
+        // For iSCSI CHAP: use chap-mutual if mutual auth is present, otherwise just chap
+        // ctld doesn't allow mixing chap and chap-mutual in the same auth-group
         if let Some(ref chap) = self.chap {
-            writeln!(
-                s,
-                "{}chap {} {};",
-                ind,
-                ucl_quote(&chap.username),
-                ucl_quote(&chap.secret)
-            )
-            .unwrap();
-        }
-
-        // Write mutual CHAP credentials (iSCSI)
-        if let Some(ref mutual) = self.chap_mutual {
-            writeln!(
-                s,
-                "{}chap-mutual {} {};",
-                ind,
-                ucl_quote(&mutual.username),
-                ucl_quote(&mutual.secret)
-            )
-            .unwrap();
+            if let Some(ref mutual) = self.chap_mutual {
+                // Mutual CHAP: includes both initiator and target credentials
+                writeln!(s, "{}chap-mutual [", ind).unwrap();
+                writeln!(s, "{}{{", inner_ind).unwrap();
+                writeln!(s, "{}user = {};", entry_ind, ucl_quote(&chap.username)).unwrap();
+                writeln!(s, "{}secret = {};", entry_ind, ucl_quote(&chap.secret)).unwrap();
+                writeln!(
+                    s,
+                    "{}mutual-user = {};",
+                    entry_ind,
+                    ucl_quote(&mutual.username)
+                )
+                .unwrap();
+                writeln!(
+                    s,
+                    "{}mutual-secret = {};",
+                    entry_ind,
+                    ucl_quote(&mutual.secret)
+                )
+                .unwrap();
+                writeln!(s, "{}}}", inner_ind).unwrap();
+                writeln!(s, "{}]", ind).unwrap();
+            } else {
+                // Basic CHAP: only initiator credentials
+                writeln!(s, "{}chap [", ind).unwrap();
+                writeln!(s, "{}{{", inner_ind).unwrap();
+                writeln!(s, "{}user = {};", entry_ind, ucl_quote(&chap.username)).unwrap();
+                writeln!(s, "{}secret = {};", entry_ind, ucl_quote(&chap.secret)).unwrap();
+                writeln!(s, "{}}}", inner_ind).unwrap();
+                writeln!(s, "{}]", ind).unwrap();
+            }
         }
 
         // Write host-nqn restriction (NVMeoF)
@@ -1055,7 +1069,10 @@ mod tests {
         };
         let ucl = auth_group.to_ucl(0);
 
-        assert!(ucl.contains("chap \"testuser\" \"testsecret\";"));
+        // UCL array format for basic CHAP
+        assert!(ucl.contains("chap ["), "UCL should contain 'chap [': {}", ucl);
+        assert!(ucl.contains("user = \"testuser\";"), "UCL should contain user: {}", ucl);
+        assert!(ucl.contains("secret = \"testsecret\";"), "UCL should contain secret: {}", ucl);
         assert!(!ucl.contains("chap-mutual"));
         assert!(!ucl.contains("host-nqn"));
     }
@@ -1075,9 +1092,15 @@ mod tests {
         };
         let ucl = auth_group.to_ucl(0);
 
-        assert!(ucl.contains("chap \"initiator\" \"initsecret\";"));
-        assert!(ucl.contains("chap-mutual \"target\" \"targetsecret\";"));
+        // UCL array format for mutual CHAP - uses chap-mutual only (not both chap and chap-mutual)
+        assert!(ucl.contains("chap-mutual ["), "UCL should contain 'chap-mutual [': {}", ucl);
+        assert!(ucl.contains("user = \"initiator\";"), "UCL should contain user: {}", ucl);
+        assert!(ucl.contains("secret = \"initsecret\";"), "UCL should contain secret: {}", ucl);
+        assert!(ucl.contains("mutual-user = \"target\";"), "UCL should contain mutual-user: {}", ucl);
+        assert!(ucl.contains("mutual-secret = \"targetsecret\";"), "UCL should contain mutual-secret: {}", ucl);
         assert!(!ucl.contains("host-nqn"));
+        // Should NOT have separate chap section when mutual is present
+        assert!(!ucl.contains("chap ["), "Should not have separate chap section with mutual: {}", ucl);
     }
 
     #[test]
