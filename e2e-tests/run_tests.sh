@@ -26,6 +26,7 @@ STRESS="false"
 TEST_PATTERN=""
 VERBOSE=""
 FAIL_FAST=""
+LIST_TESTS=""
 
 # Colors for output (using printf to generate actual escape sequences)
 if [ -t 1 ]; then
@@ -54,6 +55,7 @@ Options:
   -p, --pool POOL         ZFS pool name (default: $ZFS_POOL)
   -s, --stress            Include stress tests
   -t, --test PATTERN      Run only tests matching pattern
+  -l, --list              List available tests (don't run)
   -v, --verbose           Verbose output
   -x, --fail-fast         Stop on first failure
   -h, --help              Show this help
@@ -67,6 +69,8 @@ Environment Variables:
 
 Examples:
   $0                              Run all basic tests
+  $0 -l                           List all available tests
+  $0 -l -s                        List all tests including stress tests
   $0 -s                           Include stress tests
   $0 -t test_volume               Run volume tests only
   $0 -t test_clone_chain          Run clone chain tests
@@ -103,6 +107,10 @@ while [ $# -gt 0 ]; do
             ;;
         -x|--fail-fast)
             FAIL_FAST="-x"
+            shift
+            ;;
+        -l|--list)
+            LIST_TESTS="true"
             shift
             ;;
         -h|--help)
@@ -217,7 +225,8 @@ mkdir -p "$REPORT_DIR"
 # Capture storage state before tests
 echo ""
 echo "Capturing initial storage state..."
-sudo zfs list -t all -r "$ZFS_POOL/$CSI_PREFIX" > "$REPORT_DIR/zfs-before.txt" 2>/dev/null || true
+# Only capture dataset names to avoid false positives from usage changes
+sudo zfs list -t all -r -o name "$ZFS_POOL/$CSI_PREFIX" > "$REPORT_DIR/zfs-before.txt" 2>/dev/null || true
 sudo ctladm lunlist > "$REPORT_DIR/ctl-before.txt" 2>/dev/null || true
 
 # Build pytest arguments
@@ -250,6 +259,17 @@ if [ -n "$KUBECONFIG" ]; then
     PYTEST_ARGS="$PYTEST_ARGS --kubeconfig=$KUBECONFIG"
 fi
 
+# List tests only (if requested)
+if [ "$LIST_TESTS" = "true" ]; then
+    echo ""
+    echo "${BLUE}=======================================${NC}"
+    echo "${BLUE}  Available Tests${NC}"
+    echo "${BLUE}=======================================${NC}"
+    echo ""
+    eval "pytest $PYTEST_ARGS --collect-only -q"
+    exit $?
+fi
+
 # Run tests
 echo ""
 echo "${BLUE}=======================================${NC}"
@@ -270,7 +290,8 @@ DURATION=$((END_TIME - START_TIME))
 # Capture storage state after tests
 echo ""
 echo "Capturing final storage state..."
-sudo zfs list -t all -r "$ZFS_POOL/$CSI_PREFIX" > "$REPORT_DIR/zfs-after.txt" 2>/dev/null || true
+# Only capture dataset names to match the before snapshot
+sudo zfs list -t all -r -o name "$ZFS_POOL/$CSI_PREFIX" > "$REPORT_DIR/zfs-after.txt" 2>/dev/null || true
 sudo ctladm lunlist > "$REPORT_DIR/ctl-after.txt" 2>/dev/null || true
 
 # Summary
