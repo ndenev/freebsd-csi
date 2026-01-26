@@ -1,4 +1,5 @@
-use std::process::{Command, Output};
+use std::process::Output;
+use tokio::process::Command;
 use tracing::{debug, info, instrument, warn};
 
 use super::error::{Result, ZfsError};
@@ -117,7 +118,7 @@ pub struct ZfsManager {
 
 impl ZfsManager {
     /// Create a new ZfsManager, verifying the parent dataset exists
-    pub fn new(parent_dataset: String) -> Result<Self> {
+    pub async fn new(parent_dataset: String) -> Result<Self> {
         info!(dataset = %parent_dataset, "Initializing ZFS manager");
 
         // Validate dataset name
@@ -130,7 +131,8 @@ impl ZfsManager {
         // Verify parent dataset exists
         let output = Command::new("zfs")
             .args(["list", "-H", "-o", "name", &parent_dataset])
-            .output()?;
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -158,7 +160,7 @@ impl ZfsManager {
     /// - "thin" (default): No reservation, space allocated on write
     /// - "thick": Sets refreservation=volsize to guarantee space upfront
     #[instrument(skip(self, metadata))]
-    pub fn create_volume(
+    pub async fn create_volume(
         &self,
         name: &str,
         size_bytes: u64,
@@ -206,7 +208,7 @@ impl ZfsManager {
 
         // Create the volume with volmode=dev and metadata set atomically
         // Let zfs create fail if already exists (avoids TOCTOU race)
-        let output = Command::new("zfs").args(&args).output()?;
+        let output = Command::new("zfs").args(&args).output().await?;
 
         if let Err(e) = check_command_result(&output, &full_name) {
             warn!(volume = %full_name, error = %e, "Failed to create volume");
@@ -220,7 +222,7 @@ impl ZfsManager {
             "ZFS volume created successfully with metadata"
         );
         // Return the created dataset info
-        self.get_dataset(name)
+        self.get_dataset(name).await
     }
 
     /// Delete a ZFS volume
@@ -229,7 +231,7 @@ impl ZfsManager {
     /// Retries on "dataset is busy" errors, which can occur briefly after
     /// unexport while ctld releases the device.
     #[instrument(skip(self))]
-    pub fn delete_volume(&self, name: &str) -> Result<()> {
+    pub async fn delete_volume(&self, name: &str) -> Result<()> {
         // Validate name for command injection prevention
         validate_name(name)?;
 
@@ -237,7 +239,7 @@ impl ZfsManager {
         info!(volume = %full_name, "Deleting ZFS volume");
 
         // Check if volume exists - if not, deletion is already complete (idempotent)
-        if !self.dataset_exists(&full_name)? {
+        if !self.dataset_exists(&full_name).await? {
             info!(volume = %full_name, "Volume already deleted (idempotent)");
             return Ok(());
         }
@@ -248,7 +250,10 @@ impl ZfsManager {
         const RETRY_DELAY_MS: u64 = 200;
 
         for attempt in 1..=MAX_RETRIES {
-            let output = Command::new("zfs").args(["destroy", &full_name]).output()?;
+            let output = Command::new("zfs")
+                .args(["destroy", &full_name])
+                .output()
+                .await?;
 
             match check_command_result(&output, &full_name) {
                 Ok(()) => {
@@ -263,7 +268,7 @@ impl ZfsManager {
                         "Dataset busy, retrying after {}ms",
                         RETRY_DELAY_MS
                     );
-                    std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
+                    tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS)).await;
                 }
                 Err(e) => {
                     warn!(volume = %full_name, error = %e, "Failed to delete volume");
@@ -278,7 +283,7 @@ impl ZfsManager {
 
     /// Resize a ZFS volume
     #[instrument(skip(self))]
-    pub fn resize_volume(&self, name: &str, new_size_bytes: u64) -> Result<()> {
+    pub async fn resize_volume(&self, name: &str, new_size_bytes: u64) -> Result<()> {
         // Validate name for command injection prevention
         validate_name(name)?;
 
@@ -286,14 +291,15 @@ impl ZfsManager {
         info!(volume = %full_name, new_size_bytes, "Resizing ZFS volume");
 
         // Check if volume exists
-        if !self.dataset_exists(&full_name)? {
+        if !self.dataset_exists(&full_name).await? {
             warn!(volume = %full_name, "Volume not found for resize");
             return Err(ZfsError::DatasetNotFound(full_name));
         }
 
         let output = Command::new("zfs")
             .args(["set", &format!("volsize={}", new_size_bytes), &full_name])
-            .output()?;
+            .output()
+            .await?;
 
         if let Err(e) = check_command_result(&output, &full_name) {
             warn!(volume = %full_name, error = %e, "Failed to resize volume");
@@ -311,7 +317,7 @@ impl ZfsManager {
     /// persists even if the snapshot is moved due to clone promotion, allowing
     /// us to find and delete the snapshot regardless of its current location.
     #[instrument(skip(self))]
-    pub fn create_snapshot(&self, volume_name: &str, snap_name: &str) -> Result<String> {
+    pub async fn create_snapshot(&self, volume_name: &str, snap_name: &str) -> Result<String> {
         // Validate names for command injection prevention
         validate_name(volume_name)?;
         validate_name(snap_name)?;
@@ -323,7 +329,7 @@ impl ZfsManager {
         info!(volume = %full_volume, snapshot = %snap_name, snapshot_id = %snapshot_id, "Creating ZFS snapshot");
 
         // Check if volume exists
-        if !self.dataset_exists(&full_volume)? {
+        if !self.dataset_exists(&full_volume).await? {
             warn!(volume = %full_volume, "Volume not found for snapshot");
             return Err(ZfsError::DatasetNotFound(full_volume));
         }
@@ -336,7 +342,8 @@ impl ZfsManager {
         );
         let output = Command::new("zfs")
             .args(["snapshot", "-o", &property_arg, &snapshot_path])
-            .output()?;
+            .output()
+            .await?;
 
         if let Err(e) = check_command_result(&output, &snapshot_path) {
             warn!(snapshot = %snapshot_path, error = %e, "Failed to create snapshot");
@@ -349,7 +356,7 @@ impl ZfsManager {
 
     /// Delete a snapshot
     #[instrument(skip(self))]
-    pub fn delete_snapshot(&self, volume_name: &str, snap_name: &str) -> Result<()> {
+    pub async fn delete_snapshot(&self, volume_name: &str, snap_name: &str) -> Result<()> {
         // Validate both parts
         validate_name(volume_name)?;
         validate_name(snap_name)?;
@@ -357,7 +364,10 @@ impl ZfsManager {
         let full_name = format!("{}@{}", self.full_path(volume_name), snap_name);
         info!(snapshot = %full_name, "Deleting ZFS snapshot");
 
-        let output = Command::new("zfs").args(["destroy", &full_name]).output()?;
+        let output = Command::new("zfs")
+            .args(["destroy", &full_name])
+            .output()
+            .await?;
 
         if let Err(e) = check_command_result(&output, &full_name) {
             warn!(snapshot = %full_name, error = %e, "Failed to delete snapshot");
@@ -373,14 +383,14 @@ impl ZfsManager {
     /// Returns snapshot names (without the volume@ prefix) for the given volume.
     /// This is used to check for dependent snapshots before volume deletion.
     #[instrument(skip(self))]
-    pub fn list_snapshots_for_volume(&self, volume_name: &str) -> Result<Vec<String>> {
+    pub async fn list_snapshots_for_volume(&self, volume_name: &str) -> Result<Vec<String>> {
         validate_name(volume_name)?;
 
         let full_name = self.full_path(volume_name);
         debug!(volume = %full_name, "Listing snapshots for volume");
 
         // Check if volume exists first
-        if !self.dataset_exists(&full_name)? {
+        if !self.dataset_exists(&full_name).await? {
             // Volume doesn't exist, so no snapshots
             return Ok(Vec::new());
         }
@@ -391,7 +401,8 @@ impl ZfsManager {
                 "1", // Only direct snapshots, not nested
                 &full_name,
             ])
-            .output()?;
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -433,7 +444,7 @@ impl ZfsManager {
     /// - `Found(path)` if exactly one snapshot matches
     /// - `Ambiguous(count)` if multiple snapshots match (should not happen with UUIDs)
     #[instrument(skip(self))]
-    pub fn find_snapshot_by_id(&self, snapshot_id: &str) -> Result<FindSnapshotResult> {
+    pub async fn find_snapshot_by_id(&self, snapshot_id: &str) -> Result<FindSnapshotResult> {
         debug!(snapshot_id = %snapshot_id, "Searching for snapshot by CSI ID");
 
         // List all snapshots with their CSI snapshot ID property
@@ -448,7 +459,8 @@ impl ZfsManager {
                 "-r",
                 &self.parent_dataset,
             ])
-            .output()?;
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -505,7 +517,7 @@ impl ZfsManager {
     /// an in-memory cache, ensuring the list survives restarts and always reflects
     /// the actual ZFS state.
     #[instrument(skip(self))]
-    pub fn list_csi_snapshots(&self) -> Result<Vec<CsiSnapshotInfo>> {
+    pub async fn list_csi_snapshots(&self) -> Result<Vec<CsiSnapshotInfo>> {
         debug!("Listing all CSI snapshots");
 
         // List all snapshots with their CSI snapshot ID property and creation time
@@ -521,7 +533,8 @@ impl ZfsManager {
                 "-r",
                 &self.parent_dataset,
             ])
-            .output()?;
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -564,7 +577,7 @@ impl ZfsManager {
 
             // Parse creation time - ZFS returns it in a human-readable format
             // We need to convert it to Unix timestamp
-            let creation_time = Self::parse_zfs_creation_time(creation_str);
+            let creation_time = Self::parse_zfs_creation_time(creation_str).await;
 
             snapshots.push(CsiSnapshotInfo {
                 snapshot_id: snapshot_id.to_string(),
@@ -583,11 +596,12 @@ impl ZfsManager {
     /// ZFS returns creation time in a locale-dependent format like:
     /// "Sat Jan 25 12:34:56 2025" or similar
     /// We use the `date` command to parse it robustly.
-    fn parse_zfs_creation_time(creation_str: &str) -> i64 {
+    async fn parse_zfs_creation_time(creation_str: &str) -> i64 {
         // Use date command to parse the ZFS timestamp
         let output = Command::new("date")
             .args(["-j", "-f", "%a %b %d %H:%M %Y", creation_str, "+%s"])
-            .output();
+            .output()
+            .await;
 
         match output {
             Ok(out) if out.status.success() => {
@@ -607,12 +621,13 @@ impl ZfsManager {
     /// This is a lower-level method that takes the full path (e.g., "tank/csi/vol@snap")
     /// rather than separate volume and snapshot names.
     #[instrument(skip(self))]
-    pub fn delete_snapshot_by_path(&self, snapshot_path: &str) -> Result<()> {
+    pub async fn delete_snapshot_by_path(&self, snapshot_path: &str) -> Result<()> {
         info!(snapshot = %snapshot_path, "Deleting ZFS snapshot by path");
 
         let output = Command::new("zfs")
             .args(["destroy", snapshot_path])
-            .output()?;
+            .output()
+            .await?;
 
         if let Err(e) = check_command_result(&output, snapshot_path) {
             warn!(snapshot = %snapshot_path, error = %e, "Failed to delete snapshot");
@@ -624,16 +639,16 @@ impl ZfsManager {
     }
 
     /// Get information about a specific dataset
-    pub fn get_dataset(&self, name: &str) -> Result<Dataset> {
+    pub async fn get_dataset(&self, name: &str) -> Result<Dataset> {
         // Validate name for command injection prevention
         validate_name(name)?;
 
         let full_name = self.full_path(name);
-        self.get_dataset_info(&full_name)
+        self.get_dataset_info(&full_name).await
     }
 
     /// List all volumes under the parent dataset
-    pub fn list_volumes(&self) -> Result<Vec<Dataset>> {
+    pub async fn list_volumes(&self) -> Result<Vec<Dataset>> {
         debug!(parent = %self.parent_dataset, "Listing volumes");
 
         let output = Command::new("zfs")
@@ -648,7 +663,8 @@ impl ZfsManager {
                 "name,refer,volsize",
                 &self.parent_dataset,
             ])
-            .output()?;
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -688,7 +704,7 @@ impl ZfsManager {
     /// sets metadata atomically via create_volume/clone_from_snapshot/copy_from_snapshot.
     #[allow(dead_code)]
     #[instrument(skip(self, metadata))]
-    pub fn set_volume_metadata(&self, name: &str, metadata: &VolumeMetadata) -> Result<()> {
+    pub async fn set_volume_metadata(&self, name: &str, metadata: &VolumeMetadata) -> Result<()> {
         validate_name(name)?;
         let json = serde_json::to_string(metadata)
             .map_err(|e| ZfsError::ParseError(format!("failed to serialize metadata: {}", e)))?;
@@ -700,7 +716,8 @@ impl ZfsManager {
 
         let output = Command::new("zfs")
             .args(["set", &property, &full_name])
-            .output()?;
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -717,14 +734,15 @@ impl ZfsManager {
 
     /// Clear volume metadata (on deletion)
     #[instrument(skip(self))]
-    pub fn clear_volume_metadata(&self, name: &str) -> Result<()> {
+    pub async fn clear_volume_metadata(&self, name: &str) -> Result<()> {
         validate_name(name)?;
         let full_name = self.full_path(name);
 
         // Use 'inherit' to remove user property
         let output = Command::new("zfs")
             .args(["inherit", METADATA_PROPERTY, &full_name])
-            .output()?;
+            .output()
+            .await?;
 
         // Ignore errors - property might not exist
         let _ = output;
@@ -733,7 +751,7 @@ impl ZfsManager {
 
     /// List all volumes with CSI metadata (for startup recovery)
     #[instrument(skip(self))]
-    pub fn list_volumes_with_metadata(&self) -> Result<Vec<(String, VolumeMetadata)>> {
+    pub async fn list_volumes_with_metadata(&self) -> Result<Vec<(String, VolumeMetadata)>> {
         info!(parent = %self.parent_dataset, "Scanning for volumes with CSI metadata");
 
         let output = Command::new("zfs")
@@ -747,7 +765,8 @@ impl ZfsManager {
                 &format!("name,{}", METADATA_PROPERTY),
                 &self.parent_dataset,
             ])
-            .output()?;
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -813,7 +832,7 @@ impl ZfsManager {
                             "Migrated metadata schema"
                         );
                         // Persist the migrated metadata back to ZFS
-                        if let Err(e) = self.set_volume_metadata(&vol_name, &metadata) {
+                        if let Err(e) = self.set_volume_metadata(&vol_name, &metadata).await {
                             warn!(
                                 volume = %vol_name,
                                 error = %e,
@@ -842,7 +861,7 @@ impl ZfsManager {
     ///
     /// Metadata is set atomically during clone creation to ensure crash safety.
     #[instrument(skip(self, metadata))]
-    pub fn clone_from_snapshot(
+    pub async fn clone_from_snapshot(
         &self,
         source_volume: &str,
         snap_name: &str,
@@ -866,7 +885,8 @@ impl ZfsManager {
         // Verify snapshot exists
         let snap_check = Command::new("zfs")
             .args(["list", "-H", "-t", "snapshot", &snapshot_full])
-            .output()?;
+            .output()
+            .await?;
 
         if !snap_check.status.success() {
             warn!(snapshot = %snapshot_full, "Snapshot not found for clone");
@@ -882,7 +902,8 @@ impl ZfsManager {
                 &snapshot_full,
                 &target_full,
             ])
-            .output()?;
+            .output()
+            .await?;
 
         if let Err(e) = check_command_result(&output, &target_full) {
             warn!(
@@ -900,7 +921,7 @@ impl ZfsManager {
             "Clone created successfully with metadata"
         );
 
-        self.get_dataset(target_volume)
+        self.get_dataset(target_volume).await
     }
 
     /// Copy a volume from a snapshot using zfs send/recv (slow, independent).
@@ -910,7 +931,7 @@ impl ZfsManager {
     ///
     /// Metadata is set atomically during receive to ensure crash safety.
     #[instrument(skip(self, metadata))]
-    pub fn copy_from_snapshot(
+    pub async fn copy_from_snapshot(
         &self,
         source_volume: &str,
         snap_name: &str,
@@ -934,7 +955,8 @@ impl ZfsManager {
         // Verify snapshot exists
         let snap_check = Command::new("zfs")
             .args(["list", "-H", "-t", "snapshot", &snapshot_full])
-            .output()?;
+            .output()
+            .await?;
 
         if !snap_check.status.success() {
             warn!(snapshot = %snapshot_full, "Snapshot not found for copy");
@@ -951,7 +973,7 @@ impl ZfsManager {
             shell_escape(&target_full)
         );
 
-        let output = Command::new("sh").args(["-c", &pipeline]).output()?;
+        let output = Command::new("sh").args(["-c", &pipeline]).output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -982,7 +1004,8 @@ impl ZfsManager {
         let received_snap = format!("{}@{}", target_full, snap_name);
         let destroy_output = Command::new("zfs")
             .args(["destroy", &received_snap])
-            .output()?;
+            .output()
+            .await?;
 
         if !destroy_output.status.success() {
             // Log but don't fail - the volume was created successfully
@@ -994,7 +1017,7 @@ impl ZfsManager {
             );
         }
 
-        self.get_dataset(target_volume)
+        self.get_dataset(target_volume).await
     }
 
     /// List clones that depend on snapshots of a volume.
@@ -1002,7 +1025,7 @@ impl ZfsManager {
     /// Returns a list of (snapshot_name, clone_name) tuples for all clones
     /// that depend on snapshots of the specified volume.
     #[instrument(skip(self))]
-    pub fn list_clones_for_volume(&self, volume_name: &str) -> Result<Vec<(String, String)>> {
+    pub async fn list_clones_for_volume(&self, volume_name: &str) -> Result<Vec<(String, String)>> {
         validate_name(volume_name)?;
 
         let full_name = self.full_path(volume_name);
@@ -1022,7 +1045,8 @@ impl ZfsManager {
                 "1",
                 &full_name,
             ])
-            .output()?;
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1081,13 +1105,16 @@ impl ZfsManager {
     /// After promotion, the original parent becomes dependent on this clone.
     /// This allows deleting the original parent volume.
     #[instrument(skip(self))]
-    pub fn promote_clone(&self, clone_name: &str) -> Result<()> {
+    pub async fn promote_clone(&self, clone_name: &str) -> Result<()> {
         validate_name(clone_name)?;
 
         let full_name = self.full_path(clone_name);
         info!(clone = %full_name, "Promoting clone");
 
-        let output = Command::new("zfs").args(["promote", &full_name]).output()?;
+        let output = Command::new("zfs")
+            .args(["promote", &full_name])
+            .output()
+            .await?;
 
         if let Err(e) = check_command_result(&output, &full_name) {
             warn!(clone = %full_name, error = %e, "Failed to promote clone");
@@ -1102,14 +1129,15 @@ impl ZfsManager {
     ///
     /// Returns None if the dataset is not a clone.
     #[instrument(skip(self))]
-    pub fn get_origin(&self, name: &str) -> Result<Option<String>> {
+    pub async fn get_origin(&self, name: &str) -> Result<Option<String>> {
         validate_name(name)?;
 
         let full_name = self.full_path(name);
 
         let output = Command::new("zfs")
             .args(["get", "-H", "-o", "value", "origin", &full_name])
-            .output()?;
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1136,7 +1164,7 @@ impl ZfsManager {
     ///
     /// Returns available and used space for the dataset that holds CSI volumes.
     #[instrument(skip(self))]
-    pub fn get_capacity(&self) -> Result<Capacity> {
+    pub async fn get_capacity(&self) -> Result<Capacity> {
         debug!(dataset = %self.parent_dataset, "Getting capacity");
 
         let output = Command::new("zfs")
@@ -1148,7 +1176,8 @@ impl ZfsManager {
                 "available,used",
                 &self.parent_dataset,
             ])
-            .output()?;
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1190,16 +1219,17 @@ impl ZfsManager {
     }
 
     /// Check if a dataset exists
-    fn dataset_exists(&self, full_name: &str) -> Result<bool> {
+    async fn dataset_exists(&self, full_name: &str) -> Result<bool> {
         let output = Command::new("zfs")
             .args(["list", "-H", "-o", "name", full_name])
-            .output()?;
+            .output()
+            .await?;
 
         Ok(output.status.success())
     }
 
     /// Get detailed information about a dataset by its full name
-    fn get_dataset_info(&self, full_name: &str) -> Result<Dataset> {
+    async fn get_dataset_info(&self, full_name: &str) -> Result<Dataset> {
         let output = Command::new("zfs")
             .args([
                 "list",
@@ -1209,7 +1239,8 @@ impl ZfsManager {
                 "name,refer,volsize",
                 full_name,
             ])
-            .output()?;
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

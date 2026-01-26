@@ -5,9 +5,9 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::process::Command;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use tokio::process::Command;
 
 use tokio::sync::{RwLock as TokioRwLock, mpsc, oneshot};
 use tracing::{debug, error, info, instrument, warn};
@@ -300,51 +300,54 @@ impl CtlManager {
     /// Preserves user-managed targets while updating CSI-managed targets.
     /// Generates per-volume auth-groups for targets that require authentication.
     #[instrument(skip(self))]
-    pub fn write_config(&self) -> Result<()> {
-        let exports = self.exports.read().unwrap();
+    pub async fn write_config(&self) -> Result<()> {
+        // Collect targets and auth groups while holding the lock
+        // Use a block to ensure the lock guard is dropped before any await points
+        let (iscsi_targets, nvme_controllers, auth_groups) = {
+            let exports = self.exports.read().unwrap();
 
-        // Convert exports to Target/Controller types and collect auth groups
-        let mut iscsi_targets: Vec<(String, Target)> = Vec::new();
-        let mut nvme_controllers: Vec<(String, Controller)> = Vec::new();
-        let mut auth_groups: Vec<(String, AuthGroup)> = Vec::new();
+            let mut iscsi_targets: Vec<(String, Target)> = Vec::new();
+            let mut nvme_controllers: Vec<(String, Controller)> = Vec::new();
+            let mut auth_groups: Vec<(String, AuthGroup)> = Vec::new();
 
-        for export in exports.values() {
-            // Get auth group name (either "no-authentication" or per-volume "ag-<name>")
-            let auth_group_name = export.auth.auth_group_name(&export.volume_name);
+            for export in exports.values() {
+                // Get auth group name (either "no-authentication" or per-volume "ag-<name>")
+                let auth_group_name = export.auth.auth_group_name(&export.volume_name);
 
-            // If this export has authentication, create an auth group entry
-            // This validates CHAP credentials don't contain characters that would corrupt UCL
-            if let Some(ag) = AuthGroup::from_auth_config(&export.auth, &export.volume_name)? {
-                auth_groups.push((auth_group_name.clone(), ag));
+                // If this export has authentication, create an auth group entry
+                // This validates CHAP credentials don't contain characters that would corrupt UCL
+                if let Some(ag) = AuthGroup::from_auth_config(&export.auth, &export.volume_name)? {
+                    auth_groups.push((auth_group_name.clone(), ag));
+                }
+
+                match export.export_type {
+                    ExportType::Iscsi => {
+                        let target = Target::with_options(
+                            auth_group_name,
+                            self.portal_group_name.clone(),
+                            export.lun_id,
+                            export.device_path.as_str().to_string(),
+                            &export.volume_name,
+                            &export.ctl_options,
+                        );
+                        iscsi_targets.push((export.target_name.to_string(), target));
+                    }
+                    ExportType::Nvmeof => {
+                        let controller = Controller::with_options(
+                            auth_group_name,
+                            self.transport_group.clone(),
+                            export.lun_id,
+                            export.device_path.as_str().to_string(),
+                            &export.volume_name,
+                            &export.ctl_options,
+                        );
+                        nvme_controllers.push((export.target_name.to_string(), controller));
+                    }
+                }
             }
 
-            match export.export_type {
-                ExportType::Iscsi => {
-                    let target = Target::with_options(
-                        auth_group_name,
-                        self.portal_group_name.clone(),
-                        export.lun_id,
-                        export.device_path.as_str().to_string(),
-                        &export.volume_name,
-                        &export.ctl_options,
-                    );
-                    iscsi_targets.push((export.target_name.to_string(), target));
-                }
-                ExportType::Nvmeof => {
-                    let controller = Controller::with_options(
-                        auth_group_name,
-                        self.transport_group.clone(),
-                        export.lun_id,
-                        export.device_path.as_str().to_string(),
-                        &export.volume_name,
-                        &export.ctl_options,
-                    );
-                    nvme_controllers.push((export.target_name.to_string(), controller));
-                }
-            }
-        }
-
-        drop(exports);
+            (iscsi_targets, nvme_controllers, auth_groups)
+        };
 
         info!(
             "Writing UCL config with {} iSCSI targets, {} NVMeoF controllers, {} auth groups",
@@ -366,16 +369,19 @@ impl CtlManager {
 
         info!("UCL config updated successfully");
 
-        self.reload_ctld()?;
+        self.reload_ctld().await?;
 
         Ok(())
     }
 
     /// Reload ctld configuration
-    fn reload_ctld(&self) -> Result<()> {
+    async fn reload_ctld(&self) -> Result<()> {
         debug!("Reloading ctld configuration");
 
-        let output = Command::new("service").args(["ctld", "reload"]).output()?;
+        let output = Command::new("service")
+            .args(["ctld", "reload"])
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -505,7 +511,7 @@ async fn config_writer_task(
         // Perform the actual write
         let result = {
             let ctl = ctl_manager.read().await;
-            ctl.write_config()
+            ctl.write_config().await
         };
 
         // Log the result

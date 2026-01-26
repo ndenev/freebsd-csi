@@ -115,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Max concurrent operations: {}", args.max_concurrent_ops);
 
     // Initialize ZFS manager
-    let zfs_manager = ZfsManager::new(args.zfs_parent.clone())?;
+    let zfs_manager = ZfsManager::new(args.zfs_parent.clone()).await?;
     let zfs = Arc::new(RwLock::new(zfs_manager));
 
     // Initialize unified CTL manager for iSCSI and NVMeoF exports

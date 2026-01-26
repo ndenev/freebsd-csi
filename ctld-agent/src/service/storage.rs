@@ -262,6 +262,7 @@ impl StorageService {
         let volumes_with_metadata = {
             let zfs = self.zfs.read().await;
             zfs.list_volumes_with_metadata()
+                .await
                 .map_err(|e| format!("failed to list volumes with metadata: {}", e))?
         };
 
@@ -460,6 +461,7 @@ impl StorageService {
                     "Creating volume using COPY mode (zfs send/recv)"
                 );
                 zfs.copy_from_snapshot(source_volume, snap_name, target_name, metadata)
+                    .await
                     .map_err(|e| {
                         Status::internal(format!("failed to copy volume from snapshot: {}", e))
                     })
@@ -473,6 +475,7 @@ impl StorageService {
                     "Creating volume using LINKED mode (zfs clone)"
                 );
                 zfs.clone_from_snapshot(source_volume, snap_name, target_name, metadata)
+                    .await
                     .map_err(|e| {
                         Status::internal(format!("failed to clone volume from snapshot: {}", e))
                     })
@@ -650,7 +653,8 @@ impl StorageAgent for StorageService {
                     // Create temporary snapshot of source volume
                     {
                         let zfs = self.zfs.read().await;
-                        if let Err(e) = zfs.create_snapshot(source_volume_id, &temp_snap_name) {
+                        if let Err(e) = zfs.create_snapshot(source_volume_id, &temp_snap_name).await
+                        {
                             timer.failure("zfs_error");
                             return Err(Status::internal(format!(
                                 "failed to create temporary snapshot for volume clone: {}",
@@ -675,7 +679,9 @@ impl StorageAgent for StorageService {
                         (Ok(_), CloneMode::Copy) => {
                             // Success with COPY mode - clean up temp snapshot
                             let zfs = self.zfs.read().await;
-                            if let Err(e) = zfs.delete_snapshot(source_volume_id, &temp_snap_name) {
+                            if let Err(e) =
+                                zfs.delete_snapshot(source_volume_id, &temp_snap_name).await
+                            {
                                 warn!(
                                     source_volume = %source_volume_id,
                                     snapshot = %temp_snap_name,
@@ -695,7 +701,9 @@ impl StorageAgent for StorageService {
                         (Err(_), _) => {
                             // Failed - always clean up temp snapshot
                             let zfs = self.zfs.read().await;
-                            if let Err(e) = zfs.delete_snapshot(source_volume_id, &temp_snap_name) {
+                            if let Err(e) =
+                                zfs.delete_snapshot(source_volume_id, &temp_snap_name).await
+                            {
                                 warn!(
                                     source_volume = %source_volume_id,
                                     snapshot = %temp_snap_name,
@@ -724,7 +732,10 @@ impl StorageAgent for StorageService {
         } else {
             // Fresh volume creation with metadata set atomically
             let zfs = self.zfs.read().await;
-            match zfs.create_volume(&req.name, req.size_bytes as u64, &zfs_metadata) {
+            match zfs
+                .create_volume(&req.name, req.size_bytes as u64, &zfs_metadata)
+                .await
+            {
                 Ok(d) => d,
                 Err(e) => {
                     timer.failure("zfs_error");
@@ -856,7 +867,7 @@ impl StorageAgent for StorageService {
         // A becomes deletable (or becomes a clone of B@snap, which we then delete).
         {
             let zfs = self.zfs.read().await;
-            match zfs.list_clones_for_volume(&volume_name) {
+            match zfs.list_clones_for_volume(&volume_name).await {
                 Ok(clones) if !clones.is_empty() => {
                     info!(
                         volume = %volume_name,
@@ -879,7 +890,7 @@ impl StorageAgent for StorageService {
                             "Promoting clone to transfer snapshot ownership"
                         );
 
-                        if let Err(e) = zfs.promote_clone(clone_name) {
+                        if let Err(e) = zfs.promote_clone(clone_name).await {
                             warn!(
                                 clone = %clone_name,
                                 error = %e,
@@ -909,7 +920,7 @@ impl StorageAgent for StorageService {
         // to the promoted clone, so this check is for remaining snapshots only.
         {
             let zfs = self.zfs.read().await;
-            match zfs.list_snapshots_for_volume(&volume_name) {
+            match zfs.list_snapshots_for_volume(&volume_name).await {
                 Ok(snapshots) if !snapshots.is_empty() => {
                     let snapshot_list = snapshots.join(", ");
                     warn!(
@@ -950,7 +961,7 @@ impl StorageAgent for StorageService {
         // We need this info BEFORE deletion to clean up temp snapshots afterward
         let origin_info: Option<String> = {
             let zfs = self.zfs.read().await;
-            match zfs.get_origin(&volume_name) {
+            match zfs.get_origin(&volume_name).await {
                 Ok(origin) => origin,
                 Err(e) => {
                     debug!(
@@ -1004,7 +1015,7 @@ impl StorageAgent for StorageService {
         // Clear ZFS metadata before deleting (for consistency)
         {
             let zfs = self.zfs.read().await;
-            if let Err(e) = zfs.clear_volume_metadata(&volume_name) {
+            if let Err(e) = zfs.clear_volume_metadata(&volume_name).await {
                 debug!(
                     "Failed to clear volume metadata from ZFS: {} (may already be cleared)",
                     e
@@ -1016,7 +1027,7 @@ impl StorageAgent for StorageService {
         // Delete ZFS volume (this is now idempotent - returns Ok if doesn't exist)
         {
             let zfs = self.zfs.read().await;
-            if let Err(e) = zfs.delete_volume(&volume_name) {
+            if let Err(e) = zfs.delete_volume(&volume_name).await {
                 timer.failure("zfs_error");
                 return Err(Status::internal(format!(
                     "failed to delete ZFS volume: {}",
@@ -1065,7 +1076,7 @@ impl StorageAgent for StorageService {
 
             let zfs = self.zfs.read().await;
             // Check if snapshot still has other clones
-            match zfs.list_clones_for_volume(source_volume) {
+            match zfs.list_clones_for_volume(source_volume).await {
                 Ok(clones) => {
                     // Filter to clones of this specific snapshot
                     let snap_clones: Vec<_> =
@@ -1073,7 +1084,7 @@ impl StorageAgent for StorageService {
 
                     if snap_clones.is_empty() {
                         // No more clones, safe to delete the temp snapshot
-                        if let Err(e) = zfs.delete_snapshot(source_volume, snap_name) {
+                        if let Err(e) = zfs.delete_snapshot(source_volume, snap_name).await {
                             warn!(
                                 snapshot = %snap_name,
                                 source_volume = %source_volume,
@@ -1161,7 +1172,10 @@ impl StorageAgent for StorageService {
         // Resize ZFS volume
         {
             let zfs = self.zfs.read().await;
-            if let Err(e) = zfs.resize_volume(&metadata.name, req.new_size_bytes as u64) {
+            if let Err(e) = zfs
+                .resize_volume(&metadata.name, req.new_size_bytes as u64)
+                .await
+            {
                 timer.failure("zfs_error");
                 return Err(Status::internal(format!("failed to resize volume: {}", e)));
             }
@@ -1194,6 +1208,7 @@ impl StorageAgent for StorageService {
         let datasets = {
             let zfs = self.zfs.read().await;
             zfs.list_volumes()
+                .await
                 .map_err(|e| Status::internal(format!("failed to list volumes: {}", e)))?
         };
 
@@ -1248,6 +1263,7 @@ impl StorageAgent for StorageService {
         let dataset = {
             let zfs = self.zfs.read().await;
             zfs.get_dataset(&metadata.name)
+                .await
                 .map_err(|e| Status::internal(format!("failed to get volume info: {}", e)))?
         };
 
@@ -1302,7 +1318,7 @@ impl StorageAgent for StorageService {
         // Create ZFS snapshot
         let snapshot_name = {
             let zfs = self.zfs.read().await;
-            match zfs.create_snapshot(&req.source_volume_id, &req.name) {
+            match zfs.create_snapshot(&req.source_volume_id, &req.name).await {
                 Ok(n) => n,
                 Err(e) => {
                     timer.failure("zfs_error");
@@ -1375,7 +1391,7 @@ impl StorageAgent for StorageService {
             let zfs = self.zfs.read().await;
 
             // Try direct deletion first
-            match zfs.delete_snapshot(volume_name, snap_name) {
+            match zfs.delete_snapshot(volume_name, snap_name).await {
                 Ok(()) => {
                     info!(
                         snapshot_id = %req.snapshot_id,
@@ -1393,7 +1409,7 @@ impl StorageAgent for StorageService {
                     );
 
                     use crate::zfs::FindSnapshotResult;
-                    match zfs.find_snapshot_by_id(&req.snapshot_id) {
+                    match zfs.find_snapshot_by_id(&req.snapshot_id).await {
                         Ok(FindSnapshotResult::NotFound) => {
                             // Snapshot truly doesn't exist - treat as already deleted (idempotent)
                             info!(
@@ -1408,7 +1424,7 @@ impl StorageAgent for StorageService {
                                 path = %path,
                                 "Found migrated snapshot, deleting"
                             );
-                            if let Err(e) = zfs.delete_snapshot_by_path(&path) {
+                            if let Err(e) = zfs.delete_snapshot_by_path(&path).await {
                                 timer.failure("zfs_error");
                                 return Err(Status::internal(format!(
                                     "failed to delete migrated snapshot at {}: {}",
@@ -1477,7 +1493,7 @@ impl StorageAgent for StorageService {
         // Query ZFS directly for all CSI snapshots
         let csi_snapshots = {
             let zfs = self.zfs.read().await;
-            zfs.list_csi_snapshots().map_err(|e| {
+            zfs.list_csi_snapshots().await.map_err(|e| {
                 Status::internal(format!("failed to list snapshots from ZFS: {}", e))
             })?
         };
@@ -1531,7 +1547,7 @@ impl StorageAgent for StorageService {
         // Query ZFS directly for all CSI snapshots and find the matching one
         let csi_snapshots = {
             let zfs = self.zfs.read().await;
-            zfs.list_csi_snapshots().map_err(|e| {
+            zfs.list_csi_snapshots().await.map_err(|e| {
                 Status::internal(format!("failed to query snapshots from ZFS: {}", e))
             })?
         };
@@ -1568,6 +1584,7 @@ impl StorageAgent for StorageService {
         let zfs = self.zfs.read().await;
         let capacity = zfs
             .get_capacity()
+            .await
             .map_err(|e| Status::internal(format!("failed to get capacity: {}", e)))?;
 
         info!(
