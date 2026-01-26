@@ -18,9 +18,9 @@ parameters:
   fsType: ext4
   # Use LINKED clone mode (fast, copy-on-write)
   cloneMode: linked
-# CHAP secret references for provisioner (controller)
-csi.storage.k8s.io/provisioner-secret-name: ${pvc.name}-chap
-csi.storage.k8s.io/provisioner-secret-namespace: ${pvc.namespace}
-# CHAP secret references for node staging
-csi.storage.k8s.io/node-stage-secret-name: ${pvc.name}-chap
-csi.storage.k8s.io/node-stage-secret-namespace: ${pvc.namespace}
+  # CHAP secret references for provisioner (controller)
+  csi.storage.k8s.io/provisioner-secret-name: ${pvc.name}-chap
+  csi.storage.k8s.io/provisioner-secret-namespace: ${pvc.namespace}
+  # CHAP secret references for node staging
+  csi.storage.k8s.io/node-stage-secret-name: ${pvc.name}-chap
+  csi.storage.k8s.io/node-stage-secret-namespace: ${pvc.namespace}
