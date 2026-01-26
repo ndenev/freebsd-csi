@@ -509,6 +509,9 @@ class K8sClient:
             "kind": "Pod",
             "metadata": {"name": pod_name, "namespace": self.namespace},
             "spec": {
+                # Short grace period - test pods don't need graceful shutdown
+                # and busybox sleep doesn't handle SIGTERM anyway
+                "terminationGracePeriodSeconds": 1,
                 "containers": [
                     {
                         "name": "test",
