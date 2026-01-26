@@ -516,7 +516,9 @@ class TestChapSecurityEdgeCases:
         """Test CHAP with special characters in password."""
         # Password with various special characters
         chap_username = "special-char-user"
-        chap_password = "Pass!@#$%^&*()_+-=[]{}|;':\",./<>?"
+        # UCL config format forbids: " { } \
+        # All other special chars should work
+        chap_password = "Pass!@#$%^&*()_+-=[];':,./<>?"
 
         pvc_name = f"pvc-{unique_name}"
         secret_name = f"{pvc_name}-chap"
