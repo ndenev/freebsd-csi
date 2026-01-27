@@ -1405,10 +1405,8 @@ impl StorageAgent for StorageService {
             match zfs.snapshot_has_clones(volume_name, snap_name).await {
                 Ok(clones) if !clones.is_empty() => {
                     // Extract volume names from full paths for user-friendly message
-                    let pvc_names: Vec<&str> = clones
-                        .iter()
-                        .filter_map(|c| c.rsplit('/').next())
-                        .collect();
+                    let pvc_names: Vec<&str> =
+                        clones.iter().filter_map(|c| c.rsplit('/').next()).collect();
 
                     timer.failure("has_dependent_clones");
                     return Err(Status::failed_precondition(format!(
