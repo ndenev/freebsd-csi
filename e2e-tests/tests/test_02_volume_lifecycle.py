@@ -120,7 +120,8 @@ class TestVolumeLifecycle:
         k8s.expand_pvc(pvc_name, "2Gi")
 
         # Wait for PVC expansion to complete
-        assert wait_pvc_resized(pvc_name, "2Gi", timeout=60), "PVC expansion failed"
+        # Expansion can take time if resizer has a queue or needs multiple syncs
+        assert wait_pvc_resized(pvc_name, "2Gi", timeout=180), "PVC expansion failed"
 
         # Verify new size in ZFS
         info_after = storage.get_dataset_info(dataset)
