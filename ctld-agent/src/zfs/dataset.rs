@@ -1160,6 +1160,66 @@ impl ZfsManager {
         }
     }
 
+    /// Check if a snapshot has any clones.
+    ///
+    /// Returns a list of clone dataset paths that depend on this snapshot.
+    /// Used to check dependencies before deleting a snapshot.
+    #[instrument(skip(self))]
+    pub async fn snapshot_has_clones(
+        &self,
+        volume_name: &str,
+        snap_name: &str,
+    ) -> Result<Vec<String>> {
+        validate_name(volume_name)?;
+        validate_name(snap_name)?;
+
+        let snapshot_path = format!("{}@{}", self.full_path(volume_name), snap_name);
+        self.snapshot_has_clones_by_path(&snapshot_path).await
+    }
+
+    /// Check if a snapshot (by full path) has any clones.
+    ///
+    /// This variant is used when the snapshot path is already known
+    /// (e.g., when found via find_snapshot_by_id after promotion).
+    #[instrument(skip(self))]
+    pub async fn snapshot_has_clones_by_path(&self, snapshot_path: &str) -> Result<Vec<String>> {
+        debug!(snapshot = %snapshot_path, "Checking for clones");
+
+        let output = Command::new("zfs")
+            .args(["get", "-H", "-o", "value", "clones", snapshot_path])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("does not exist") || stderr.contains("not found") {
+                return Err(ZfsError::DatasetNotFound(snapshot_path.to_string()));
+            }
+            return Err(ZfsError::CommandFailed(format!(
+                "failed to get clones for {}: {}",
+                snapshot_path, stderr
+            )));
+        }
+
+        let clones_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        // "-" means no clones
+        if clones_str == "-" || clones_str.is_empty() {
+            debug!(snapshot = %snapshot_path, "No clones found");
+            return Ok(Vec::new());
+        }
+
+        // Clones are comma-separated
+        let clones: Vec<String> = clones_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        debug!(snapshot = %snapshot_path, clone_count = clones.len(), "Found clones");
+        Ok(clones)
+    }
+
     /// Get capacity information for the parent dataset.
     ///
     /// Returns available and used space for the dataset that holds CSI volumes.

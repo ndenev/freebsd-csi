@@ -940,9 +940,10 @@ impl StorageAgent for StorageService {
                     );
                     timer.failure("has_snapshots");
                     return Err(Status::failed_precondition(format!(
-                        "Volume '{}' has {} dependent snapshot(s): [{}]. \
-                         Delete all VolumeSnapshots referencing this volume before deletion. \
-                         If these are external snapshots (not CSI-managed), remove them manually with: \
+                        "Cannot delete volume '{}': {} VolumeSnapshot(s) exist: [{}]. \
+                         Delete those VolumeSnapshots first. \
+                         Note: If any snapshots have PVCs restored from them, delete those PVCs first. \
+                         For external snapshots (not CSI-managed), remove manually with: \
                          zfs destroy {}@<snapshot_name>",
                         volume_name,
                         snapshots.len(),
@@ -1399,6 +1400,40 @@ impl StorageAgent for StorageService {
         {
             let zfs = self.zfs.read().await;
 
+            // Check for clones BEFORE attempting delete
+            // If the snapshot has clones, return FAILED_PRECONDITION with clear message
+            match zfs.snapshot_has_clones(volume_name, snap_name).await {
+                Ok(clones) if !clones.is_empty() => {
+                    // Extract volume names from full paths for user-friendly message
+                    let pvc_names: Vec<&str> = clones
+                        .iter()
+                        .filter_map(|c| c.rsplit('/').next())
+                        .collect();
+
+                    timer.failure("has_dependent_clones");
+                    return Err(Status::failed_precondition(format!(
+                        "Cannot delete snapshot '{}': {} PVC(s) were restored from it: [{}]. \
+                         Delete those PVCs first, then retry.",
+                        req.snapshot_id,
+                        pvc_names.len(),
+                        pvc_names.join(", ")
+                    )));
+                }
+                Ok(_) => {
+                    // No clones, proceed with deletion
+                }
+                Err(crate::zfs::ZfsError::DatasetNotFound(_)) => {
+                    // Snapshot not at expected path - will handle below via find_snapshot_by_id
+                }
+                Err(e) => {
+                    timer.failure("zfs_error");
+                    return Err(Status::internal(format!(
+                        "failed to check snapshot clones: {}",
+                        e
+                    )));
+                }
+            }
+
             // Try direct deletion first
             match zfs.delete_snapshot(volume_name, snap_name).await {
                 Ok(()) => {
@@ -1431,8 +1466,39 @@ impl StorageAgent for StorageService {
                             info!(
                                 snapshot_id = %req.snapshot_id,
                                 path = %path,
-                                "Found migrated snapshot, deleting"
+                                "Found migrated snapshot, checking for clones before delete"
                             );
+
+                            // Check for clones at the new location too
+                            match zfs.snapshot_has_clones_by_path(&path).await {
+                                Ok(clones) if !clones.is_empty() => {
+                                    let pvc_names: Vec<&str> = clones
+                                        .iter()
+                                        .filter_map(|c| c.rsplit('/').next())
+                                        .collect();
+
+                                    timer.failure("has_dependent_clones");
+                                    return Err(Status::failed_precondition(format!(
+                                        "Cannot delete snapshot '{}' (now at '{}'): {} PVC(s) depend on it: [{}]. \
+                                         Delete those PVCs first, then retry.",
+                                        req.snapshot_id,
+                                        path,
+                                        pvc_names.len(),
+                                        pvc_names.join(", ")
+                                    )));
+                                }
+                                Ok(_) => {
+                                    // No clones, safe to delete
+                                }
+                                Err(e) => {
+                                    timer.failure("zfs_error");
+                                    return Err(Status::internal(format!(
+                                        "failed to check clones for migrated snapshot: {}",
+                                        e
+                                    )));
+                                }
+                            }
+
                             if let Err(e) = zfs.delete_snapshot_by_path(&path).await {
                                 timer.failure("zfs_error");
                                 return Err(Status::internal(format!(
