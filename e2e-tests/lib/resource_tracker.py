@@ -26,7 +26,9 @@ class ResourceType(IntEnum):
     CLONE_PVC = 2  # PVC created from snapshot or another PVC
     SNAPSHOT = 3
     SOURCE_PVC = 4  # Original PVC (no data source)
-    SECRET = 5  # Secrets deleted LAST (after PVCs, so provisioner can access credentials)
+    SECRET = (
+        5  # Secrets deleted LAST (after PVCs, so provisioner can access credentials)
+    )
 
 
 @dataclass

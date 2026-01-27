@@ -216,14 +216,10 @@ class TestChapAuthentication:
 
         # Verify ZFS dataset exists
         dataset = f"{storage.csi_path}/{pv_name}"
-        assert storage.verify_dataset_exists(
-            dataset
-        ), f"Dataset {dataset} not found"
+        assert storage.verify_dataset_exists(dataset), f"Dataset {dataset} not found"
 
         # Verify volume is exported via iSCSI
-        assert storage.verify_volume_exported(
-            pv_name, "iscsi"
-        ), "Volume not exported"
+        assert storage.verify_volume_exported(pv_name, "iscsi"), "Volume not exported"
 
         # Verify auth-group was created with CHAP
         # The CSI driver creates auth-group named "ag-{volume_id}"
