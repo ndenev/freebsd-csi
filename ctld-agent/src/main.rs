@@ -119,15 +119,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ctld_agent::ctl::validate_portal_group_exists(&args.ctl_config, &args.portal_group)
             .await
             .map_err(|e| format!("Startup validation failed: {}", e))?;
-        info!("Validated portal-group '{}' exists in config", args.portal_group);
+        info!(
+            "Validated portal-group '{}' exists in config",
+            args.portal_group
+        );
     }
 
     // Validate transport group exists if specified
     if !args.transport_group_name.is_empty() {
-        ctld_agent::ctl::validate_transport_group_exists(&args.ctl_config, &args.transport_group_name)
-            .await
-            .map_err(|e| format!("Startup validation failed: {}", e))?;
-        info!("Validated transport-group '{}' exists in config", args.transport_group_name);
+        ctld_agent::ctl::validate_transport_group_exists(
+            &args.ctl_config,
+            &args.transport_group_name,
+        )
+        .await
+        .map_err(|e| format!("Startup validation failed: {}", e))?;
+        info!(
+            "Validated transport-group '{}' exists in config",
+            args.transport_group_name
+        );
     }
 
     // Initialize ZFS manager
