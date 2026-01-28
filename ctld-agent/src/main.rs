@@ -114,6 +114,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Transport group name: {}", args.transport_group_name);
     info!("Max concurrent operations: {}", args.max_concurrent_ops);
 
+    // Validate portal group exists if specified
+    if !args.portal_group.is_empty() {
+        ctld_agent::ctl::validate_portal_group_exists(&args.ctl_config, &args.portal_group)
+            .await
+            .map_err(|e| format!("Startup validation failed: {}", e))?;
+        info!("Validated portal-group '{}' exists in config", args.portal_group);
+    }
+
+    // Validate transport group exists if specified
+    if !args.transport_group_name.is_empty() {
+        ctld_agent::ctl::validate_transport_group_exists(&args.ctl_config, &args.transport_group_name)
+            .await
+            .map_err(|e| format!("Startup validation failed: {}", e))?;
+        info!("Validated transport-group '{}' exists in config", args.transport_group_name);
+    }
+
     // Initialize ZFS manager
     let zfs_manager = ZfsManager::new(args.zfs_parent.clone()).await?;
     let zfs = Arc::new(RwLock::new(zfs_manager));
