@@ -1,7 +1,10 @@
+mod csi_config;
 pub mod ctl_manager;
 pub mod error;
 pub mod types;
 pub mod ucl_config;
+
+pub use csi_config::CsiConfigGenerator;
 
 // Re-exports for module API
 pub use ctl_manager::{ConfigWriterHandle, CtlManager, spawn_config_writer};
