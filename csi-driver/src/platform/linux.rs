@@ -160,7 +160,7 @@ async fn is_nvme_native_multipath_enabled() -> bool {
 /// Connect to an iSCSI target using iscsiadm with support for multiple portals.
 ///
 /// When multiple endpoints are provided, this function will:
-/// 1. Run sendtargets discovery against each portal
+/// 1. Create node entries directly (without sendtargets discovery) for each portal
 /// 2. Configure CHAP authentication if credentials are provided
 /// 3. Login to the target via each portal
 /// 4. Wait for dm-multipath to combine the paths
@@ -193,33 +193,35 @@ pub async fn connect_iscsi(
     // Track successful logins for multipath
     let mut successful_logins = 0;
 
-    // Step 1 & 2: Discover and login to each portal
+    // Step 1 & 2: Create node entries and login to each portal
     for endpoint in endpoints {
         let portal = endpoint.to_portal_string();
 
-        // Run sendtargets discovery to populate node database
-        let discover_output = Command::new("iscsiadm")
-            .args(["-m", "discovery", "-t", "sendtargets", "-p", &portal])
+        // Create node entry directly without discovery
+        // This is more robust as it doesn't depend on discovery auth settings
+        let node_create_output = Command::new("iscsiadm")
+            .args(["-m", "node", "-T", target_iqn, "-p", &portal, "--op", "new"])
             .output()
             .await
             .map_err(|e| {
-                error!(error = %e, portal = %portal, "Failed to execute iscsiadm discovery");
-                Status::internal(format!("Failed to execute iscsiadm discovery: {}", e))
+                error!(error = %e, portal = %portal, "Failed to execute iscsiadm node create");
+                Status::internal(format!("Failed to create iSCSI node: {}", e))
             })?;
 
-        if !discover_output.status.success() {
-            let stderr = String::from_utf8_lossy(&discover_output.stderr);
-            let stdout = String::from_utf8_lossy(&discover_output.stdout);
-            warn!(
-                stderr = %stderr,
-                stdout = %stdout,
-                portal = %portal,
-                "iscsiadm discovery returned error (may be expected if target already known)"
-            );
-        } else {
-            let stdout = String::from_utf8_lossy(&discover_output.stdout);
-            info!(output = %stdout, portal = %portal, "iSCSI discovery successful");
+        if !node_create_output.status.success() {
+            let stderr = String::from_utf8_lossy(&node_create_output.stderr);
+            // "already exists" is fine - node was created previously
+            if !stderr.contains("already exists") {
+                warn!(
+                    stderr = %stderr,
+                    portal = %portal,
+                    target = %target_iqn,
+                    "iscsiadm node create returned error"
+                );
+            }
         }
+
+        info!(portal = %portal, target = %target_iqn, "iSCSI node entry created");
 
         // Configure CHAP authentication if credentials are provided
         if let Some(chap) = chap_credentials {
