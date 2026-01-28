@@ -905,6 +905,16 @@ pub fn validate_ucl_string(value: &str, field_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate CHAP credentials for safe UCL output.
+///
+/// Returns Ok if both username and secret are valid for UCL.
+/// Returns Err with descriptive message if validation fails.
+pub fn validate_chap_credentials(username: &str, secret: &str) -> Result<()> {
+    validate_ucl_string(username, "CHAP username")?;
+    validate_ucl_string(secret, "CHAP secret")?;
+    Ok(())
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -1347,6 +1357,40 @@ mod tests {
             "Error should mention mutual CHAP username: {}",
             err_msg
         );
+    }
+
+    // ============================================================================
+    // CHAP Validation Helper tests
+    // ============================================================================
+
+    #[test]
+    fn test_validate_chap_credentials_valid() {
+        let result = validate_chap_credentials("user", "secret123");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_chap_credentials_empty_user() {
+        let result = validate_chap_credentials("", "secret");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn test_validate_chap_credentials_forbidden_chars() {
+        // Double quote
+        assert!(validate_chap_credentials("user\"name", "secret").is_err());
+        // Curly braces
+        assert!(validate_chap_credentials("user", "sec{ret}").is_err());
+        // Backslash
+        assert!(validate_chap_credentials("user", "sec\\ret").is_err());
+    }
+
+    #[test]
+    fn test_validate_chap_credentials_special_chars_allowed() {
+        // These should be allowed
+        assert!(validate_chap_credentials("user@domain.com", "p@ss!w0rd#$%").is_ok());
+        assert!(validate_chap_credentials("user", "secret:with:colons").is_ok());
     }
 
     // ============================================================================

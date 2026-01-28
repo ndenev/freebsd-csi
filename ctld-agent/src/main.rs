@@ -43,8 +43,8 @@ struct Args {
     auth_group: String,
 
     /// Portal group name for iSCSI targets (used in UCL config)
-    #[arg(long, env = "CTL_PORTAL_GROUP_NAME", default_value = "pg0")]
-    portal_group_name: String,
+    #[arg(long, env = "CTL_PORTAL_GROUP", default_value = "pg0")]
+    portal_group: String,
 
     /// Transport group name for NVMeoF controllers (used in UCL config, FreeBSD 15.0+)
     #[arg(long, env = "CTL_TRANSPORT_GROUP_NAME", default_value = "tg0")]
@@ -110,9 +110,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Base NQN: {}", args.base_nqn);
     info!("CTL config path: {}", args.ctl_config.display());
     info!("Auth group: {}", args.auth_group);
-    info!("Portal group name: {}", args.portal_group_name);
+    info!("Portal group: {}", args.portal_group);
     info!("Transport group name: {}", args.transport_group_name);
     info!("Max concurrent operations: {}", args.max_concurrent_ops);
+
+    // Validate portal group exists if specified
+    if !args.portal_group.is_empty() {
+        ctld_agent::ctl::validate_portal_group_exists(&args.ctl_config, &args.portal_group)
+            .await
+            .map_err(|e| format!("Startup validation failed: {}", e))?;
+        info!(
+            "Validated portal-group '{}' exists in config",
+            args.portal_group
+        );
+    }
+
+    // Validate transport group exists if specified
+    if !args.transport_group_name.is_empty() {
+        ctld_agent::ctl::validate_transport_group_exists(
+            &args.ctl_config,
+            &args.transport_group_name,
+        )
+        .await
+        .map_err(|e| format!("Startup validation failed: {}", e))?;
+        info!(
+            "Validated transport-group '{}' exists in config",
+            args.transport_group_name
+        );
+    }
 
     // Initialize ZFS manager
     let zfs_manager = ZfsManager::new(args.zfs_parent.clone()).await?;
@@ -123,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctl_manager = CtlManager::new(
         args.base_iqn.clone(),
         args.base_nqn.clone(),
-        args.portal_group_name.clone(),
+        args.portal_group.clone(),
         args.ctl_config.to_string_lossy().to_string(),
         args.auth_group.clone(),
         args.transport_group_name.clone(),

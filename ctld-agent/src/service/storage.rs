@@ -559,6 +559,37 @@ impl StorageAgent for StorageService {
             ));
         }
 
+        // Phase 1: Validate all inputs BEFORE any state changes
+        // Validate CHAP credentials if present (prevents invalid creds from being stored)
+        if let Some(auth) = &req.auth {
+            use proto::auth_credentials::Credentials;
+            if let Some(Credentials::IscsiChap(chap)) = &auth.credentials {
+                if let Err(e) = crate::ctl::validate_chap_credentials(&chap.username, &chap.secret)
+                {
+                    timer.failure("validation_error");
+                    return Err(Status::invalid_argument(format!(
+                        "Invalid CHAP credentials: {}",
+                        e
+                    )));
+                }
+
+                // Validate mutual CHAP credentials if both are provided
+                if !chap.mutual_username.is_empty()
+                    && !chap.mutual_secret.is_empty()
+                    && let Err(e) = crate::ctl::validate_chap_credentials(
+                        &chap.mutual_username,
+                        &chap.mutual_secret,
+                    )
+                {
+                    timer.failure("validation_error");
+                    return Err(Status::invalid_argument(format!(
+                        "Invalid mutual CHAP credentials: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
         // Compute auth-group name for ZFS metadata (credentials NOT stored in ZFS)
         let auth_group_name = if auth_config.is_some() {
             Some(auth_config.auth_group_name(&req.name))
@@ -746,6 +777,49 @@ impl StorageAgent for StorageService {
                 .await
             {
                 Ok(d) => d,
+                Err(crate::zfs::ZfsError::DatasetExists(_)) => {
+                    // Recovery: Volume already exists - check if it matches requested parameters
+                    // This handles idempotent retries per CSI spec
+                    info!(
+                        volume = %req.name,
+                        "Volume already exists, checking parameters for idempotency"
+                    );
+
+                    // Get existing volume info to compare parameters
+                    let existing = match zfs.get_dataset(&req.name).await {
+                        Ok(d) => d,
+                        Err(e) => {
+                            timer.failure("zfs_error");
+                            return Err(Status::internal(format!(
+                                "Failed to get existing volume info: {}",
+                                e
+                            )));
+                        }
+                    };
+
+                    // Check size: existing >= requested is OK (volume may have been expanded)
+                    let existing_size = existing.volsize.unwrap_or(0);
+                    let requested_size = req.size_bytes as u64;
+
+                    if existing_size < requested_size {
+                        timer.failure("size_mismatch");
+                        return Err(Status::already_exists(format!(
+                            "Volume '{}' exists with size {} bytes but {} bytes was requested. \
+                             Existing volume is smaller than requested.",
+                            req.name, existing_size, requested_size
+                        )));
+                    }
+
+                    info!(
+                        volume = %req.name,
+                        existing_size = existing_size,
+                        requested_size = requested_size,
+                        "Existing volume matches requested parameters (idempotent success)"
+                    );
+
+                    // Return existing dataset info - continue with target export setup
+                    existing
+                }
                 Err(e) => {
                     timer.failure("zfs_error");
                     return Err(Status::internal(format!(

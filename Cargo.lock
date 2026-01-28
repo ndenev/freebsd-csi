@@ -356,6 +356,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "prost",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

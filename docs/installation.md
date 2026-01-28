@@ -6,9 +6,12 @@ This guide covers the complete installation process for the FreeBSD CSI driver, 
 
 - [FreeBSD Storage Node Setup](#freebsd-storage-node-setup)
   - [Prerequisites](#prerequisites)
-  - [Installing ctld-agent](#installing-ctld-agent)
-  - [ZFS Pool Configuration](#zfs-pool-configuration)
+  - [UCL Mode Requirement](#ucl-mode-requirement)
   - [CTL Configuration](#ctl-configuration)
+  - [Include Directive Setup](#include-directive-setup)
+  - [Directory and File Setup](#directory-and-file-setup)
+  - [ZFS Pool Configuration](#zfs-pool-configuration)
+  - [Installing ctld-agent](#installing-ctld-agent)
   - [Running ctld-agent](#running-ctld-agent)
 - [Kubernetes Cluster Setup](#kubernetes-cluster-setup)
   - [Prerequisites](#kubernetes-prerequisites)
@@ -18,6 +21,7 @@ This guide covers the complete installation process for the FreeBSD CSI driver, 
 - [Building from Source](#building-from-source)
   - [Cargo Build Instructions](#cargo-build-instructions)
   - [Docker Image Building](#docker-image-building)
+- [Migration from Older Versions](#migration-from-older-versions)
 
 ---
 
@@ -32,29 +36,134 @@ Ensure your FreeBSD storage node meets the following requirements:
 - **Network connectivity** to Kubernetes nodes
 - **Root access** for ZFS and CTL configuration
 
-### Installing ctld-agent
+### UCL Mode Requirement
 
-**Option 1: Install from pkg (recommended)**
+**IMPORTANT:** FreeBSD's ctld must run in UCL mode (using the `-u` flag) for the CSI driver to function correctly. UCL mode enables the `.include` directive which is essential for managing CSI targets in a separate configuration file.
 
-```bash
-pkg install ctld-agent
+1. **Configure ctld to run in UCL mode** by adding to `/etc/rc.conf`:
+
+   ```bash
+   sysrc ctld_flags="-u"
+   ```
+
+   Or manually edit `/etc/rc.conf`:
+   ```
+   ctld_flags="-u"
+   ```
+
+2. **Verify your configuration is in UCL format**
+
+   If you have an existing `/etc/ctl.conf` in the old (non-UCL) format, you must convert it to UCL format. The key differences are:
+
+   - UCL uses `=` for assignments and `{ }` blocks
+   - Old format uses bare words without `=`
+
+   See `ctl.conf(5)` for UCL format examples.
+
+### CTL Configuration
+
+The ctld-agent requires that portal groups (for iSCSI) and/or transport groups (for NVMeoF) are pre-configured by the user in `/etc/ctl.conf`. The agent validates these exist on startup.
+
+1. **Load the CTL kernel module**
+
+   ```bash
+   kldload ctl
+   ```
+
+2. **Enable CTL at boot** (add to `/boot/loader.conf`):
+
+   ```
+   ctl_load="YES"
+   ```
+
+3. **Enable ctld service** in `/etc/rc.conf`:
+
+   ```bash
+   sysrc ctld_enable="YES"
+   ```
+
+4. **Create the CTL configuration** (`/etc/ctl.conf`) in UCL format:
+
+   ```ucl
+   # /etc/ctl.conf (UCL format)
+
+   # Portal group for iSCSI (required for iSCSI volumes)
+   portal-group pg0 {
+       discovery-auth-group = no-authentication
+       listen = "0.0.0.0:3260"
+   }
+
+   # Transport group for NVMeoF (required for NVMeoF volumes)
+   # NOTE: NVMeoF requires FreeBSD 15.0+
+   transport-group tg0 {
+       listen {
+           tcp = "0.0.0.0:4420"
+       }
+   }
+
+   # CSI-managed targets (DO NOT EDIT - managed by ctld-agent)
+   .include "/var/db/ctld-agent/csi-targets.conf"
+   ```
+
+   **Notes:**
+   - The `portal-group` definition is required for iSCSI volumes
+   - The `transport-group` definition is required for NVMeoF volumes (FreeBSD 15.0+)
+   - The `.include` directive loads CSI-managed targets from a separate file
+   - You can have your own manually-managed targets in this file as well
+
+5. **For NVMeoF support** (FreeBSD 15.0+), load the nvmf kernel module:
+
+   ```bash
+   kldload nvmf
+   ```
+
+   Add to `/boot/loader.conf`:
+   ```
+   nvmf_load="YES"
+   ```
+
+### Include Directive Setup
+
+The CSI driver manages targets in a separate file (`/var/db/ctld-agent/csi-targets.conf`) that is included into the main configuration via the `.include` directive. This approach provides:
+
+- **Clean separation** between user-managed and CSI-managed targets
+- **Atomic updates** - the CSI config file is regenerated completely each time
+- **No corruption risk** - no marker parsing required
+- **Easy troubleshooting** - CSI targets are isolated in their own file
+
+Add this line to your `/etc/ctl.conf`:
+
+```ucl
+.include "/var/db/ctld-agent/csi-targets.conf"
 ```
 
-**Option 2: Build from source**
+**IMPORTANT:** The `.include` directive only works when ctld is running in UCL mode (`-u` flag). See [UCL Mode Requirement](#ucl-mode-requirement).
+
+### Directory and File Setup
+
+The ctld-agent stores its data in `/var/db/ctld-agent/`. Create this directory with appropriate permissions:
 
 ```bash
-# Install Rust toolchain
-pkg install rust
+# Create the directory
+mkdir -p /var/db/ctld-agent
 
-# Clone and build
-git clone https://github.com/ndenev/freebsd-csi
-cd freebsd-csi
-cargo build --release -p ctld-agent
+# Set ownership and permissions
+chown root:wheel /var/db/ctld-agent
+chmod 0755 /var/db/ctld-agent
 
-# Install the binary
-cp target/release/ctld-agent /usr/local/sbin/
-chmod 755 /usr/local/sbin/ctld-agent
+# Create an empty csi-targets.conf so ctld can start
+touch /var/db/ctld-agent/csi-targets.conf
+chmod 0644 /var/db/ctld-agent/csi-targets.conf
 ```
+
+The ctld-agent will create and manage the following files in this directory:
+
+| File | Permissions | Description |
+|------|-------------|-------------|
+| `csi-targets.conf` | 0644 | Generated UCL config with all CSI-managed targets |
+| `auth.json` | 0600 | CHAP authentication credentials (if CHAP is enabled) |
+
+**Security Note:** The `auth.json` file contains sensitive CHAP credentials and is readable only by root.
 
 ### ZFS Pool Configuration
 
@@ -99,63 +208,29 @@ chmod 755 /usr/local/sbin/ctld-agent
    zpool status tank
    ```
 
-### CTL Configuration
+### Installing ctld-agent
 
-The ctld-agent manages CTL (CAM Target Layer) configuration automatically. However, you should ensure CTL is loaded and configured:
+**Option 1: Install from pkg (recommended)**
 
-1. **Load the CTL kernel module**
+```bash
+pkg install ctld-agent
+```
 
-   ```bash
-   kldload ctl
-   ```
+**Option 2: Build from source**
 
-2. **Enable CTL at boot** (add to `/boot/loader.conf`):
+```bash
+# Install Rust toolchain
+pkg install rust
 
-   ```
-   ctl_load="YES"
-   ```
+# Clone and build
+git clone https://github.com/ndenev/freebsd-csi
+cd freebsd-csi
+cargo build --release -p ctld-agent
 
-3. **For iSCSI support**, enable the ctld service in `/etc/rc.conf`:
-
-   ```bash
-   sysrc ctld_enable="YES"
-   ```
-
-4. **Create base CTL configuration** (`/etc/ctl.ucl`):
-
-   ```text
-   auth-group ag0 {
-       auth-type = none
-   }
-
-   portal-group pg0 {
-       discovery-auth-group = no-authentication
-       listen = 0.0.0.0:3260
-   }
-
-   # CSI targets will be added below by ctld-agent
-   ```
-
-5. **For NVMeoF support** (FreeBSD 15.0+), add transport group to `/etc/ctl.ucl`:
-
-   ```text
-   transport-group tg0 {
-       transport-type = tcp
-       listen = 0.0.0.0:4420
-   }
-   ```
-
-   And load the nvmf kernel module:
-
-   ```bash
-   kldload nvmf
-   ```
-
-   Add to `/boot/loader.conf`:
-
-   ```
-   nvmf_load="YES"
-   ```
+# Install the binary
+cp target/release/ctld-agent /usr/local/sbin/
+chmod 755 /usr/local/sbin/ctld-agent
+```
 
 ### Running ctld-agent
 
@@ -166,20 +241,26 @@ The ctld-agent manages CTL (CAM Target Layer) configuration automatically. Howev
    sysrc ctld_agent_flags="--zfs-parent tank/csi --listen [::]:50051"
    ```
 
-2. **Start the service**
+2. **Start ctld first** (if not already running):
+
+   ```bash
+   service ctld start
+   ```
+
+3. **Start the ctld-agent service**
 
    ```bash
    service ctld_agent start
    ```
 
-3. **Verify it's running**
+4. **Verify it's running**
 
    ```bash
    service ctld_agent status
    sockstat -4l | grep 50051
    ```
 
-4. **Optional: Custom configuration**
+5. **Optional: Custom configuration**
 
    For custom IQN/NQN naming:
 
@@ -436,8 +517,77 @@ ENTRYPOINT ["/usr/local/bin/csi-driver"]
 
 ---
 
+## Migration from Older Versions
+
+If you are upgrading from an older version of the CSI driver that used marker-based configuration (`# BEGIN CSI-MANAGED TARGETS` / `# END CSI-MANAGED TARGETS`), follow these migration steps:
+
+### Step 1: Enable UCL Mode
+
+Ensure ctld runs in UCL mode:
+
+```bash
+sysrc ctld_flags="-u"
+```
+
+### Step 2: Create the Data Directory
+
+```bash
+mkdir -p /var/db/ctld-agent
+chown root:wheel /var/db/ctld-agent
+chmod 0755 /var/db/ctld-agent
+touch /var/db/ctld-agent/csi-targets.conf
+chmod 0644 /var/db/ctld-agent/csi-targets.conf
+```
+
+### Step 3: Update /etc/ctl.conf
+
+1. **Remove the old marker-based section** from `/etc/ctl.conf`:
+
+   Delete everything between (and including) these lines:
+   ```
+   # BEGIN CSI-MANAGED TARGETS - DO NOT EDIT
+   ...
+   # END CSI-MANAGED TARGETS
+   ```
+
+2. **Add the include directive** at the end of `/etc/ctl.conf`:
+
+   ```ucl
+   .include "/var/db/ctld-agent/csi-targets.conf"
+   ```
+
+3. **Ensure portal-group and/or transport-group are defined** (see [CTL Configuration](#ctl-configuration))
+
+### Step 4: Restart Services
+
+```bash
+# Stop ctld-agent first
+service ctld_agent stop
+
+# Restart ctld to pick up config changes
+service ctld restart
+
+# Start the updated ctld-agent
+service ctld_agent start
+```
+
+### Step 5: Verify Migration
+
+Check that the agent starts without errors:
+
+```bash
+service ctld_agent status
+```
+
+Review the agent logs for any warnings about missing auth credentials (existing CHAP credentials from the old configuration are not automatically migrated).
+
+**Note on CHAP Credentials:** If you had volumes with CHAP authentication enabled, the credentials were stored in the old UCL config and are not automatically migrated to the new `auth.json` format. You may need to recreate PVCs with CHAP or manually populate `auth.json`.
+
+---
+
 ## Next Steps
 
 - [Configuration Reference](configuration.md) - Detailed configuration options
+- [CHAP Authentication Setup](chap-setup.md) - Configure iSCSI CHAP authentication
 - [Helm Chart README](../charts/freebsd-csi/README.md) - Helm chart documentation
 - Review the [README](../README.md) for usage examples
