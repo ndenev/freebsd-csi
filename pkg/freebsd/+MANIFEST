@@ -41,32 +41,49 @@ files: {
 
 directories: {
     /usr/local/etc/ctld-agent: { perm: 0755 }
+    /var/db/ctld-agent: { perm: 0755, uname: root, gname: wheel }
 }
 
 scripts: {
     post-install: <<EOS
 #!/bin/sh
+
+# Create empty csi-targets.conf if it doesn't exist
+# This allows ctld to start before ctld-agent populates it
+if [ ! -f /var/db/ctld-agent/csi-targets.conf ]; then
+    touch /var/db/ctld-agent/csi-targets.conf
+    chmod 0644 /var/db/ctld-agent/csi-targets.conf
+    chown root:wheel /var/db/ctld-agent/csi-targets.conf
+fi
+
 echo ""
 echo "=========================================="
 echo " ctld-agent installed successfully"
 echo "=========================================="
 echo ""
-echo "To enable ctld-agent, add to /etc/rc.conf:"
+echo "IMPORTANT: ctld must run in UCL mode with the .include directive."
 echo ""
-echo '  ctld_agent_enable="YES"'
-echo '  ctld_agent_zfs_parent="tank/csi"'
+echo "1. Enable UCL mode in /etc/rc.conf:"
+echo '   ctld_flags="-u"'
+echo ""
+echo "2. Add to /etc/ctl.conf (or /etc/ctl.ucl):"
+echo '   .include "/var/db/ctld-agent/csi-targets.conf"'
+echo ""
+echo "3. Enable ctld-agent in /etc/rc.conf:"
+echo '   ctld_agent_enable="YES"'
+echo '   ctld_agent_zfs_parent="tank/csi"'
 echo ""
 echo "Or use sysrc:"
+echo "   sysrc ctld_flags=-u"
+echo "   sysrc ctld_agent_enable=YES"
+echo "   sysrc ctld_agent_zfs_parent=tank/csi"
 echo ""
-echo "  sysrc ctld_agent_enable=YES"
-echo "  sysrc ctld_agent_zfs_parent=tank/csi"
-echo ""
-echo "Then start the service:"
-echo ""
-echo "  service ctld_agent start"
+echo "Then restart ctld and start ctld_agent:"
+echo "   service ctld restart"
+echo "   service ctld_agent start"
 echo ""
 echo "See /usr/local/etc/ctld-agent/config.ucl.sample"
-echo "for configuration options."
+echo "and docs/installation.md for full setup instructions."
 echo ""
 EOS
     pre-deinstall: <<EOS
