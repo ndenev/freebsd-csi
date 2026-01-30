@@ -308,6 +308,7 @@ jobs:
           # Create directories
           mkdir -p pkg-staging/usr/local/etc/ctld-agent
           mkdir -p pkg-staging/usr/local/etc/rc.d
+          mkdir -p pkg-staging/var/db/ctld-agent
 
           # Copy files
           cp pkg/freebsd/config.ucl.sample pkg-staging/usr/local/etc/ctld-agent/
