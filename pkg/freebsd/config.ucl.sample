@@ -18,13 +18,12 @@
 #
 #   # iSCSI Configuration
 #   ctld_agent_base_iqn="iqn.2024-01.org.freebsd.csi"
-#   ctld_agent_portal_group="1"
-#   ctld_agent_portal_group_name="pg0"
-#   ctld_agent_auth_group="ag0"
-#   ctld_agent_ctl_config="/etc/ctl.ucl"
+#   ctld_agent_portal_group="pg0"
+#   ctld_agent_ctl_config="/etc/ctl.conf"
 #
 #   # NVMeoF Configuration (FreeBSD 15+)
 #   ctld_agent_base_nqn="nqn.2024-01.org.freebsd.csi"
+#   ctld_agent_transport_group="tg0"
 #
 #   # TLS/mTLS (for secure gRPC)
 #   ctld_agent_tls_cert="/usr/local/etc/ctld-agent/server.crt"
@@ -32,31 +31,48 @@
 #   ctld_agent_tls_client_ca="/usr/local/etc/ctld-agent/ca.crt"
 #
 #   # Logging
+#   ctld_agent_log_level="info"
 #   ctld_agent_logfile="/var/log/ctld-agent.log"
 #
 #   # Additional flags
 #   ctld_agent_flags=""
 #
 # ===================================
-# CTL Configuration (/etc/ctl.ucl)
+# CTL Configuration (/etc/ctl.conf)
 # ===================================
 #
-# ctld-agent manages iSCSI targets via the UCL configuration file.
-# You must have ctld running with the -u flag for UCL format.
+# ctld-agent manages iSCSI/NVMeoF targets via a separate config file.
+# CSI-managed targets are written to: /var/db/ctld-agent/csi-targets.conf
 #
-# Example minimal /etc/ctl.ucl:
+# Your /etc/ctl.conf should include this file via .include directive.
 #
-# auth-group ag0 {
-#     auth-type = none
+# Example /etc/ctl.conf:
+#
+# auth-group {
+#     ag0 {
+#         auth-type = none
+#     }
 # }
 #
-# portal-group pg0 {
-#     discovery-auth-group = no-authentication
-#     listen = "0.0.0.0:3260"
+# portal-group {
+#     pg0 {
+#         discovery-auth-group = no-authentication
+#         listen = "0.0.0.0:3260"
+#     }
 # }
 #
-# # CSI-managed targets are added below this line automatically
-# # Do not manually edit content between CSI markers
+# # For NVMeoF (FreeBSD 15.0+)
+# transport-group {
+#     tg0 {
+#         discovery-auth-group = no-authentication
+#         listen {
+#             tcp = "0.0.0.0:4420"
+#         }
+#     }
+# }
+#
+# # Include CSI-managed targets
+# .include "/var/db/ctld-agent/csi-targets.conf"
 #
 # ===================================
 # CHAP Authentication (Optional)
@@ -64,43 +80,56 @@
 #
 # For CHAP authentication, modify the auth-group:
 #
-# auth-group ag0 {
-#     auth-type = chap
-#     chap = "username" "secret"
+# auth-group {
+#     ag0 {
+#         auth-type = chap
+#         chap = "username" "secret"
+#     }
 # }
 #
 # Or for mutual CHAP:
 #
-# auth-group ag0 {
-#     auth-type = chap-mutual
-#     chap = "initiator-user" "initiator-secret"
-#     chap-mutual = "target-user" "target-secret"
+# auth-group {
+#     ag0 {
+#         auth-type = chap-mutual
+#         chap = "initiator-user" "initiator-secret"
+#         chap-mutual = "target-user" "target-secret"
+#     }
 # }
 #
 # ===================================
 # Multiple Portal Groups (Advanced)
 # ===================================
 #
-# portal-group pg0 {
-#     discovery-auth-group = no-authentication
-#     listen = "192.168.1.10:3260"
-# }
-#
-# portal-group pg1 {
-#     discovery-auth-group = no-authentication
-#     listen = "10.0.0.10:3260"
+# portal-group {
+#     pg0 {
+#         discovery-auth-group = no-authentication
+#         listen = "192.168.1.10:3260"
+#     }
+#     pg1 {
+#         discovery-auth-group = no-authentication
+#         listen = "10.0.0.10:3260"
+#     }
 # }
 #
 # ===================================
-# Starting ctld with UCL Format
+# Setup Steps
 # ===================================
 #
-# FreeBSD's default /etc/rc.d/ctld may not support the -u flag.
-# Add to /etc/rc.local:
+# 1. Create the CSI targets directory:
+#    mkdir -p /var/db/ctld-agent
+#    touch /var/db/ctld-agent/csi-targets.conf
 #
-#   /usr/sbin/ctld -u
+# 2. Create /etc/ctl.conf with portal/transport groups and .include
 #
-# Or create a custom rc.d script.
+# 3. Enable services in /etc/rc.conf:
+#    ctld_enable="YES"
+#    ctld_agent_enable="YES"
+#    ctld_agent_zfs_parent="tank/csi"
+#
+# 4. Start services:
+#    service ctld start
+#    service ctld_agent start
 #
 # ===================================
 # Kubernetes Integration
@@ -136,3 +165,6 @@
 #
 # Check ZFS volumes:
 #   zfs list -r tank/csi
+#
+# Check CSI-managed config:
+#   cat /var/db/ctld-agent/csi-targets.conf
