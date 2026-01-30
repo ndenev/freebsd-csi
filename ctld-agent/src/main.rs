@@ -34,8 +34,8 @@ struct Args {
     #[arg(long, default_value = "nqn.2024-01.org.freebsd.csi")]
     base_nqn: String,
 
-    /// Path to ctld UCL config file
-    #[arg(long, env = "CTL_CONFIG_PATH", default_value = "/etc/ctl.ucl")]
+    /// Path to ctld config file (UCL format, used for portal/transport group validation)
+    #[arg(long, env = "CTL_CONFIG_PATH", default_value = "/etc/ctl.conf")]
     ctl_config: PathBuf,
 
     /// Auth group name for iSCSI targets
@@ -149,7 +149,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.base_iqn.clone(),
         args.base_nqn.clone(),
         args.portal_group.clone(),
-        args.ctl_config.to_string_lossy().to_string(),
         args.auth_group.clone(),
         args.transport_group_name.clone(),
         args.zfs_parent.clone(),

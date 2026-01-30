@@ -12,9 +12,17 @@ use tokio::process::Command;
 use tokio::sync::{RwLock as TokioRwLock, mpsc, oneshot};
 use tracing::{debug, error, info, instrument, warn};
 
+use std::io::Write as IoWrite;
+use std::path::Path;
+
+use tempfile::NamedTempFile;
+
 use super::error::{CtlError, Result};
 use super::types::{AuthConfig, DevicePath, ExportType, Iqn, Nqn, TargetName};
-use super::ucl_config::{AuthGroup, Controller, CtlConfig, CtlOptions, Target, UclConfigManager};
+use super::ucl_config::{AuthGroup, Controller, CtlOptions, Target, ToUcl};
+
+/// Default path for CSI-managed targets config
+const CSI_CONFIG_PATH: &str = "/var/db/ctld-agent/csi-targets.conf";
 
 /// Represents a CTL export (either iSCSI target or NVMeoF controller)
 #[derive(Debug, Clone)]
@@ -52,8 +60,8 @@ pub struct CtlManager {
     parent_dataset: String,
     /// In-memory cache of all exports, keyed by volume name
     exports: RwLock<HashMap<String, Export>>,
-    /// UCL config manager for persistent configuration
-    ucl_manager: UclConfigManager,
+    /// Path to write CSI-managed targets config
+    csi_config_path: String,
 }
 
 impl CtlManager {
@@ -63,7 +71,6 @@ impl CtlManager {
     /// * `base_iqn` - Base IQN prefix for iSCSI targets
     /// * `base_nqn` - Base NQN prefix for NVMeoF controllers
     /// * `portal_group_name` - Portal group name for UCL config
-    /// * `config_path` - Path to the UCL config file
     /// * `auth_group` - Auth group name for UCL config
     /// * `transport_group` - Transport group name for NVMeoF
     /// * `parent_dataset` - Parent ZFS dataset for device path validation (e.g., "tank/csi")
@@ -71,7 +78,6 @@ impl CtlManager {
         base_iqn: String,
         base_nqn: String,
         portal_group_name: String,
-        config_path: String,
         auth_group: String,
         transport_group: String,
         parent_dataset: String,
@@ -89,8 +95,6 @@ impl CtlManager {
             ));
         }
 
-        let ucl_manager = UclConfigManager::new(config_path);
-
         info!(
             "Initializing CtlManager with base_iqn={}, base_nqn={}, portal_group={}, parent_dataset={}",
             base_iqn, base_nqn, portal_group_name, parent_dataset
@@ -104,7 +108,7 @@ impl CtlManager {
             transport_group,
             parent_dataset,
             exports: RwLock::new(HashMap::new()),
-            ucl_manager,
+            csi_config_path: CSI_CONFIG_PATH.to_string(),
         })
     }
 
@@ -116,88 +120,6 @@ impl CtlManager {
     /// Generate an NQN for a volume
     pub fn generate_nqn(&self, volume_name: &str) -> Result<Nqn> {
         Nqn::new(&self.base_nqn, volume_name)
-    }
-
-    /// Load existing exports from UCL config file.
-    ///
-    /// Note: This is currently unused as ZFS user properties are the source of truth.
-    /// Kept for potential debugging/recovery purposes.
-    #[allow(dead_code)]
-    #[instrument(skip(self))]
-    pub async fn load_config(&mut self) -> Result<()> {
-        let config_path = &self.ucl_manager.config_path;
-        let config = CtlConfig::from_file(config_path).await?;
-
-        let mut exports = self
-            .exports
-            .write()
-            .map_err(|e| CtlError::ConfigError(format!("Lock poisoned: {}", e)))?;
-        let mut loaded_iscsi = 0;
-        let mut loaded_nvmeof = 0;
-
-        // Load iSCSI targets matching our base IQN using filter_map
-        let iscsi_exports: Vec<_> = config
-            .targets_with_prefix(&self.base_iqn)
-            .filter_map(|(iqn_str, target)| {
-                let volume_name = iqn_str.rsplit(':').next()?;
-                let (lun_id_str, lun) = target.lun.iter().next()?;
-                let lun_id = lun_id_str.parse::<u32>().ok()?;
-                let iqn = Iqn::parse(iqn_str).ok()?;
-                let device_path = DevicePath::parse(&lun.path).ok()?;
-
-                Some(Export {
-                    volume_name: volume_name.to_string(),
-                    device_path,
-                    export_type: ExportType::Iscsi,
-                    target_name: iqn.into(),
-                    lun_id,
-                    // Auth is not persisted in UCL config, defaults to none
-                    auth: AuthConfig::None,
-                    // CTL options not persisted in UCL config, defaults to none
-                    ctl_options: CtlOptions::default(),
-                })
-            })
-            .collect();
-
-        for export in iscsi_exports {
-            exports.insert(export.volume_name.clone(), export);
-            loaded_iscsi += 1;
-        }
-
-        // Load NVMeoF controllers matching our base NQN using filter_map
-        let nvmeof_exports: Vec<_> = config
-            .controllers_with_prefix(&self.base_nqn)
-            .filter_map(|(nqn_str, controller)| {
-                let volume_name = nqn_str.rsplit(':').next()?;
-                let (ns_id_str, ns) = controller.namespace.iter().next()?;
-                let ns_id = ns_id_str.parse::<u32>().ok()?;
-                let nqn = Nqn::parse(nqn_str).ok()?;
-                let device_path = DevicePath::parse(&ns.path).ok()?;
-
-                Some(Export {
-                    volume_name: volume_name.to_string(),
-                    device_path,
-                    export_type: ExportType::Nvmeof,
-                    target_name: nqn.into(),
-                    lun_id: ns_id,
-                    // Auth is not persisted in UCL config, defaults to none
-                    auth: AuthConfig::None,
-                    // CTL options not persisted in UCL config, defaults to none
-                    ctl_options: CtlOptions::default(),
-                })
-            })
-            .collect();
-
-        for export in nvmeof_exports {
-            exports.insert(export.volume_name.clone(), export);
-            loaded_nvmeof += 1;
-        }
-
-        info!(
-            "Loaded {} iSCSI targets and {} NVMeoF controllers from UCL config",
-            loaded_iscsi, loaded_nvmeof
-        );
-        Ok(())
     }
 
     /// Export a volume via iSCSI or NVMeoF
@@ -295,12 +217,17 @@ impl CtlManager {
         exports.get(volume_name).cloned()
     }
 
-    /// Write UCL config and reload ctld.
+    /// Write CSI-managed targets to config file and reload ctld.
     ///
-    /// Preserves user-managed targets while updating CSI-managed targets.
+    /// Writes to /var/db/ctld-agent/csi-targets.conf which is included by
+    /// /etc/ctl.conf via .include directive. This keeps CSI-managed targets
+    /// separate from user-managed targets.
+    ///
     /// Generates per-volume auth-groups for targets that require authentication.
     #[instrument(skip(self))]
     pub async fn write_config(&self) -> Result<()> {
+        use std::fmt::Write;
+
         // Collect targets and auth groups while holding the lock
         // Use a block to ensure the lock guard is dropped before any await points
         let (iscsi_targets, nvme_controllers, auth_groups) = {
@@ -350,24 +277,68 @@ impl CtlManager {
         };
 
         info!(
-            "Writing UCL config with {} iSCSI targets, {} NVMeoF controllers, {} auth groups",
+            "Writing CSI config to {} with {} iSCSI targets, {} NVMeoF controllers, {} auth groups",
+            self.csi_config_path,
             iscsi_targets.len(),
             nvme_controllers.len(),
             auth_groups.len()
         );
 
-        // Read user content (non-CSI targets)
-        let user_content = self.ucl_manager.read_user_content().await?;
+        // Generate UCL config content
+        let mut config = String::new();
+        writeln!(config, "# CSI-managed targets - DO NOT EDIT MANUALLY").unwrap();
+        writeln!(config, "# Generated by ctld-agent").unwrap();
+        writeln!(
+            config,
+            "# This file is included by /etc/ctl.conf via .include directive"
+        )
+        .unwrap();
+        writeln!(config).unwrap();
 
-        // Write config with CSI targets and auth groups
-        self.ucl_manager.write_config_with_auth(
-            &user_content,
-            &iscsi_targets,
-            &nvme_controllers,
-            &auth_groups,
-        )?;
+        // Write auth groups
+        for (name, auth_group) in &auth_groups {
+            writeln!(config, "auth-group \"{}\" {{", name).unwrap();
+            write!(config, "{}", auth_group.to_ucl(1)).unwrap();
+            writeln!(config, "}}").unwrap();
+            writeln!(config).unwrap();
+        }
 
-        info!("UCL config updated successfully");
+        // Write iSCSI targets
+        for (iqn, target) in &iscsi_targets {
+            writeln!(config, "target \"{}\" {{", iqn).unwrap();
+            write!(config, "{}", target.to_ucl(1)).unwrap();
+            writeln!(config, "}}").unwrap();
+            writeln!(config).unwrap();
+        }
+
+        // Write NVMeoF controllers
+        for (nqn, controller) in &nvme_controllers {
+            writeln!(config, "controller \"{}\" {{", nqn).unwrap();
+            write!(config, "{}", controller.to_ucl(1)).unwrap();
+            writeln!(config, "}}").unwrap();
+            writeln!(config).unwrap();
+        }
+
+        // Write atomically using temp file + rename
+        let config_path = Path::new(&self.csi_config_path);
+        let config_dir = config_path
+            .parent()
+            .unwrap_or(Path::new("/var/db/ctld-agent"));
+
+        // Ensure config directory exists
+        if !config_dir.exists() {
+            std::fs::create_dir_all(config_dir).map_err(CtlError::Io)?;
+        }
+
+        let mut temp_file = NamedTempFile::new_in(config_dir).map_err(CtlError::Io)?;
+        temp_file
+            .write_all(config.as_bytes())
+            .map_err(CtlError::Io)?;
+        temp_file
+            .persist(&self.csi_config_path)
+            .map_err(|e| CtlError::Io(e.error))?;
+
+        info!("CSI config written to {}", self.csi_config_path);
 
         self.reload_ctld().await?;
 

@@ -17,7 +17,7 @@
 #   ctld_agent_listen="[::]:50051"        # Listen address (default: [::1]:50051)
 #   ctld_agent_base_iqn="iqn.2024-01.org.freebsd.csi"  # Base IQN
 #   ctld_agent_base_nqn="nqn.2024-01.org.freebsd.csi"  # Base NQN
-#   ctld_agent_ctl_config="/etc/ctl.ucl"  # CTL config file
+#   ctld_agent_ctl_config="/etc/ctl.conf" # CTL config file (UCL format, use .include for CSI targets)
 #   ctld_agent_portal_group="pg0"         # Portal group name
 #   ctld_agent_tls_cert="/path/to/cert.pem"   # TLS certificate
 #   ctld_agent_tls_key="/path/to/key.pem"     # TLS key
@@ -39,7 +39,7 @@ load_rc_config $name
 : ${ctld_agent_listen:="[::1]:50051"}
 : ${ctld_agent_base_iqn:="iqn.2024-01.org.freebsd.csi"}
 : ${ctld_agent_base_nqn:="nqn.2024-01.org.freebsd.csi"}
-: ${ctld_agent_ctl_config:="/etc/ctl.ucl"}
+: ${ctld_agent_ctl_config:="/etc/ctl.conf"}
 : ${ctld_agent_portal_group:="pg0"}
 : ${ctld_agent_log_level:="info"}
 : ${ctld_agent_logfile:="/var/log/ctld-agent.log"}
