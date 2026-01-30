@@ -702,7 +702,6 @@ impl ZfsManager {
     ///
     /// Note: This is primarily for recovery/repair scenarios. Normal volume creation
     /// sets metadata atomically via create_volume/clone_from_snapshot/copy_from_snapshot.
-    #[allow(dead_code)]
     #[instrument(skip(self, metadata))]
     pub async fn set_volume_metadata(&self, name: &str, metadata: &VolumeMetadata) -> Result<()> {
         validate_name(name)?;
