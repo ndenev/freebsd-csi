@@ -38,10 +38,6 @@ struct Args {
     #[arg(long, env = "CTL_CONFIG_PATH", default_value = "/etc/ctl.conf")]
     ctl_config: PathBuf,
 
-    /// Auth group name for iSCSI targets
-    #[arg(long, env = "CTL_AUTH_GROUP", default_value = "ag0")]
-    auth_group: String,
-
     /// Portal group name for iSCSI targets (used in UCL config)
     #[arg(long, env = "CTL_PORTAL_GROUP", default_value = "pg0")]
     portal_group: String,
@@ -109,7 +105,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Base IQN: {}", args.base_iqn);
     info!("Base NQN: {}", args.base_nqn);
     info!("CTL config path: {}", args.ctl_config.display());
-    info!("Auth group: {}", args.auth_group);
     info!("Portal group: {}", args.portal_group);
     info!("Transport group name: {}", args.transport_group);
     info!("Max concurrent operations: {}", args.max_concurrent_ops);
@@ -146,7 +141,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.base_iqn.clone(),
         args.base_nqn.clone(),
         args.portal_group.clone(),
-        args.auth_group.clone(),
         args.transport_group.clone(),
         args.zfs_parent.clone(),
     )?;

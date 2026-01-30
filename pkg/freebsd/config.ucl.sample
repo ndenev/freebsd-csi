@@ -19,7 +19,6 @@
 #   # iSCSI Configuration
 #   ctld_agent_base_iqn="iqn.2024-01.org.freebsd.csi"
 #   ctld_agent_portal_group="pg0"
-#   ctld_agent_auth_group="ag0"
 #   ctld_agent_ctl_config="/etc/ctl.conf"
 #
 #   # NVMeoF Configuration (FreeBSD 15+)

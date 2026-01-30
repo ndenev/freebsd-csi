@@ -49,9 +49,6 @@ pub struct CtlManager {
     base_iqn: String,
     /// Base NQN prefix for NVMeoF controllers
     base_nqn: String,
-    /// Auth group name for UCL config
-    #[allow(dead_code)] // Legacy: superseded by per-volume auth groups in AuthConfig
-    auth_group: String,
     /// Portal group name for iSCSI
     portal_group_name: String,
     /// Transport group name for NVMeoF
@@ -71,14 +68,12 @@ impl CtlManager {
     /// * `base_iqn` - Base IQN prefix for iSCSI targets
     /// * `base_nqn` - Base NQN prefix for NVMeoF controllers
     /// * `portal_group_name` - Portal group name for UCL config
-    /// * `auth_group` - Auth group name for UCL config
     /// * `transport_group` - Transport group name for NVMeoF
     /// * `parent_dataset` - Parent ZFS dataset for device path validation (e.g., "tank/csi")
     pub fn new(
         base_iqn: String,
         base_nqn: String,
         portal_group_name: String,
-        auth_group: String,
         transport_group: String,
         parent_dataset: String,
     ) -> Result<Self> {
@@ -103,7 +98,6 @@ impl CtlManager {
         Ok(Self {
             base_iqn,
             base_nqn,
-            auth_group,
             portal_group_name,
             transport_group,
             parent_dataset,

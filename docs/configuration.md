@@ -42,7 +42,6 @@ The ctld-agent is the FreeBSD daemon that manages ZFS volumes and CTL exports.
 | `--tls-key` | - | No | TLS private key file (PEM format). |
 | `--tls-client-ca` | - | No | CA certificate for client verification (enables mTLS). |
 | `--ctl-config` | `/etc/ctl.conf` | No | Path to ctld config file (UCL format, used for portal/transport group validation). |
-| `--auth-group` | `ag0` | No | Auth group name for iSCSI targets in UCL config. |
 | `--portal-group` | `pg0` | No | Portal group name for iSCSI targets in UCL config. |
 | `--transport-group` | `tg0` | No | Transport group name for NVMeoF controllers (FreeBSD 15.0+). |
 
@@ -60,7 +59,6 @@ ctld-agent \
   --zfs-parent tank/kubernetes/volumes \
   --base-iqn iqn.2024-01.com.example.storage \
   --ctl-config /etc/ctl.conf \
-  --auth-group ag0 \
   --portal-group pg0 \
   --tls-cert /etc/ctld-agent/server.crt \
   --tls-key /etc/ctld-agent/server.key \
@@ -82,7 +80,6 @@ The ctld-agent supports optional TLS encryption and mutual TLS (mTLS) authentica
 - `TLS_KEY_PATH` - Alternative to `--tls-key`
 - `TLS_CLIENT_CA_PATH` - Alternative to `--tls-client-ca`
 - `CTL_CONFIG_PATH` - Alternative to `--ctl-config`
-- `CTL_AUTH_GROUP` - Alternative to `--auth-group`
 - `CTL_PORTAL_GROUP` - Alternative to `--portal-group`
 - `CTL_TRANSPORT_GROUP` - Alternative to `--transport-group`
 
