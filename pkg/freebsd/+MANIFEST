@@ -24,9 +24,9 @@ Features:
 - Integration with Kubernetes CSI
 
 Requirements:
-- FreeBSD 14.0 or later
+- FreeBSD 14.0 or later (15.0+ for NVMeoF)
 - ZFS pool configured for storage
-- ctld service enabled with UCL config format (-u flag)
+- ctld service enabled
 - Network connectivity to Kubernetes cluster
 EOD
 
@@ -61,25 +61,21 @@ echo "=========================================="
 echo " ctld-agent installed successfully"
 echo "=========================================="
 echo ""
-echo "IMPORTANT: ctld must run in UCL mode with the .include directive."
-echo ""
-echo "1. Enable UCL mode in /etc/rc.conf:"
-echo '   ctld_flags="-u"'
-echo ""
-echo "2. Add to /etc/ctl.conf (or /etc/ctl.ucl):"
+echo "1. Add to /etc/ctl.conf:"
 echo '   .include "/var/db/ctld-agent/csi-targets.conf"'
 echo ""
-echo "3. Enable ctld-agent in /etc/rc.conf:"
+echo "2. Enable services in /etc/rc.conf:"
+echo '   ctld_enable="YES"'
 echo '   ctld_agent_enable="YES"'
 echo '   ctld_agent_zfs_parent="tank/csi"'
 echo ""
 echo "Or use sysrc:"
-echo "   sysrc ctld_flags=-u"
+echo "   sysrc ctld_enable=YES"
 echo "   sysrc ctld_agent_enable=YES"
 echo "   sysrc ctld_agent_zfs_parent=tank/csi"
 echo ""
-echo "Then restart ctld and start ctld_agent:"
-echo "   service ctld restart"
+echo "3. Start services:"
+echo "   service ctld start"
 echo "   service ctld_agent start"
 echo ""
 echo "See /usr/local/etc/ctld-agent/config.ucl.sample"
@@ -103,11 +99,11 @@ ctld-agent requires a ZFS dataset to be configured before starting.
 Create your storage dataset:
     zfs create tank/csi
 
-Ensure ctld is configured with UCL format in /etc/rc.conf:
+Ensure ctld is enabled in /etc/rc.conf:
     ctld_enable="YES"
 
-And started with -u flag (add to /etc/rc.local if needed):
-    /usr/sbin/ctld -u
+And your /etc/ctl.conf includes the CSI targets file:
+    .include "/var/db/ctld-agent/csi-targets.conf"
 
 EOM
     }

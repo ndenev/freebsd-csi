@@ -41,9 +41,10 @@ The ctld-agent is the FreeBSD daemon that manages ZFS volumes and CTL exports.
 | `--tls-cert` | - | No | TLS certificate file (PEM format) for server identity. |
 | `--tls-key` | - | No | TLS private key file (PEM format). |
 | `--tls-client-ca` | - | No | CA certificate for client verification (enables mTLS). |
-| `--ctl-config` | `/etc/ctl.ucl` | No | Path to ctld UCL configuration file. |
+| `--ctl-config` | `/etc/ctl.conf` | No | Path to ctld config file (UCL format, used for portal/transport group validation). |
 | `--auth-group` | `ag0` | No | Auth group name for iSCSI targets in UCL config. |
-| `--portal-group-name` | `pg0` | No | Portal group name for iSCSI targets in UCL config. |
+| `--portal-group` | `pg0` | No | Portal group name for iSCSI targets in UCL config. |
+| `--transport-group` | `tg0` | No | Transport group name for NVMeoF controllers (FreeBSD 15.0+). |
 
 #### Examples
 
@@ -58,9 +59,9 @@ ctld-agent \
   --listen [::]:50051 \
   --zfs-parent tank/kubernetes/volumes \
   --base-iqn iqn.2024-01.com.example.storage \
-  --ctl-config /etc/ctl.ucl \
+  --ctl-config /etc/ctl.conf \
   --auth-group ag0 \
-  --portal-group-name pg0 \
+  --portal-group pg0 \
   --tls-cert /etc/ctld-agent/server.crt \
   --tls-key /etc/ctld-agent/server.key \
   --tls-client-ca /etc/ctld-agent/ca.crt
@@ -82,7 +83,8 @@ The ctld-agent supports optional TLS encryption and mutual TLS (mTLS) authentica
 - `TLS_CLIENT_CA_PATH` - Alternative to `--tls-client-ca`
 - `CTL_CONFIG_PATH` - Alternative to `--ctl-config`
 - `CTL_AUTH_GROUP` - Alternative to `--auth-group`
-- `CTL_PORTAL_GROUP_NAME` - Alternative to `--portal-group-name`
+- `CTL_PORTAL_GROUP` - Alternative to `--portal-group`
+- `CTL_TRANSPORT_GROUP` - Alternative to `--transport-group`
 
 ### ZFS Dataset Requirements
 
@@ -160,20 +162,78 @@ For NVMeoF targets, ensure:
 
 ### CTL Configuration (UCL)
 
-The ctld-agent manages iSCSI targets through FreeBSD's ctld daemon using UCL configuration files.
+The ctld-agent manages iSCSI and NVMeoF targets through FreeBSD's ctld daemon using UCL configuration.
 
 #### How It Works
 
-1. CSI-managed targets are written to a marked section in the UCL config file
-2. User-managed targets outside this section are preserved
+1. CSI-managed targets are written to a separate file: `/var/db/ctld-agent/csi-targets.conf`
+2. Your main `/etc/ctl.conf` includes this file via the `.include` directive
 3. After changes, ctld-agent reloads ctld to apply the configuration
 
-#### Configuration File
+This separation ensures:
+- User-managed configuration in `/etc/ctl.conf` is never modified
+- CSI targets are cleanly isolated and can be regenerated if needed
+- Atomic updates via temp file + rename
 
-By default, ctld-agent manages targets in `/etc/ctl.ucl`. The CSI-managed section is marked with:
+#### Prerequisites
 
-```text
-# BEGIN CSI-MANAGED TARGETS - DO NOT EDIT
+**1. Create your main CTL configuration:**
+
+```ucl
+# /etc/ctl.conf - User configuration (UCL format)
+
+auth-group {
+    ag0 {
+        auth-type = none
+    }
+}
+
+portal-group {
+    pg0 {
+        discovery-auth-group = no-authentication
+        listen = "0.0.0.0:3260"
+    }
+}
+
+# For NVMeoF support (FreeBSD 15.0+)
+transport-group {
+    tg0 {
+        discovery-auth-group = no-authentication
+        listen {
+            tcp = "0.0.0.0:4420"
+        }
+    }
+}
+
+# Include CSI-managed targets
+.include "/var/db/ctld-agent/csi-targets.conf"
+```
+
+**2. Create the CSI targets directory:**
+
+```bash
+mkdir -p /var/db/ctld-agent
+touch /var/db/ctld-agent/csi-targets.conf
+```
+
+**3. Enable ctld in `/etc/rc.conf`:**
+
+```bash
+ctld_enable="YES"
+```
+
+#### Startup Validation
+
+At startup, ctld-agent validates that the configured `--portal-group` and `--transport-group` exist in your `/etc/ctl.conf`. If validation fails, the agent will not start.
+
+#### Generated Configuration Example
+
+The ctld-agent generates targets in `/var/db/ctld-agent/csi-targets.conf`:
+
+```ucl
+# CSI-managed targets - DO NOT EDIT MANUALLY
+
+# iSCSI target
 target "iqn.2024-01.org.freebsd.csi:pvc-abc123" {
     auth-group = "ag0"
     portal-group = "pg0"
@@ -182,40 +242,24 @@ target "iqn.2024-01.org.freebsd.csi:pvc-abc123" {
         blocksize = 512
     }
 }
-# END CSI-MANAGED TARGETS
-```
 
-**Important:** Do not manually edit content between these markers. It will be overwritten.
-
-#### Prerequisites
-
-Ensure ctld is configured to use UCL format and the portal/auth groups exist:
-
-```text
-# /etc/ctl.ucl - Example base configuration
-
-auth-group ag0 {
-    auth-type = none
+# NVMeoF controller (FreeBSD 15.0+)
+controller "nqn.2024-01.org.freebsd.csi:pvc-xyz789" {
+    auth-group = "ag0"
+    transport-group = "tg0"
+    namespace ns0 {
+        path = "/dev/zvol/tank/csi/pvc-xyz789"
+        blocksize = 512
+    }
 }
-
-portal-group pg0 {
-    discovery-auth-group = no-authentication
-    listen = 0.0.0.0:3260
-}
-
-# CSI targets will be added below by ctld-agent
 ```
 
-Start ctld with UCL format (typically via `/etc/rc.local`):
-```bash
-/usr/sbin/ctld -u -f /etc/ctl.ucl
-```
+#### Protocol Support
 
-#### NVMeoF Limitations
-
-NVMeoF targets currently use `ctladm` directly and are ephemeral (not persisted across reboots).
-FreeBSD 15.0+ ctld supports NVMeoF via UCL configuration using `controller` blocks, but this is
-not yet implemented in ctld-agent. For persistent NVMeoF targets, configure them manually in the UCL file.
+| Protocol | FreeBSD Version | Configuration |
+|----------|-----------------|---------------|
+| iSCSI | 13.0+ | `target` + `portal-group` |
+| NVMeoF/TCP | 15.0+ | `controller` + `transport-group` |
 
 ---
 

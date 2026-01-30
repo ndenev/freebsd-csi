@@ -366,10 +366,10 @@ class StorageMonitor:
         """Read the ctld configuration file.
 
         Returns:
-            Contents of /etc/ctl.ucl
+            Contents of /etc/ctl.conf
         """
         try:
-            with open("/etc/ctl.ucl") as f:
+            with open("/etc/ctl.conf") as f:
                 return f.read()
         except FileNotFoundError:
             return ""
@@ -378,7 +378,30 @@ class StorageMonitor:
             try:
                 # Note: cat is not in PRIVILEGED_COMMANDS, so we need to use sudo explicitly
                 result = subprocess.run(
-                    ["sudo", "cat", "/etc/ctl.ucl"],
+                    ["sudo", "cat", "/etc/ctl.conf"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                return result.stdout
+            except subprocess.CalledProcessError:
+                return ""
+
+    def get_csi_targets_config(self) -> str:
+        """Read the CSI-managed targets configuration file.
+
+        Returns:
+            Contents of /var/db/ctld-agent/csi-targets.conf
+        """
+        try:
+            with open("/var/db/ctld-agent/csi-targets.conf") as f:
+                return f.read()
+        except FileNotFoundError:
+            return ""
+        except PermissionError:
+            try:
+                result = subprocess.run(
+                    ["sudo", "cat", "/var/db/ctld-agent/csi-targets.conf"],
                     capture_output=True,
                     text=True,
                     check=True,
