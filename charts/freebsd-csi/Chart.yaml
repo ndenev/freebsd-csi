@@ -2,8 +2,8 @@ apiVersion: v2
 name: freebsd-csi
 description: CSI driver for FreeBSD ZFS storage with iSCSI and NVMeoF support
 type: application
-version: 0.2.9
-appVersion: "0.2.9"
+version: 0.3.0
+appVersion: "0.3.0"
 kubeVersion: ">=1.25.0-0"
 keywords:
   - storage
