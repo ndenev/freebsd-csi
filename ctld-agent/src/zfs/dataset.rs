@@ -43,10 +43,7 @@ fn check_command_result(output: &Output, context: &str) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Map common error patterns to specific error types
-    if stderr.contains("does not exist")
-        || stderr.contains("not found")
-        || stderr.contains("could not find any")
-    {
+    if stderr.contains("does not exist") || stderr.contains("not found") {
         return Err(ZfsError::DatasetNotFound(context.to_string()));
     }
     if stderr.contains("already exists") {

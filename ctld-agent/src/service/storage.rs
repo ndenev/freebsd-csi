@@ -1468,204 +1468,158 @@ impl StorageAgent for StorageService {
         let volume_name = parts[0];
         let snap_name = parts[1];
 
-        // Delete ZFS snapshot with auto-promotion of dependent clones
-        //
-        // ZFS clone chains create complex dependencies: if B is cloned from A@snap, deleting
-        // snap requires promoting B first (which moves snap to B). In deep chains, the snapshot
-        // may need multiple promotions before it can be deleted.
-        //
-        // We use a loop with promotion tracking to handle this:
-        // 1. Find the snapshot (may have moved due to previous promotions)
-        // 2. Check for dependent clones
-        // 3. Promote any new clones (track what we've promoted to detect loops)
-        // 4. Attempt deletion
-        // 5. If deletion fails due to clones, repeat from step 1
-        //
-        // Loop detection: if we see the same clone twice, we have a circular dependency
-        // that can't be resolved by promotion alone (requires deleting volumes in order).
+        // Delete ZFS snapshot
+        // First try the direct path (fast path for common case)
+        // If not found, search by CSI snapshot ID property (handles promoted clones)
         {
-            use crate::zfs::FindSnapshotResult;
-            use std::collections::HashSet;
-
             let zfs = self.zfs.read().await;
-            let mut promoted_clones: HashSet<String> = HashSet::new();
-            const MAX_PROMOTION_ITERATIONS: usize = 10;
 
-            for iteration in 0..MAX_PROMOTION_ITERATIONS {
-                // Find current location of the snapshot
-                // First iteration: try the expected path (volume_name@snap_name)
-                // Subsequent iterations: always search by CSI ID property
-                let snapshot_path: Option<String> = if iteration == 0 {
-                    // Check if snapshot exists at expected path by trying to get its clones
-                    match zfs.snapshot_has_clones(volume_name, snap_name).await {
-                        Ok(_) => {
-                            // Snapshot exists at expected path - we'll get the full path below
-                            None // Signal to search by ID to get the full path
+            // Check for clones BEFORE attempting delete
+            // If the snapshot has clones, return FAILED_PRECONDITION with clear message
+            match zfs.snapshot_has_clones(volume_name, snap_name).await {
+                Ok(clones) if !clones.is_empty() => {
+                    // Extract volume names from full paths for user-friendly message
+                    let pvc_names: Vec<&str> =
+                        clones.iter().filter_map(|c| c.rsplit('/').next()).collect();
+
+                    timer.failure("has_dependent_clones");
+                    return Err(Status::failed_precondition(format!(
+                        "Cannot delete snapshot '{}': {} PVC(s) were restored from it: [{}]. \
+                         Delete those PVCs first, then retry.",
+                        req.snapshot_id,
+                        pvc_names.len(),
+                        pvc_names.join(", ")
+                    )));
+                }
+                Ok(_) => {
+                    // No clones, proceed with deletion
+                }
+                Err(crate::zfs::ZfsError::DatasetNotFound(_)) => {
+                    // Snapshot not at expected path - will handle below via find_snapshot_by_id
+                }
+                Err(e) => {
+                    timer.failure("zfs_error");
+                    return Err(Status::internal(format!(
+                        "failed to check snapshot clones: {}",
+                        e
+                    )));
+                }
+            }
+
+            // Try direct deletion first
+            match zfs.delete_snapshot(volume_name, snap_name).await {
+                Ok(()) => {
+                    info!(
+                        snapshot_id = %req.snapshot_id,
+                        "Deleted snapshot via direct path"
+                    );
+                }
+                Err(crate::zfs::ZfsError::DatasetNotFound(_)) => {
+                    // Snapshot not found at expected path
+                    // This can happen if the source volume was deleted and a clone was promoted,
+                    // which moves the snapshot to the promoted clone's dataset.
+                    // Search for the snapshot by its CSI snapshot ID property.
+                    info!(
+                        snapshot_id = %req.snapshot_id,
+                        "Snapshot not at expected path, searching by CSI ID property"
+                    );
+
+                    use crate::zfs::FindSnapshotResult;
+                    match zfs.find_snapshot_by_id(&req.snapshot_id).await {
+                        Ok(FindSnapshotResult::NotFound) => {
+                            // Snapshot truly doesn't exist - treat as already deleted (idempotent)
+                            info!(
+                                snapshot_id = %req.snapshot_id,
+                                "Snapshot not found anywhere, treating as already deleted"
+                            );
                         }
-                        Err(crate::zfs::ZfsError::DatasetNotFound(_)) => None,
+                        Ok(FindSnapshotResult::Found(path)) => {
+                            // Found the snapshot at a different location (promoted clone)
+                            info!(
+                                snapshot_id = %req.snapshot_id,
+                                path = %path,
+                                "Found migrated snapshot, checking for clones before delete"
+                            );
+
+                            // Check for clones at the new location too
+                            match zfs.snapshot_has_clones_by_path(&path).await {
+                                Ok(clones) if !clones.is_empty() => {
+                                    let pvc_names: Vec<&str> = clones
+                                        .iter()
+                                        .filter_map(|c| c.rsplit('/').next())
+                                        .collect();
+
+                                    timer.failure("has_dependent_clones");
+                                    return Err(Status::failed_precondition(format!(
+                                        "Cannot delete snapshot '{}' (now at '{}'): {} PVC(s) depend on it: [{}]. \
+                                         Delete those PVCs first, then retry.",
+                                        req.snapshot_id,
+                                        path,
+                                        pvc_names.len(),
+                                        pvc_names.join(", ")
+                                    )));
+                                }
+                                Ok(_) => {
+                                    // No clones, safe to delete
+                                }
+                                Err(e) => {
+                                    timer.failure("zfs_error");
+                                    return Err(Status::internal(format!(
+                                        "failed to check clones for migrated snapshot: {}",
+                                        e
+                                    )));
+                                }
+                            }
+
+                            if let Err(e) = zfs.delete_snapshot_by_path(&path).await {
+                                timer.failure("zfs_error");
+                                return Err(Status::internal(format!(
+                                    "failed to delete migrated snapshot at {}: {}",
+                                    path, e
+                                )));
+                            }
+                        }
+                        Ok(FindSnapshotResult::Ambiguous(count)) => {
+                            // Multiple snapshots with same ID - this should never happen
+                            // Refuse to delete to avoid data loss
+                            timer.failure("ambiguous_snapshot");
+                            return Err(Status::failed_precondition(format!(
+                                "Found {} snapshots with ID '{}' - refusing to delete. \
+                                 This indicates a bug or data corruption.",
+                                count, req.snapshot_id
+                            )));
+                        }
                         Err(e) => {
                             timer.failure("zfs_error");
                             return Err(Status::internal(format!(
-                                "failed to check snapshot: {}",
+                                "failed to search for snapshot: {}",
                                 e
                             )));
                         }
                     }
-                } else {
-                    None // Always search by ID after first iteration
-                };
-
-                // Search by CSI ID property to get the actual path
-                let snapshot_path = match snapshot_path {
-                    Some(path) => path,
-                    None => {
-                        match zfs.find_snapshot_by_id(&req.snapshot_id).await {
-                            Ok(FindSnapshotResult::Found(path)) => path,
-                            Ok(FindSnapshotResult::NotFound) => {
-                                // Snapshot truly doesn't exist - treat as already deleted
-                                info!(
-                                    snapshot_id = %req.snapshot_id,
-                                    "Snapshot not found, treating as already deleted"
-                                );
-                                timer.success();
-                                return Ok(Response::new(DeleteSnapshotResponse {}));
-                            }
-                            Ok(FindSnapshotResult::Ambiguous(count)) => {
-                                timer.failure("ambiguous_snapshot");
-                                return Err(Status::failed_precondition(format!(
-                                    "Found {} snapshots with ID '{}' - refusing to delete",
-                                    count, req.snapshot_id
-                                )));
-                            }
-                            Err(e) => {
-                                timer.failure("zfs_error");
-                                return Err(Status::internal(format!(
-                                    "failed to search for snapshot: {}",
-                                    e
-                                )));
-                            }
-                        }
-                    }
-                };
-
-                // Check for dependent clones at current location
-                let clones = match zfs.snapshot_has_clones_by_path(&snapshot_path).await {
-                    Ok(clones) => clones,
-                    Err(crate::zfs::ZfsError::DatasetNotFound(_)) => {
-                        // Snapshot vanished - already deleted
-                        info!(
-                            snapshot_id = %req.snapshot_id,
-                            "Snapshot disappeared, treating as deleted"
-                        );
-                        timer.success();
-                        return Ok(Response::new(DeleteSnapshotResponse {}));
-                    }
-                    Err(e) => {
-                        timer.failure("zfs_error");
-                        return Err(Status::internal(format!(
-                            "failed to check clones for {}: {}",
-                            snapshot_path, e
-                        )));
-                    }
-                };
-
-                if clones.is_empty() {
-                    // No clones - safe to delete
-                    match zfs.delete_snapshot_by_path(&snapshot_path).await {
-                        Ok(()) => {
-                            info!(
-                                snapshot_id = %req.snapshot_id,
-                                path = %snapshot_path,
-                                iterations = iteration + 1,
-                                "Deleted snapshot successfully"
-                            );
-                            timer.success();
-                            return Ok(Response::new(DeleteSnapshotResponse {}));
-                        }
-                        Err(crate::zfs::ZfsError::DatasetNotFound(_)) => {
-                            // Already deleted
-                            info!(
-                                snapshot_id = %req.snapshot_id,
-                                "Snapshot already deleted"
-                            );
-                            timer.success();
-                            return Ok(Response::new(DeleteSnapshotResponse {}));
-                        }
-                        Err(e) => {
-                            timer.failure("zfs_error");
-                            return Err(Status::internal(format!(
-                                "failed to delete snapshot {}: {}",
-                                snapshot_path, e
-                            )));
-                        }
-                    }
                 }
-
-                // Snapshot has clones - check for promotion loop
-                let clone_names: Vec<String> = clones
-                    .iter()
-                    .filter_map(|c| c.rsplit('/').next())
-                    .map(|s| s.to_string())
-                    .collect();
-
-                // Check if all clones have already been promoted (loop detected)
-                let new_clones: Vec<&String> = clone_names
-                    .iter()
-                    .filter(|c| !promoted_clones.contains(*c))
-                    .collect();
-
-                if new_clones.is_empty() {
-                    // All clones were already promoted - we have a circular dependency
-                    // This happens in deep clone chains where the snapshot has transitive
-                    // dependencies through multiple levels of clones
-                    timer.failure("circular_dependency");
-                    return Err(Status::failed_precondition(format!(
-                        "Cannot delete snapshot '{}': circular clone dependency detected. \
-                         The snapshot has dependent clones that form a chain: {:?}. \
-                         Delete the dependent volumes first, starting from the leaf of the chain.",
-                        req.snapshot_id, clone_names
+                Err(crate::zfs::ZfsError::InvalidName(msg)) => {
+                    timer.failure("invalid_argument");
+                    return Err(Status::invalid_argument(msg));
+                }
+                Err(e) => {
+                    timer.failure("zfs_error");
+                    return Err(Status::internal(format!(
+                        "failed to delete snapshot: {}",
+                        e
                     )));
                 }
-
-                info!(
-                    snapshot_id = %req.snapshot_id,
-                    path = %snapshot_path,
-                    iteration = iteration + 1,
-                    clone_count = new_clones.len(),
-                    clones = ?new_clones,
-                    "Snapshot has dependent clones, promoting to allow deletion"
-                );
-
-                // Promote new clones
-                for clone_name in &new_clones {
-                    info!(
-                        snapshot_id = %req.snapshot_id,
-                        clone = %clone_name,
-                        "Promoting clone to transfer snapshot ownership"
-                    );
-
-                    if let Err(e) = zfs.promote_clone(clone_name).await {
-                        warn!(
-                            clone = %clone_name,
-                            error = %e,
-                            "Failed to promote clone (may already be promoted)"
-                        );
-                    }
-
-                    promoted_clones.insert(clone_name.to_string());
-                }
-
-                // Loop back to find snapshot at new location and try again
             }
-
-            // Exceeded max iterations
-            timer.failure("max_iterations");
-            Err(Status::internal(format!(
-                "Failed to delete snapshot '{}' after {} promotion attempts. \
-                 Complex clone chain detected.",
-                req.snapshot_id, MAX_PROMOTION_ITERATIONS
-            )))
         }
+
+        // Note: No in-memory cache to update - ZFS is the source of truth.
+
+        info!(
+            "Deleted snapshot: {} (volume={}, snap={})",
+            req.snapshot_id, volume_name, snap_name
+        );
+        timer.success();
+        Ok(Response::new(DeleteSnapshotResponse {}))
     }
 
     /// List snapshots, optionally filtered by source volume

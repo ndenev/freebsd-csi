@@ -3,40 +3,12 @@
 Tests Delete vs Retain reclaim policies.
 """
 
-from typing import Callable, Generator
+from typing import Callable
 
 import pytest
 
 from lib.k8s_client import K8sClient
 from lib.storage_monitor import StorageMonitor
-
-
-@pytest.fixture
-def retain_cleanup(
-    k8s: K8sClient, storage: StorageMonitor
-) -> Generator[list[str], None, None]:
-    """Track and clean up Retain policy resources.
-
-    Retain policy volumes need special cleanup because Kubernetes doesn't
-    call DeleteVolume when PVs are deleted. This fixture ensures cleanup
-    happens even if the test fails.
-
-    Yields:
-        List to append PV names that need Retain policy cleanup
-    """
-    pvs_to_cleanup: list[str] = []
-    yield pvs_to_cleanup
-
-    # Cleanup runs even on test failure
-    for pv_name in pvs_to_cleanup:
-        try:
-            # 1. Delete PV from Kubernetes (if it still exists)
-            k8s.delete("pv", pv_name, wait=True, ignore_not_found=True)
-            # 2. Clean up backend storage directly via ctld-agent
-            storage.cleanup_volume(pv_name)
-        except Exception as e:
-            # Log but don't fail - we want to attempt all cleanups
-            print(f"Warning: Failed to cleanup retain volume {pv_name}: {e}")
 
 
 class TestReclaimPolicy:
@@ -79,7 +51,6 @@ class TestReclaimPolicy:
         storage: StorageMonitor,
         pvc_factory: Callable,
         wait_pvc_bound: Callable,
-        retain_cleanup: list[str],
     ):
         """Retain policy keeps PV and backend storage after PVC delete."""
         # Use StorageClass with Retain policy
@@ -90,9 +61,6 @@ class TestReclaimPolicy:
 
         pv_name = k8s.get_pvc_volume(pvc_name)
         dataset = f"{storage.csi_path}/{pv_name}"
-
-        # Register for cleanup (runs even on test failure)
-        retain_cleanup.append(pv_name)
 
         # Delete PVC and wait for PV to transition to Released
         k8s.delete("pvc", pvc_name, wait=True)
@@ -112,7 +80,11 @@ class TestReclaimPolicy:
             pv_name, "iscsi"
         ), "Export removed with Retain"
 
-        # Cleanup is handled by retain_cleanup fixture
+        # Manual cleanup for test hygiene:
+        # 1. Delete the PV from Kubernetes
+        k8s.delete("pv", pv_name, wait=True)
+        # 2. Clean up backend storage (ZFS dataset) since DeleteVolume won't be called
+        storage.cleanup_volume(pv_name)
 
     def test_delete_policy_with_snapshots(
         self,
@@ -153,7 +125,6 @@ class TestReclaimPolicy:
         pvc_factory: Callable,
         wait_pvc_bound: Callable,
         wait_pv_deleted: Callable,
-        retain_cleanup: list[str],
     ):
         """Volumes with different reclaim policies behave independently."""
         # Create one with Delete and one with Retain
@@ -170,9 +141,6 @@ class TestReclaimPolicy:
         delete_pv = k8s.get_pvc_volume(delete_pvc)
         retain_pv = k8s.get_pvc_volume(retain_pvc)
 
-        # Register Retain policy PV for cleanup (runs even on test failure)
-        retain_cleanup.append(retain_pv)
-
         delete_dataset = f"{storage.csi_path}/{delete_pv}"
         retain_dataset = f"{storage.csi_path}/{retain_pv}"
 
@@ -188,4 +156,6 @@ class TestReclaimPolicy:
         assert k8s.get("pv", retain_pv) is not None
         assert storage.verify_dataset_exists(retain_dataset)
 
-        # Cleanup is handled by retain_cleanup fixture
+        # Cleanup retained PV and backend storage
+        k8s.delete("pv", retain_pv, wait=True)
+        storage.cleanup_volume(retain_pv)

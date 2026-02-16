@@ -581,16 +581,11 @@ class StorageMonitor:
     def list_iscsi_targets(self) -> list[dict]:
         """List iSCSI targets from ctld perspective.
 
-        Reads both the main ctld config and CSI-managed targets config,
-        since CSI targets are written to the separate CSI targets file.
-
         Returns:
             List of target info dicts
         """
-        # Read both configs - CSI targets are in the CSI targets file
-        main_config = self.get_ctld_config()
-        csi_config = self.get_csi_targets_config()
-        config = main_config + "\n" + csi_config
+        # Parse ctl.conf for target definitions
+        config = self.get_ctld_config()
         targets = []
 
         # Find target blocks with nested braces support
@@ -672,16 +667,10 @@ class StorageMonitor:
     def list_auth_groups(self) -> list["StorageMonitor.AuthGroupInfo"]:
         """Parse auth-group blocks from ctld config.
 
-        Reads both the main ctld config and CSI-managed targets config,
-        since CSI auth-groups are written to the separate CSI targets file.
-
         Returns:
             List of AuthGroupInfo with parsed CHAP credentials
         """
-        # Read both configs - CSI auth-groups are in the CSI targets file
-        main_config = self.get_ctld_config()
-        csi_config = self.get_csi_targets_config()
-        config = main_config + "\n" + csi_config
+        config = self.get_ctld_config()
         auth_groups = []
 
         # Pattern to match auth-group blocks with nested braces
