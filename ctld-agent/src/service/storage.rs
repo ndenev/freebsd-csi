@@ -932,17 +932,44 @@ impl StorageAgent for StorageService {
             return Err(Status::invalid_argument("volume_id cannot be empty"));
         }
 
-        // Get volume metadata - if not in cache, we'll still try to clean up ZFS
+        // Get volume metadata from in-memory cache.
+        // We only perform destructive actions for CSI-managed volumes.
         let metadata = {
             let volumes = self.volumes.read().await;
             volumes.get(&req.volume_id).cloned()
         };
 
+        // Security: do not derive dataset names from untrusted volume_id when
+        // metadata is missing. This prevents deleting operator-managed datasets
+        // that are not tracked by CSI.
+        if metadata.is_none() {
+            let zfs = self.zfs.read().await;
+            let exists = zfs.volume_exists(&req.volume_id).await.map_err(|e| {
+                Status::internal(format!("failed to check volume existence: {}", e))
+            })?;
+
+            if exists {
+                timer.failure("volume_not_csi_managed");
+                return Err(Status::failed_precondition(format!(
+                    "Volume '{}' exists but is not CSI-managed; refusing deletion",
+                    req.volume_id
+                )));
+            }
+
+            debug!(
+                volume = %req.volume_id,
+                "Volume not found in CSI metadata and dataset does not exist (idempotent delete)"
+            );
+            timer.success();
+            return Ok(Response::new(DeleteVolumeResponse {}));
+        }
+
         // Determine volume name early (needed for snapshot check)
         let volume_name = metadata
             .as_ref()
-            .map(|m| m.name.clone())
-            .unwrap_or_else(|| req.volume_id.clone());
+            .expect("metadata checked above")
+            .name
+            .clone();
 
         // Handle clone dependencies: auto-promote clones to allow source deletion.
         // When volume A has snapshot A@snap with clone B, we must promote B first

@@ -1277,6 +1277,14 @@ impl ZfsManager {
         Ok(Capacity { available, used })
     }
 
+    /// Check whether a managed child volume exists under the parent dataset
+    #[instrument(skip(self))]
+    pub async fn volume_exists(&self, name: &str) -> Result<bool> {
+        validate_name(name)?;
+        let full_name = self.full_path(name);
+        self.dataset_exists(&full_name).await
+    }
+
     /// Check if a dataset exists
     async fn dataset_exists(&self, full_name: &str) -> Result<bool> {
         let output = Command::new("zfs")
