@@ -137,6 +137,65 @@ impl CtlManager {
         auth: AuthConfig,
         ctl_options: CtlOptions,
     ) -> Result<Export> {
+        let target_name: TargetName = match export_type {
+            ExportType::Iscsi => self.generate_iqn(volume_name)?.into(),
+            ExportType::Nvmeof => self.generate_nqn(volume_name)?.into(),
+        };
+
+        self.export_volume_with_target(
+            volume_name,
+            device_path,
+            target_name,
+            lun_id,
+            auth,
+            ctl_options,
+        )
+    }
+
+    /// Export a volume with a previously persisted target name.
+    ///
+    /// This is used when reconstructing or retrying existing CSI-managed
+    /// volumes whose target identity is stored in ZFS metadata.
+    #[instrument(skip(self, auth, ctl_options))]
+    pub fn export_volume_with_target_name(
+        &self,
+        volume_name: &str,
+        device_path: &str,
+        target_name: &str,
+        lun_id: u32,
+        auth: AuthConfig,
+        ctl_options: CtlOptions,
+    ) -> Result<Export> {
+        let target_name: TargetName = if target_name.starts_with("iqn.") {
+            Iqn::parse(target_name)?.into()
+        } else if target_name.starts_with("nqn.") {
+            Nqn::parse(target_name)?.into()
+        } else {
+            return Err(CtlError::InvalidName(format!(
+                "target name '{}' must be an IQN or NQN",
+                target_name
+            )));
+        };
+
+        self.export_volume_with_target(
+            volume_name,
+            device_path,
+            target_name,
+            lun_id,
+            auth,
+            ctl_options,
+        )
+    }
+
+    fn export_volume_with_target(
+        &self,
+        volume_name: &str,
+        device_path: &str,
+        target_name: TargetName,
+        lun_id: u32,
+        auth: AuthConfig,
+        ctl_options: CtlOptions,
+    ) -> Result<Export> {
         // Validate and parse inputs using newtypes
         let device_path = DevicePath::parse(device_path)?;
 
@@ -145,9 +204,9 @@ impl CtlManager {
         // volumes within our managed ZFS dataset hierarchy.
         device_path.validate_parent_dataset(&self.parent_dataset)?;
 
-        let target_name: TargetName = match export_type {
-            ExportType::Iscsi => self.generate_iqn(volume_name)?.into(),
-            ExportType::Nvmeof => self.generate_nqn(volume_name)?.into(),
+        let export_type = match &target_name {
+            TargetName::Iqn(_) => ExportType::Iscsi,
+            TargetName::Nqn(_) => ExportType::Nvmeof,
         };
 
         debug!(
@@ -548,5 +607,33 @@ mod tests {
 
         assert!(export.auth.is_some());
         assert_eq!(export.auth.auth_group_name("vol2"), "ag-vol2");
+    }
+
+    #[test]
+    fn test_export_volume_with_target_name_uses_persisted_target() {
+        let manager = CtlManager::new(
+            "iqn.2026-05.com.example.changed".to_string(),
+            "nqn.2026-05.com.example.changed".to_string(),
+            "pg0".to_string(),
+            "tg0".to_string(),
+            "tank/csi".to_string(),
+        )
+        .unwrap();
+
+        let export = manager
+            .export_volume_with_target_name(
+                "vol1",
+                "/dev/zvol/tank/csi/vol1",
+                "iqn.2024-01.org.freebsd.csi:vol1",
+                0,
+                AuthConfig::None,
+                CtlOptions::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            export.target_name.to_string(),
+            "iqn.2024-01.org.freebsd.csi:vol1"
+        );
     }
 }

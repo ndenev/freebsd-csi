@@ -99,6 +99,13 @@ pub async fn write_auth_db(path: impl AsRef<Path>, db: &AuthDb) -> Result<(), Au
     let new_path = path.with_extension("json.new");
     let old_path = path.with_extension("json.old");
 
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
     // 1. Write to .new file
     let content = serde_json::to_string_pretty(db)?;
     let mut file = tokio::fs::File::create(&new_path).await?;
@@ -172,6 +179,23 @@ mod tests {
 
         let db = load_auth_db(&auth_path).await.unwrap();
         assert!(db.is_empty(), "Missing file should return empty AuthDb");
+    }
+
+    #[tokio::test]
+    async fn test_write_auth_db_creates_parent_directory() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let auth_path = temp_dir.path().join("var/db/ctld-agent/auth.json");
+
+        let mut db = AuthDb::new();
+        db.insert("vol1".to_string(), ChapCredentials::new("user1", "secret1"));
+
+        write_auth_db(&auth_path, &db).await.unwrap();
+
+        assert!(auth_path.exists(), "Auth DB file should be created");
+        let loaded = load_auth_db(&auth_path).await.unwrap();
+        assert_eq!(loaded.get("vol1"), db.get("vol1"));
     }
 
     #[tokio::test]
