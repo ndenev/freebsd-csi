@@ -22,7 +22,9 @@ use crate::ctl::{
     IscsiChapAuth, NvmeAuth, spawn_config_writer,
 };
 use crate::metrics::{self, OperationTimer};
-use crate::zfs::{VolumeMetadata as ZfsVolumeMetadata, ZfsManager};
+use crate::zfs::{
+    VolumeMetadata as ZfsVolumeMetadata, VolumeMetadataLookup as MissingMetadataLookup, ZfsManager,
+};
 
 /// Generated protobuf types and service trait
 pub mod proto {
@@ -164,36 +166,76 @@ fn paginate<T>(
 
 #[derive(Debug, PartialEq, Eq)]
 enum MissingMetadataDeleteAction {
+    UseZfsMetadata(Box<VolumeMetadata>),
     CleanupStaleExport,
 }
 
 fn missing_metadata_delete_action(
     volume_id: &str,
-    volume_exists: std::result::Result<bool, crate::zfs::ZfsError>,
+    metadata_lookup: std::result::Result<MissingMetadataLookup, crate::zfs::ZfsError>,
 ) -> Result<MissingMetadataDeleteAction, Status> {
-    let exists = volume_exists.map_err(|e| match e {
+    let lookup = metadata_lookup.map_err(|e| match e {
         crate::zfs::ZfsError::InvalidName(msg) => {
             Status::invalid_argument(format!("invalid volume_id '{}': {}", volume_id, msg))
         }
+        crate::zfs::ZfsError::ParseError(msg) => Status::failed_precondition(format!(
+            "Volume '{}' exists but has invalid CSI metadata: {}; refusing deletion",
+            volume_id, msg
+        )),
         other => Status::internal(format!("failed to check volume existence: {}", other)),
     })?;
 
-    if exists {
-        return Err(Status::failed_precondition(format!(
+    match lookup {
+        MissingMetadataLookup::Found(zfs_metadata) => {
+            let metadata = volume_metadata_from_zfs(volume_id, &zfs_metadata)?;
+            Ok(MissingMetadataDeleteAction::UseZfsMetadata(Box::new(
+                metadata,
+            )))
+        }
+        MissingMetadataLookup::MissingMetadata => Err(Status::failed_precondition(format!(
             "Volume '{}' exists but is not CSI-managed; refusing deletion",
             volume_id
-        )));
+        ))),
+        MissingMetadataLookup::DatasetNotFound => {
+            debug!(
+                volume = %volume_id,
+                "Volume not found in CSI metadata and dataset does not exist; checking for stale export"
+            );
+            Ok(MissingMetadataDeleteAction::CleanupStaleExport)
+        }
     }
+}
 
-    debug!(
-        volume = %volume_id,
-        "Volume not found in CSI metadata and dataset does not exist; checking for stale export"
-    );
-    Ok(MissingMetadataDeleteAction::CleanupStaleExport)
+fn volume_metadata_from_zfs(
+    volume_id: &str,
+    zfs_meta: &ZfsVolumeMetadata,
+) -> Result<VolumeMetadata, Status> {
+    let export_type = ctl_to_proto_export_type(zfs_meta.export_type);
+    let auth = if let Some(ref auth_group) = zfs_meta.auth_group {
+        AuthConfig::GroupRef(auth_group.clone())
+    } else {
+        AuthConfig::None
+    };
+
+    Ok(VolumeMetadata {
+        id: volume_id.to_string(),
+        name: volume_id.to_string(),
+        export_type,
+        target_name: zfs_meta.target_name.clone(),
+        lun_id: zfs_meta.lun_id.unwrap_or(0).try_into().map_err(|_| {
+            Status::internal(format!(
+                "LUN ID {} for volume '{}' exceeds i32::MAX",
+                zfs_meta.lun_id.unwrap_or(0),
+                volume_id
+            ))
+        })?,
+        parameters: zfs_meta.parameters.clone(),
+        auth,
+    })
 }
 
 /// Internal tracking of volume metadata
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct VolumeMetadata {
     /// Volume ID (same as name for now)
     id: String,
@@ -964,22 +1006,59 @@ impl StorageAgent for StorageService {
 
         // Get volume metadata from in-memory cache.
         // We only perform destructive actions for CSI-managed volumes.
-        let metadata = {
+        let mut metadata = {
             let volumes = self.volumes.read().await;
             volumes.get(&req.volume_id).cloned()
         };
 
-        // Security: do not derive dataset names from untrusted volume_id when
-        // metadata is missing. This prevents deleting operator-managed datasets
-        // that are not tracked by CSI.
+        // If the cache is missing metadata, read the ZFS metadata property
+        // directly. Versioned metadata is the ownership marker; existing
+        // datasets without valid metadata are not CSI-managed.
         if metadata.is_none() {
             let zfs = self.zfs.read().await;
             let action = missing_metadata_delete_action(
                 &req.volume_id,
-                zfs.volume_exists(&req.volume_id).await,
+                zfs.get_volume_metadata(&req.volume_id).await,
             );
             match action {
-                Ok(MissingMetadataDeleteAction::CleanupStaleExport) => {}
+                Ok(MissingMetadataDeleteAction::UseZfsMetadata(zfs_metadata)) => {
+                    metadata = Some(*zfs_metadata);
+                }
+                Ok(MissingMetadataDeleteAction::CleanupStaleExport) => {
+                    let needs_config_write = {
+                        let ctl = self.ctl.read().await;
+                        match ctl.unexport_volume(&req.volume_id) {
+                            Ok(()) => true,
+                            Err(CtlError::TargetNotFound(_)) => {
+                                debug!(
+                                    "Volume {} has no stale export (idempotent delete)",
+                                    req.volume_id
+                                );
+                                false
+                            }
+                            Err(e) => {
+                                error!("Failed to unexport stale volume: {}", e);
+                                timer.failure("unexport_error");
+                                return Err(Status::internal(format!(
+                                    "Failed to unexport stale volume: {}. Cannot safely complete delete.",
+                                    e
+                                )));
+                            }
+                        }
+                    };
+
+                    if needs_config_write && let Err(e) = self.config_writer.write_config().await {
+                        error!("Failed to write CTL config after stale unexport: {}", e);
+                        timer.failure("config_write_error");
+                        return Err(Status::internal(format!(
+                            "Stale unexport succeeded but CTL config write failed: {}. Export may reappear on restart.",
+                            e
+                        )));
+                    }
+
+                    timer.success();
+                    return Ok(Response::new(DeleteVolumeResponse {}));
+                }
                 Err(status) => {
                     timer.failure(match status.code() {
                         tonic::Code::InvalidArgument => "invalid_argument",
@@ -989,40 +1068,6 @@ impl StorageAgent for StorageService {
                     return Err(status);
                 }
             }
-
-            let needs_config_write = {
-                let ctl = self.ctl.read().await;
-                match ctl.unexport_volume(&req.volume_id) {
-                    Ok(()) => true,
-                    Err(CtlError::TargetNotFound(_)) => {
-                        debug!(
-                            "Volume {} has no stale export (idempotent delete)",
-                            req.volume_id
-                        );
-                        false
-                    }
-                    Err(e) => {
-                        error!("Failed to unexport stale volume: {}", e);
-                        timer.failure("unexport_error");
-                        return Err(Status::internal(format!(
-                            "Failed to unexport stale volume: {}. Cannot safely complete delete.",
-                            e
-                        )));
-                    }
-                }
-            };
-
-            if needs_config_write && let Err(e) = self.config_writer.write_config().await {
-                error!("Failed to write CTL config after stale unexport: {}", e);
-                timer.failure("config_write_error");
-                return Err(Status::internal(format!(
-                    "Stale unexport succeeded but CTL config write failed: {}. Export may reappear on restart.",
-                    e
-                )));
-            }
-
-            timer.success();
-            return Ok(Response::new(DeleteVolumeResponse {}));
         }
 
         // Determine volume name early (needed for snapshot check)
@@ -1884,8 +1929,49 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_metadata_delete_existing_dataset_is_failed_precondition() {
-        let err = missing_metadata_delete_action("operator-volume", Ok(true)).unwrap_err();
+    fn test_missing_metadata_delete_with_zfs_metadata_uses_metadata() {
+        let mut parameters = HashMap::new();
+        parameters.insert("exportType".to_string(), "nvmeof".to_string());
+
+        let zfs_metadata = ZfsVolumeMetadata::new(
+            CtlExportType::Nvmeof,
+            "nqn.2024-01.org.freebsd.csi:pvc-123".to_string(),
+            Some(7),
+            None,
+            parameters.clone(),
+            1234567890,
+            Some("ag-pvc-123".to_string()),
+        );
+
+        let action = missing_metadata_delete_action(
+            "pvc-123",
+            Ok(MissingMetadataLookup::Found(zfs_metadata)),
+        )
+        .unwrap();
+
+        let MissingMetadataDeleteAction::UseZfsMetadata(metadata) = action else {
+            panic!("expected ZFS metadata to be used for cache-miss delete");
+        };
+
+        assert_eq!(metadata.id, "pvc-123");
+        assert_eq!(metadata.name, "pvc-123");
+        assert_eq!(metadata.export_type, ExportType::Nvmeof);
+        assert_eq!(metadata.target_name, "nqn.2024-01.org.freebsd.csi:pvc-123");
+        assert_eq!(metadata.lun_id, 7);
+        assert_eq!(metadata.parameters, parameters);
+        assert_eq!(
+            metadata.auth,
+            AuthConfig::GroupRef("ag-pvc-123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_missing_metadata_delete_existing_dataset_without_metadata_is_failed_precondition() {
+        let err = missing_metadata_delete_action(
+            "operator-volume",
+            Ok(MissingMetadataLookup::MissingMetadata),
+        )
+        .unwrap_err();
 
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
         assert!(
@@ -1896,7 +1982,11 @@ mod tests {
 
     #[test]
     fn test_missing_metadata_delete_absent_dataset_cleans_stale_export() {
-        let action = missing_metadata_delete_action("already-gone", Ok(false)).unwrap();
+        let action = missing_metadata_delete_action(
+            "already-gone",
+            Ok(MissingMetadataLookup::DatasetNotFound),
+        )
+        .unwrap();
 
         assert_eq!(action, MissingMetadataDeleteAction::CleanupStaleExport);
     }
@@ -1913,5 +2003,20 @@ mod tests {
 
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("invalid volume_id"));
+    }
+
+    #[test]
+    fn test_missing_metadata_delete_invalid_zfs_metadata_is_failed_precondition() {
+        let err = missing_metadata_delete_action(
+            "bad-metadata",
+            Err(crate::zfs::ZfsError::ParseError(
+                "missing field `schema_version`".to_string(),
+            )),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(err.message().contains("invalid CSI metadata"));
+        assert!(err.message().contains("refusing deletion"));
     }
 }

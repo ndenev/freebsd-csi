@@ -395,7 +395,7 @@ service ctld_agent restart
 
 # Verify volumes are restored
 ctladm portlist
-zfs get org.freebsd.csi:managed tank/csi -r
+zfs list -r -t volume -o name,user:csi:metadata tank/csi
 ```
 
 ### Recovering orphaned volumes
@@ -404,7 +404,7 @@ If volumes exist in ZFS but are not exported:
 
 ```bash
 # On FreeBSD, list CSI-managed volumes
-zfs list -o name,org.freebsd.csi:managed -r tank/csi | grep true
+zfs list -r -t volume -o name,user:csi:metadata tank/csi | grep -v ' -$'
 
 # Restart agent to reconcile
 service ctld_agent restart
