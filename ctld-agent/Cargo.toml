@@ -15,7 +15,7 @@ path = "src/main.rs"
 [dependencies]
 tokio.workspace = true
 tonic.workspace = true
-tonic-prost = "0.14"
+tonic-prost = "0.14.6"
 prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -23,17 +23,17 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
-uclicious = "0.1"
-tempfile = "3.15"
-sha2 = "0.10"
-hex = "0.4"
+uclicious = "0.1.8"
+tempfile = "3.27.0"
+sha2 = "0.11.0"
+hex = "0.4.3"
 
 # Metrics
-metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+metrics = "0.24.6"
+metrics-exporter-prometheus = "0.18.3"
 
 [dev-dependencies]
-futures = "0.3"
+futures = "0.3.32"
 
 [build-dependencies]
-tonic-prost-build = "0.14"
+tonic-prost-build = "0.14.6"
