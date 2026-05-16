@@ -1,5 +1,5 @@
 name: ctld-agent
-version: "0.1.0"
+version: "0.4.0"
 origin: sysutils/ctld-agent
 comment: "FreeBSD ZFS/CTL storage agent for Kubernetes CSI"
 www: "https://github.com/ndenev/freebsd-csi"

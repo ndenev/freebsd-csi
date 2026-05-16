@@ -31,6 +31,17 @@ pub struct CsiSnapshotInfo {
     pub creation_time: i64,
 }
 
+/// Result of looking up CSI volume metadata for one dataset.
+#[derive(Debug, Clone)]
+pub enum VolumeMetadataLookup {
+    /// Dataset exists and has valid versioned CSI metadata.
+    Found(VolumeMetadata),
+    /// Dataset exists but has no CSI metadata property.
+    MissingMetadata,
+    /// Dataset does not exist.
+    DatasetNotFound,
+}
+
 /// Check command output for success or return appropriate error.
 ///
 /// This helper reduces boilerplate for checking command results.
@@ -51,6 +62,18 @@ fn check_command_result(output: &Output, context: &str) -> Result<()> {
     }
     if stderr.contains("dataset is busy") {
         return Err(ZfsError::DatasetBusy(context.to_string()));
+    }
+
+    Err(ZfsError::CommandFailed(format!("{}: {}", context, stderr)))
+}
+
+fn classify_dataset_exists(success: bool, stderr: &str, context: &str) -> Result<bool> {
+    if success {
+        return Ok(true);
+    }
+
+    if stderr.contains("does not exist") || stderr.contains("not found") {
+        return Ok(false);
     }
 
     Err(ZfsError::CommandFailed(format!("{}: {}", context, stderr)))
@@ -731,6 +754,69 @@ impl ZfsManager {
         Ok(())
     }
 
+    /// Read CSI metadata for a single managed child volume.
+    ///
+    /// This distinguishes absent datasets from existing datasets without
+    /// metadata so destructive callers can enforce metadata as the CSI
+    /// ownership marker.
+    #[instrument(skip(self))]
+    pub async fn get_volume_metadata(&self, name: &str) -> Result<VolumeMetadataLookup> {
+        validate_name(name)?;
+        let full_name = self.full_path(name);
+
+        let output = Command::new("zfs")
+            .args(["get", "-H", "-o", "value", METADATA_PROPERTY, &full_name])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("does not exist") || stderr.contains("not found") {
+                return Ok(VolumeMetadataLookup::DatasetNotFound);
+            }
+            return Err(ZfsError::CommandFailed(format!(
+                "{}: {}",
+                full_name, stderr
+            )));
+        }
+
+        let metadata_json = String::from_utf8_lossy(&output.stdout);
+        let metadata_json = metadata_json.trim();
+        if metadata_json.is_empty() || metadata_json == "-" {
+            return Ok(VolumeMetadataLookup::MissingMetadata);
+        }
+
+        let mut metadata = serde_json::from_str::<VolumeMetadata>(metadata_json)
+            .map_err(|e| ZfsError::ParseError(format!("invalid CSI metadata: {}", e)))?;
+
+        if metadata.schema_version > CURRENT_SCHEMA_VERSION {
+            return Err(ZfsError::ParseError(format!(
+                "metadata schema version {} is newer than supported version {}",
+                metadata.schema_version, CURRENT_SCHEMA_VERSION
+            )));
+        }
+
+        if metadata.needs_migration() {
+            let from_version = metadata.schema_version;
+            metadata.migrate();
+            info!(
+                volume = %name,
+                from_version = from_version,
+                to_version = CURRENT_SCHEMA_VERSION,
+                "Migrated metadata schema"
+            );
+            if let Err(e) = self.set_volume_metadata(name, &metadata).await {
+                warn!(
+                    volume = %name,
+                    error = %e,
+                    "Failed to persist migrated metadata (will retry on next metadata lookup)"
+                );
+            }
+        }
+
+        Ok(VolumeMetadataLookup::Found(metadata))
+    }
+
     /// Clear volume metadata (on deletion)
     #[instrument(skip(self))]
     pub async fn clear_volume_metadata(&self, name: &str) -> Result<()> {
@@ -1277,6 +1363,14 @@ impl ZfsManager {
         Ok(Capacity { available, used })
     }
 
+    /// Check whether a managed child volume exists under the parent dataset
+    #[instrument(skip(self))]
+    pub async fn volume_exists(&self, name: &str) -> Result<bool> {
+        validate_name(name)?;
+        let full_name = self.full_path(name);
+        self.dataset_exists(&full_name).await
+    }
+
     /// Check if a dataset exists
     async fn dataset_exists(&self, full_name: &str) -> Result<bool> {
         let output = Command::new("zfs")
@@ -1284,7 +1378,8 @@ impl ZfsManager {
             .output()
             .await?;
 
-        Ok(output.status.success())
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        classify_dataset_exists(output.status.success(), &stderr, full_name)
     }
 
     /// Get detailed information about a dataset by its full name
@@ -1413,5 +1508,28 @@ mod tests {
             parent_dataset: "tank/csi".to_string(),
         };
         assert_eq!(manager.get_device_path("vol1"), "/dev/zvol/tank/csi/vol1");
+    }
+
+    #[test]
+    fn test_strict_dataset_exists_maps_not_found_to_false() {
+        let result = classify_dataset_exists(
+            false,
+            "cannot open 'tank/csi/missing': dataset does not exist",
+            "tank/csi/missing",
+        )
+        .unwrap();
+
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_strict_dataset_exists_propagates_operational_failure() {
+        let result = classify_dataset_exists(
+            false,
+            "cannot open 'tank/csi/vol1': pool I/O is currently suspended",
+            "tank/csi/vol1",
+        );
+
+        assert!(matches!(result, Err(ZfsError::CommandFailed(_))));
     }
 }

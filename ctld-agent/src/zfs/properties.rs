@@ -13,10 +13,10 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 ///
 /// # Schema Versioning
 /// The `schema_version` field tracks the metadata format version.
-/// - Version 1: Original format (implicit, missing field)
+/// - Version 1: Original versioned format
 /// - Version 2: Standardized camelCase parameters
 ///
-/// Old metadata without `schema_version` is treated as v1 and remains compatible.
+/// Metadata without `schema_version` is not a valid CSI ownership marker.
 ///
 /// # Security Note
 /// This struct is serialized to ZFS user properties which are readable
@@ -26,8 +26,6 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumeMetadata {
     /// Schema version for forward compatibility
-    /// Defaults to 1 for backwards compatibility with old metadata
-    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     /// Export type (iSCSI or NVMeoF)
     pub export_type: ExportType,
@@ -49,11 +47,6 @@ pub struct VolumeMetadata {
     /// None means "no-authentication".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_group: Option<String>,
-}
-
-/// Default schema version for deserialization of old metadata
-fn default_schema_version() -> u32 {
-    1
 }
 
 impl VolumeMetadata {
@@ -144,8 +137,8 @@ mod tests {
     }
 
     #[test]
-    fn test_volume_metadata_old_format_gets_version_1() {
-        // Old format without schema_version field
+    fn test_volume_metadata_unversioned_format_is_rejected() {
+        // Metadata without schema_version is not a valid ownership marker.
         let json = r#"{
             "export_type": "ISCSI",
             "target_name": "iqn.2024-01.org.freebsd.csi:vol1",
@@ -154,20 +147,20 @@ mod tests {
             "created_at": 1234567890
         }"#;
 
-        let metadata: VolumeMetadata = serde_json::from_str(json).unwrap();
+        let result = serde_json::from_str::<VolumeMetadata>(json);
 
-        assert_eq!(metadata.schema_version, 1);
-        assert!(metadata.needs_migration());
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_volume_metadata_migration_v1_to_v2() {
+    fn test_volume_metadata_explicit_v1_migration_to_v2() {
         let mut params = HashMap::new();
         params.insert("fs_type".to_string(), "ext4".to_string());
         params.insert("block_size".to_string(), "4096".to_string());
         params.insert("enable_unmap".to_string(), "true".to_string());
 
         let json = serde_json::json!({
+            "schema_version": 1,
             "export_type": "ISCSI",
             "target_name": "iqn.2024-01.org.freebsd.csi:vol1",
             "lun_id": 0,

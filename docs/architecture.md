@@ -334,10 +334,12 @@ The FreeBSD CSI driver uses a layered state management approach:
 │  │  Layer 1: ZFS User Properties (Primary Source of Truth)                ││
 │  │                                                                         ││
 │  │  tank/csi/vol1:                                                         ││
-│  │    org.freebsd.csi:managed = true                                       ││
-│  │    org.freebsd.csi:export_type = iscsi                                  ││
-│  │    org.freebsd.csi:target_name = iqn.2024-01.org.freebsd.csi:vol1       ││
-│  │    org.freebsd.csi:lun_id = 0                                           ││
+│  │    user:csi:metadata = {                                                ││
+│  │      "schema_version": 2,                                                ││
+│  │      "export_type": "ISCSI",                                             ││
+│  │      "target_name": "iqn.2024-01.org.freebsd.csi:vol1",                 ││
+│  │      "lun_id": 0                                                         ││
+│  │    }                                                                     ││
 │  │                                                                         ││
 │  │  Benefits:                                                              ││
 │  │    - Survives agent restart                                             ││
@@ -377,15 +379,15 @@ The FreeBSD CSI driver uses a layered state management approach:
 │                                                                             │
 │  1. Load ZFS Metadata                                                       │
 │     ┌─────────────────────────────────────────────────────────────────────┐│
-│     │ zfs get -r org.freebsd.csi:managed tank/csi                         ││
-│     │   → Find all CSI-managed volumes                                    ││
-│     │   → Read export_type, target_name, lun_id properties                ││
+│     │ zfs list -r -t volume -o name,user:csi:metadata tank/csi            ││
+│     │   → Find all volumes with versioned CSI metadata                    ││
+│     │   → Read export_type, target_name, lun_id from metadata JSON        ││
 │     └─────────────────────────────────────────────────────────────────────┘│
 │                                      │                                      │
 │                                      ▼                                      │
 │  2. Rebuild In-Memory State                                                 │
 │     ┌─────────────────────────────────────────────────────────────────────┐│
-│     │ For each volume with org.freebsd.csi:managed=true:                  ││
+│     │ For each volume with valid user:csi:metadata:                       ││
 │     │   → Create VolumeMetadata entry                                     ││
 │     │   → Populate from ZFS properties                                    ││
 │     └─────────────────────────────────────────────────────────────────────┘│
