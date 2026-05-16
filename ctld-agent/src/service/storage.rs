@@ -162,10 +162,15 @@ fn paginate<T>(
     Ok((paginated, next_token))
 }
 
-fn missing_metadata_delete_response(
+#[derive(Debug, PartialEq, Eq)]
+enum MissingMetadataDeleteAction {
+    CleanupStaleExport,
+}
+
+fn missing_metadata_delete_action(
     volume_id: &str,
     volume_exists: std::result::Result<bool, crate::zfs::ZfsError>,
-) -> Result<Response<DeleteVolumeResponse>, Status> {
+) -> Result<MissingMetadataDeleteAction, Status> {
     let exists = volume_exists.map_err(|e| match e {
         crate::zfs::ZfsError::InvalidName(msg) => {
             Status::invalid_argument(format!("invalid volume_id '{}': {}", volume_id, msg))
@@ -182,9 +187,9 @@ fn missing_metadata_delete_response(
 
     debug!(
         volume = %volume_id,
-        "Volume not found in CSI metadata and dataset does not exist (idempotent delete)"
+        "Volume not found in CSI metadata and dataset does not exist; checking for stale export"
     );
-    Ok(Response::new(DeleteVolumeResponse {}))
+    Ok(MissingMetadataDeleteAction::CleanupStaleExport)
 }
 
 /// Internal tracking of volume metadata
@@ -969,15 +974,12 @@ impl StorageAgent for StorageService {
         // that are not tracked by CSI.
         if metadata.is_none() {
             let zfs = self.zfs.read().await;
-            let response = missing_metadata_delete_response(
+            let action = missing_metadata_delete_action(
                 &req.volume_id,
                 zfs.volume_exists(&req.volume_id).await,
             );
-            match response {
-                Ok(response) => {
-                    timer.success();
-                    return Ok(response);
-                }
+            match action {
+                Ok(MissingMetadataDeleteAction::CleanupStaleExport) => {}
                 Err(status) => {
                     timer.failure(match status.code() {
                         tonic::Code::InvalidArgument => "invalid_argument",
@@ -987,6 +989,40 @@ impl StorageAgent for StorageService {
                     return Err(status);
                 }
             }
+
+            let needs_config_write = {
+                let ctl = self.ctl.read().await;
+                match ctl.unexport_volume(&req.volume_id) {
+                    Ok(()) => true,
+                    Err(CtlError::TargetNotFound(_)) => {
+                        debug!(
+                            "Volume {} has no stale export (idempotent delete)",
+                            req.volume_id
+                        );
+                        false
+                    }
+                    Err(e) => {
+                        error!("Failed to unexport stale volume: {}", e);
+                        timer.failure("unexport_error");
+                        return Err(Status::internal(format!(
+                            "Failed to unexport stale volume: {}. Cannot safely complete delete.",
+                            e
+                        )));
+                    }
+                }
+            };
+
+            if needs_config_write && let Err(e) = self.config_writer.write_config().await {
+                error!("Failed to write CTL config after stale unexport: {}", e);
+                timer.failure("config_write_error");
+                return Err(Status::internal(format!(
+                    "Stale unexport succeeded but CTL config write failed: {}. Export may reappear on restart.",
+                    e
+                )));
+            }
+
+            timer.success();
+            return Ok(Response::new(DeleteVolumeResponse {}));
         }
 
         // Determine volume name early (needed for snapshot check)
@@ -1849,7 +1885,7 @@ mod tests {
 
     #[test]
     fn test_missing_metadata_delete_existing_dataset_is_failed_precondition() {
-        let err = missing_metadata_delete_response("operator-volume", Ok(true)).unwrap_err();
+        let err = missing_metadata_delete_action("operator-volume", Ok(true)).unwrap_err();
 
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
         assert!(
@@ -1859,15 +1895,15 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_metadata_delete_absent_dataset_is_idempotent_success() {
-        let response = missing_metadata_delete_response("already-gone", Ok(false)).unwrap();
+    fn test_missing_metadata_delete_absent_dataset_cleans_stale_export() {
+        let action = missing_metadata_delete_action("already-gone", Ok(false)).unwrap();
 
-        assert_eq!(response.into_inner(), DeleteVolumeResponse {});
+        assert_eq!(action, MissingMetadataDeleteAction::CleanupStaleExport);
     }
 
     #[test]
     fn test_missing_metadata_delete_invalid_volume_id_is_invalid_argument() {
-        let err = missing_metadata_delete_response(
+        let err = missing_metadata_delete_action(
             "../not-a-managed-child",
             Err(crate::zfs::ZfsError::InvalidName(
                 "path traversal not allowed".to_string(),
