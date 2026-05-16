@@ -56,6 +56,18 @@ fn check_command_result(output: &Output, context: &str) -> Result<()> {
     Err(ZfsError::CommandFailed(format!("{}: {}", context, stderr)))
 }
 
+fn classify_dataset_exists(success: bool, stderr: &str, context: &str) -> Result<bool> {
+    if success {
+        return Ok(true);
+    }
+
+    if stderr.contains("does not exist") || stderr.contains("not found") {
+        return Ok(false);
+    }
+
+    Err(ZfsError::CommandFailed(format!("{}: {}", context, stderr)))
+}
+
 /// Escape a string for safe use in shell commands.
 /// Wraps the string in single quotes and escapes any embedded single quotes.
 fn shell_escape(s: &str) -> String {
@@ -1292,7 +1304,8 @@ impl ZfsManager {
             .output()
             .await?;
 
-        Ok(output.status.success())
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        classify_dataset_exists(output.status.success(), &stderr, full_name)
     }
 
     /// Get detailed information about a dataset by its full name
@@ -1421,5 +1434,28 @@ mod tests {
             parent_dataset: "tank/csi".to_string(),
         };
         assert_eq!(manager.get_device_path("vol1"), "/dev/zvol/tank/csi/vol1");
+    }
+
+    #[test]
+    fn test_strict_dataset_exists_maps_not_found_to_false() {
+        let result = classify_dataset_exists(
+            false,
+            "cannot open 'tank/csi/missing': dataset does not exist",
+            "tank/csi/missing",
+        )
+        .unwrap();
+
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_strict_dataset_exists_propagates_operational_failure() {
+        let result = classify_dataset_exists(
+            false,
+            "cannot open 'tank/csi/vol1': pool I/O is currently suspended",
+            "tank/csi/vol1",
+        );
+
+        assert!(matches!(result, Err(ZfsError::CommandFailed(_))));
     }
 }
