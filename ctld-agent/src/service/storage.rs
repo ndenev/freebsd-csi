@@ -162,6 +162,31 @@ fn paginate<T>(
     Ok((paginated, next_token))
 }
 
+fn missing_metadata_delete_response(
+    volume_id: &str,
+    volume_exists: std::result::Result<bool, crate::zfs::ZfsError>,
+) -> Result<Response<DeleteVolumeResponse>, Status> {
+    let exists = volume_exists.map_err(|e| match e {
+        crate::zfs::ZfsError::InvalidName(msg) => {
+            Status::invalid_argument(format!("invalid volume_id '{}': {}", volume_id, msg))
+        }
+        other => Status::internal(format!("failed to check volume existence: {}", other)),
+    })?;
+
+    if exists {
+        return Err(Status::failed_precondition(format!(
+            "Volume '{}' exists but is not CSI-managed; refusing deletion",
+            volume_id
+        )));
+    }
+
+    debug!(
+        volume = %volume_id,
+        "Volume not found in CSI metadata and dataset does not exist (idempotent delete)"
+    );
+    Ok(Response::new(DeleteVolumeResponse {}))
+}
+
 /// Internal tracking of volume metadata
 #[derive(Debug, Clone)]
 struct VolumeMetadata {
@@ -944,24 +969,24 @@ impl StorageAgent for StorageService {
         // that are not tracked by CSI.
         if metadata.is_none() {
             let zfs = self.zfs.read().await;
-            let exists = zfs.volume_exists(&req.volume_id).await.map_err(|e| {
-                Status::internal(format!("failed to check volume existence: {}", e))
-            })?;
-
-            if exists {
-                timer.failure("volume_not_csi_managed");
-                return Err(Status::failed_precondition(format!(
-                    "Volume '{}' exists but is not CSI-managed; refusing deletion",
-                    req.volume_id
-                )));
-            }
-
-            debug!(
-                volume = %req.volume_id,
-                "Volume not found in CSI metadata and dataset does not exist (idempotent delete)"
+            let response = missing_metadata_delete_response(
+                &req.volume_id,
+                zfs.volume_exists(&req.volume_id).await,
             );
-            timer.success();
-            return Ok(Response::new(DeleteVolumeResponse {}));
+            match response {
+                Ok(response) => {
+                    timer.success();
+                    return Ok(response);
+                }
+                Err(status) => {
+                    timer.failure(match status.code() {
+                        tonic::Code::InvalidArgument => "invalid_argument",
+                        tonic::Code::FailedPrecondition => "volume_not_csi_managed",
+                        _ => "zfs_error",
+                    });
+                    return Err(status);
+                }
+            }
         }
 
         // Determine volume name early (needed for snapshot check)
@@ -1820,5 +1845,37 @@ mod tests {
         let (result, next_token) = paginate(items, 0, "").unwrap();
         assert_eq!(result, vec![1, 2, 3]);
         assert!(next_token.is_empty());
+    }
+
+    #[test]
+    fn test_missing_metadata_delete_existing_dataset_is_failed_precondition() {
+        let err = missing_metadata_delete_response("operator-volume", Ok(true)).unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            err.message()
+                .contains("exists but is not CSI-managed; refusing deletion")
+        );
+    }
+
+    #[test]
+    fn test_missing_metadata_delete_absent_dataset_is_idempotent_success() {
+        let response = missing_metadata_delete_response("already-gone", Ok(false)).unwrap();
+
+        assert_eq!(response.into_inner(), DeleteVolumeResponse {});
+    }
+
+    #[test]
+    fn test_missing_metadata_delete_invalid_volume_id_is_invalid_argument() {
+        let err = missing_metadata_delete_response(
+            "../not-a-managed-child",
+            Err(crate::zfs::ZfsError::InvalidName(
+                "path traversal not allowed".to_string(),
+            )),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("invalid volume_id"));
     }
 }
