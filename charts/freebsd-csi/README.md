@@ -72,6 +72,12 @@ helm install freebsd-csi charts/freebsd-csi \
 | `storageClassNvmeof.parameters.blockSize` | Logical block size (512 or 4096) | - |
 | `storageClassNvmeof.parameters.physicalBlockSize` | Physical block size hint | - |
 | `storageClassNvmeof.parameters.enableUnmap` | Enable TRIM/discard for SSD-backed storage | - |
+| `storageClassNvmeof.parameters.nrIoQueues` | Linux `nvme connect --nr-io-queues` value | - |
+| `storageClassNvmeof.parameters.queueSize` | Linux `nvme connect --queue-size` value | - |
+| `storageClassNvmeof.parameters.disableSqflow` | Linux `nvme connect --disable-sqflow` toggle | - |
+| `storageClassNvmeof.parameters.keepAliveTmo` | Linux `nvme connect --keep-alive-tmo` seconds | - |
+| `storageClassNvmeof.parameters.reconnectDelay` | Linux `nvme connect --reconnect-delay` seconds | - |
+| `storageClassNvmeof.parameters.ctrlLossTmo` | Linux `nvme connect --ctrl-loss-tmo` seconds | - |
 | `storageClassNvmeof.authSecret.name` | Existing secret with NVMeoF auth credentials | `""` |
 | `storageClassNvmeof.authSecret.namespace` | Namespace of auth secret | Release namespace |
 | `storageClassNvmeof.authSecret.credentials.hostNqn` | Host NQN for access control (creates secret if set) | `""` |

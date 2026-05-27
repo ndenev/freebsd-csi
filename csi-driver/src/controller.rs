@@ -16,7 +16,7 @@ use crate::agent::{
 use crate::agent_client::{AgentClient, TlsConfig};
 use crate::csi;
 use crate::metrics::{self, OperationTimer};
-use crate::types::{CloneMode, ExportType, ProvisioningMode};
+use crate::types::{CloneMode, ExportType, NvmeofConnectOptions, ProvisioningMode};
 
 // Standard CSI secret keys for iSCSI CHAP authentication
 // These follow the Linux open-iscsi naming conventions used by the CSI spec
@@ -354,6 +354,14 @@ impl ControllerService {
             volume_context.insert("fsType".to_string(), fs_type.clone());
         }
 
+        if export_type == ExportType::Nvmeof {
+            for key in NvmeofConnectOptions::PARAM_NAMES {
+                if let Some(value) = parameters.get(*key) {
+                    volume_context.insert((*key).to_string(), value.clone());
+                }
+            }
+        }
+
         csi::Volume {
             capacity_bytes: volume.size_bytes,
             volume_id: volume.id.clone(),
@@ -399,6 +407,13 @@ impl csi::controller_server::Controller for ControllerService {
 
         let size_bytes = Self::get_volume_size(req.capacity_range.as_ref());
         let export_type = Self::parse_export_type(&req.parameters);
+
+        if export_type == ExportType::Nvmeof
+            && let Err(e) = NvmeofConnectOptions::parse(&req.parameters)
+        {
+            timer.failure("invalid_argument");
+            return Err(Status::invalid_argument(e.to_string()));
+        }
 
         // Extract authentication credentials from CSI secrets
         let auth = Self::extract_auth_credentials(&req.secrets, export_type);
@@ -1071,6 +1086,75 @@ mod tests {
             ControllerService::parse_export_type(&params),
             ExportType::Nvmeof
         );
+    }
+
+    #[test]
+    fn test_agent_volume_to_csi_preserves_nvmeof_connect_options() {
+        let volume = crate::agent::Volume {
+            id: "vol-1".to_string(),
+            name: "test".to_string(),
+            size_bytes: 1024,
+            zfs_dataset: "tank/vol-1".to_string(),
+            export_type: crate::agent::ExportType::Nvmeof as i32,
+            target_name: "nqn.2024-01.org.freebsd.csi:vol-1".to_string(),
+            lun_id: 0,
+            parameters: HashMap::new(),
+        };
+        let mut params = HashMap::new();
+        params.insert("endpoints".to_string(), "10.0.0.10:4420".to_string());
+        params.insert("nvmeof.nrIoQueues".to_string(), "2".to_string());
+        params.insert("nvmeof.queueSize".to_string(), "128".to_string());
+        params.insert("nvmeof.disableSqflow".to_string(), "true".to_string());
+        params.insert("nvmeof.keepAliveTmo".to_string(), "5".to_string());
+        params.insert("nvmeof.reconnectDelay".to_string(), "2".to_string());
+        params.insert("nvmeof.ctrlLossTmo".to_string(), "60".to_string());
+
+        let csi_volume = ControllerService::agent_volume_to_csi(&volume, &params, None);
+
+        assert_eq!(
+            csi_volume.volume_context.get("nvmeof.nrIoQueues"),
+            Some(&"2".to_string())
+        );
+        assert_eq!(
+            csi_volume.volume_context.get("nvmeof.queueSize"),
+            Some(&"128".to_string())
+        );
+        assert_eq!(
+            csi_volume.volume_context.get("nvmeof.disableSqflow"),
+            Some(&"true".to_string())
+        );
+        assert_eq!(
+            csi_volume.volume_context.get("nvmeof.keepAliveTmo"),
+            Some(&"5".to_string())
+        );
+        assert_eq!(
+            csi_volume.volume_context.get("nvmeof.reconnectDelay"),
+            Some(&"2".to_string())
+        );
+        assert_eq!(
+            csi_volume.volume_context.get("nvmeof.ctrlLossTmo"),
+            Some(&"60".to_string())
+        );
+    }
+
+    #[test]
+    fn test_agent_volume_to_csi_omits_nvmeof_connect_options_for_iscsi() {
+        let volume = crate::agent::Volume {
+            id: "vol-1".to_string(),
+            name: "test".to_string(),
+            size_bytes: 1024,
+            zfs_dataset: "tank/vol-1".to_string(),
+            export_type: crate::agent::ExportType::Iscsi as i32,
+            target_name: "iqn.2024-01.org.freebsd.csi:vol-1".to_string(),
+            lun_id: 0,
+            parameters: HashMap::new(),
+        };
+        let mut params = HashMap::new();
+        params.insert("nvmeof.nrIoQueues".to_string(), "2".to_string());
+
+        let csi_volume = ControllerService::agent_volume_to_csi(&volume, &params, None);
+
+        assert!(!csi_volume.volume_context.contains_key("nvmeof.nrIoQueues"));
     }
 
     #[test]

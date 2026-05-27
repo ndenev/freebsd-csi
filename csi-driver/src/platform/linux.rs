@@ -13,7 +13,7 @@ use tonic::Status;
 use tracing::{debug, error, info, warn};
 
 use super::PlatformResult;
-use crate::types::Endpoint;
+use crate::types::{Endpoint, NvmeofConnectOptions};
 
 /// Default filesystem type for Linux
 pub const DEFAULT_FS_TYPE: &str = "ext4";
@@ -645,6 +645,7 @@ pub async fn connect_nvmeof(
     target_nqn: &str,
     endpoints: &[Endpoint],
     auth_credentials: Option<&NvmeAuthCredentials>,
+    connect_options: Option<&NvmeofConnectOptions>,
 ) -> PlatformResult<String> {
     if endpoints.is_empty() {
         return Err(Status::invalid_argument(
@@ -667,14 +668,9 @@ pub async fn connect_nvmeof(
 
     // Connect to each endpoint (each with its own host:port)
     for endpoint in endpoints {
-        let addr = &endpoint.host;
-        let port = endpoint.port.to_string();
-
-        // Build nvme connect command with optional authentication
         let mut cmd = Command::new("nvme");
-        cmd.args([
-            "connect", "-t", "tcp", "-a", addr, "-s", &port, "-n", target_nqn,
-        ]);
+        let args = build_nvme_connect_args(target_nqn, endpoint, connect_options, auth_credentials);
+        cmd.args(&args);
 
         if let Some(auth) = auth_credentials {
             debug!(
@@ -683,12 +679,6 @@ pub async fn connect_nvmeof(
                 has_ctrl_secret = auth.ctrl_secret.is_some(),
                 "Configuring NVMeoF DH-HMAC-CHAP authentication"
             );
-
-            cmd.args(["--dhchap-secret", &auth.secret]);
-
-            if let Some(ctrl_secret) = &auth.ctrl_secret {
-                cmd.args(["--dhchap-ctrl-secret", ctrl_secret]);
-            }
         }
 
         let output = cmd.output().await.map_err(|e| {
@@ -748,6 +738,63 @@ pub async fn connect_nvmeof(
     );
 
     Ok(device)
+}
+
+fn build_nvme_connect_args(
+    target_nqn: &str,
+    endpoint: &Endpoint,
+    connect_options: Option<&NvmeofConnectOptions>,
+    auth_credentials: Option<&NvmeAuthCredentials>,
+) -> Vec<String> {
+    let mut args = vec![
+        "connect".to_string(),
+        "-t".to_string(),
+        "tcp".to_string(),
+        "-a".to_string(),
+        endpoint.host.clone(),
+        "-s".to_string(),
+        endpoint.port.to_string(),
+        "-n".to_string(),
+        target_nqn.to_string(),
+    ];
+
+    if let Some(options) = connect_options {
+        if let Some(value) = options.nr_io_queues {
+            args.push(format!("--nr-io-queues={}", value));
+        }
+
+        if let Some(value) = options.queue_size {
+            args.push(format!("--queue-size={}", value));
+        }
+
+        if options.disable_sqflow == Some(true) {
+            args.push("--disable-sqflow".to_string());
+        }
+
+        if let Some(value) = options.keep_alive_tmo {
+            args.push(format!("--keep-alive-tmo={}", value));
+        }
+
+        if let Some(value) = options.reconnect_delay {
+            args.push(format!("--reconnect-delay={}", value));
+        }
+
+        if let Some(value) = options.ctrl_loss_tmo {
+            args.push(format!("--ctrl-loss-tmo={}", value));
+        }
+    }
+
+    if let Some(auth) = auth_credentials {
+        args.push("--dhchap-secret".to_string());
+        args.push(auth.secret.clone());
+
+        if let Some(ctrl_secret) = &auth.ctrl_secret {
+            args.push("--dhchap-ctrl-secret".to_string());
+            args.push(ctrl_secret.clone());
+        }
+    }
+
+    args
 }
 
 /// Check if a device path is an NVMe namespace device (nvmeXnY) not just a controller (nvmeX).
@@ -1271,5 +1318,64 @@ mod tests {
         assert!(!is_nvme_namespace_device("/dev/nvme"));
         assert!(!is_nvme_namespace_device(""));
         assert!(!is_nvme_namespace_device("/dev/nvme0n")); // Missing namespace number
+    }
+
+    #[test]
+    fn test_build_nvme_connect_args_includes_connect_options() {
+        let endpoint = Endpoint::new("10.0.0.10", 4420);
+        let options = crate::types::NvmeofConnectOptions {
+            nr_io_queues: Some(2),
+            queue_size: Some(128),
+            disable_sqflow: Some(true),
+            keep_alive_tmo: Some(5),
+            reconnect_delay: Some(2),
+            ctrl_loss_tmo: Some(60),
+        };
+
+        let args = build_nvme_connect_args(
+            "nqn.2024-01.org.freebsd.csi:test",
+            &endpoint,
+            Some(&options),
+            None,
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "connect",
+                "-t",
+                "tcp",
+                "-a",
+                "10.0.0.10",
+                "-s",
+                "4420",
+                "-n",
+                "nqn.2024-01.org.freebsd.csi:test",
+                "--nr-io-queues=2",
+                "--queue-size=128",
+                "--disable-sqflow",
+                "--keep-alive-tmo=5",
+                "--reconnect-delay=2",
+                "--ctrl-loss-tmo=60",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_nvme_connect_args_omits_false_disable_sqflow() {
+        let endpoint = Endpoint::new("10.0.0.10", 4420);
+        let options = crate::types::NvmeofConnectOptions {
+            disable_sqflow: Some(false),
+            ..Default::default()
+        };
+
+        let args = build_nvme_connect_args(
+            "nqn.2024-01.org.freebsd.csi:test",
+            &endpoint,
+            Some(&options),
+            None,
+        );
+
+        assert!(!args.iter().any(|arg| arg == "--disable-sqflow"));
     }
 }

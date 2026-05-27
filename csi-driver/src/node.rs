@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use crate::csi;
 use crate::platform;
 use crate::platform::{IscsiChapCredentials, NvmeAuthCredentials};
-use crate::types::{Endpoints, ExportType};
+use crate::types::{Endpoints, ExportType, NvmeofConnectOptions};
 
 /// Base IQN prefix for iSCSI targets (must match ctld-agent configuration)
 const BASE_IQN: &str = "iqn.2024-01.org.freebsd.csi";
@@ -586,8 +586,20 @@ impl csi::node_server::Node for NodeService {
             }
             ExportType::Nvmeof => {
                 let nvme_creds = Self::extract_nvme_auth(secrets);
-                platform::connect_nvmeof(target_name, endpoints.as_slice(), nvme_creds.as_ref())
-                    .await?
+                let connect_options = NvmeofConnectOptions::parse(volume_context).map_err(|e| {
+                    Status::invalid_argument(format!(
+                        "Invalid NVMeoF connect option in volume context: {}",
+                        e
+                    ))
+                })?;
+
+                platform::connect_nvmeof(
+                    target_name,
+                    endpoints.as_slice(),
+                    nvme_creds.as_ref(),
+                    Some(&connect_options),
+                )
+                .await?
             }
         };
 
