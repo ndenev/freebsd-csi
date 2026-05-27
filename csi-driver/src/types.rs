@@ -262,7 +262,7 @@ impl NvmeofConnectOptions {
             nr_io_queues: parse_positive_u32(parameters, Self::NR_IO_QUEUES_PARAM)?,
             queue_size: parse_positive_u32(parameters, Self::QUEUE_SIZE_PARAM)?,
             disable_sqflow: parse_bool(parameters, Self::DISABLE_SQFLOW_PARAM)?,
-            keep_alive_tmo: parse_positive_u32(parameters, Self::KEEP_ALIVE_TMO_PARAM)?,
+            keep_alive_tmo: parse_non_negative_u32(parameters, Self::KEEP_ALIVE_TMO_PARAM)?,
             reconnect_delay: parse_positive_u32(parameters, Self::RECONNECT_DELAY_PARAM)?,
             ctrl_loss_tmo: parse_ctrl_loss_tmo(parameters)?,
         })
@@ -302,6 +302,25 @@ fn parse_positive_u32(
             expected: "a positive integer",
         });
     }
+
+    Ok(Some(parsed))
+}
+
+fn parse_non_negative_u32(
+    parameters: &std::collections::HashMap<String, String>,
+    key: &'static str,
+) -> Result<Option<u32>, NvmeofConnectOptionsParseError> {
+    let Some(value) = parameters.get(key) else {
+        return Ok(None);
+    };
+
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| NvmeofConnectOptionsParseError {
+            key,
+            value: value.clone(),
+            expected: "zero or a positive integer",
+        })?;
 
     Ok(Some(parsed))
 }
@@ -702,6 +721,16 @@ mod tests {
         let err = NvmeofConnectOptions::parse(&params).unwrap_err();
 
         assert!(err.to_string().contains("nvmeof.queueSize"));
+    }
+
+    #[test]
+    fn test_nvmeof_connect_options_accepts_zero_keep_alive_tmo() {
+        let mut params = std::collections::HashMap::new();
+        params.insert("nvmeof.keepAliveTmo".to_string(), "0".to_string());
+
+        let options = NvmeofConnectOptions::parse(&params).unwrap();
+
+        assert_eq!(options.keep_alive_tmo, Some(0));
     }
 
     #[test]

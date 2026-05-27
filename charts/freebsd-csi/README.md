@@ -75,7 +75,7 @@ helm install freebsd-csi charts/freebsd-csi \
 | `storageClassNvmeof.parameters.nrIoQueues` | Linux `nvme connect --nr-io-queues` value | - |
 | `storageClassNvmeof.parameters.queueSize` | Linux `nvme connect --queue-size` value | - |
 | `storageClassNvmeof.parameters.disableSqflow` | Linux `nvme connect --disable-sqflow` toggle | - |
-| `storageClassNvmeof.parameters.keepAliveTmo` | Linux `nvme connect --keep-alive-tmo` seconds | - |
+| `storageClassNvmeof.parameters.keepAliveTmo` | Linux `nvme connect --keep-alive-tmo` seconds; `0` disables keepalives | - |
 | `storageClassNvmeof.parameters.reconnectDelay` | Linux `nvme connect --reconnect-delay` seconds | - |
 | `storageClassNvmeof.parameters.ctrlLossTmo` | Linux `nvme connect --ctrl-loss-tmo` seconds; `-1` retries forever | - |
 | `storageClassNvmeof.authSecret.name` | Existing secret with NVMeoF auth credentials | `""` |
