@@ -328,6 +328,19 @@ StorageClass parameters control how volumes are provisioned:
 > For iSCSI, each portal will be discovered and logged into separately. For NVMeoF, each address will be connected separately.
 > Native multipath (NVMe) or dm-multipath (iSCSI) will combine the paths automatically.
 
+#### NVMeoF Initiator Connect Parameters
+
+These optional parameters are copied into the PV volume context and applied by the Linux node plugin when it runs `nvme connect`. They are ignored for iSCSI volumes.
+
+| Parameter | Values | Default | Description |
+|-----------|--------|---------|-------------|
+| `nvmeof.nrIoQueues` | positive integer | nvme-cli default | Number of I/O queues (`--nr-io-queues`) |
+| `nvmeof.queueSize` | positive integer | nvme-cli default | Queue size (`--queue-size`) |
+| `nvmeof.disableSqflow` | `true`, `false` | `false` | Disable SQ flow control (`--disable-sqflow`) |
+| `nvmeof.keepAliveTmo` | zero or positive integer | nvme-cli default | Keepalive timeout in seconds (`--keep-alive-tmo`); `0` disables keepalives |
+| `nvmeof.reconnectDelay` | positive integer | nvme-cli default | Reconnect delay in seconds (`--reconnect-delay`) |
+| `nvmeof.ctrlLossTmo` | `-1`, `0`, or positive integer | nvme-cli default | Controller loss timeout in seconds (`--ctrl-loss-tmo`); `-1` retries forever |
+
 #### Block Device Parameters
 
 | Parameter | Values | Default | Description |
@@ -397,6 +410,9 @@ parameters:
   endpoints: "192.168.1.100:4420"  # REQUIRED (default port: 4420)
   blockSize: "4096"
   enableUnmap: "true"
+  nvmeof.nrIoQueues: "2"
+  nvmeof.queueSize: "128"
+  nvmeof.disableSqflow: "true"
 allowVolumeExpansion: true
 reclaimPolicy: Delete
 volumeBindingMode: Immediate

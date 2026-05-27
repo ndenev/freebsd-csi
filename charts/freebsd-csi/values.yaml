@@ -236,6 +236,13 @@ storageClassNvmeof:
     # blockSize: "4096"           # Logical block size: 512 or 4096
     # physicalBlockSize: "4096"   # Physical block size hint
     # enableUnmap: "true"         # Enable TRIM/discard for SSD-backed storage
+    # Linux nvme-cli connect options (optional)
+    # nrIoQueues: "2"             # --nr-io-queues
+    # queueSize: "128"            # --queue-size
+    # disableSqflow: "true"       # --disable-sqflow
+    # keepAliveTmo: "5"           # --keep-alive-tmo (0 disables keepalives)
+    # reconnectDelay: "2"         # --reconnect-delay
+    # ctrlLossTmo: "60"           # --ctrl-loss-tmo (-1 retries forever)
   # NVMeoF Access Control (optional, FreeBSD 15.0+)
   # Note: FreeBSD 15's ctld only supports host-nqn based access control for NVMeoF.
   #       DH-HMAC-CHAP is not yet implemented in ctld.

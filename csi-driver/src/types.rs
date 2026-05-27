@@ -217,6 +217,181 @@ impl Display for ProvisioningModeParseError {
 impl std::error::Error for ProvisioningModeParseError {}
 
 // ============================================================================
+// NvmeofConnectOptions
+// ============================================================================
+
+/// Optional Linux NVMe/TCP initiator options for `nvme connect`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NvmeofConnectOptions {
+    /// Number of I/O queues (`--nr-io-queues`).
+    pub nr_io_queues: Option<u32>,
+    /// Submission queue size (`--queue-size`).
+    pub queue_size: Option<u32>,
+    /// Disable SQ flow control (`--disable-sqflow`).
+    pub disable_sqflow: Option<bool>,
+    /// Keepalive timeout in seconds (`--keep-alive-tmo`).
+    pub keep_alive_tmo: Option<u32>,
+    /// Reconnect delay in seconds (`--reconnect-delay`).
+    pub reconnect_delay: Option<u32>,
+    /// Controller loss timeout in seconds (`--ctrl-loss-tmo`).
+    pub ctrl_loss_tmo: Option<i32>,
+}
+
+impl NvmeofConnectOptions {
+    pub const NR_IO_QUEUES_PARAM: &'static str = "nvmeof.nrIoQueues";
+    pub const QUEUE_SIZE_PARAM: &'static str = "nvmeof.queueSize";
+    pub const DISABLE_SQFLOW_PARAM: &'static str = "nvmeof.disableSqflow";
+    pub const KEEP_ALIVE_TMO_PARAM: &'static str = "nvmeof.keepAliveTmo";
+    pub const RECONNECT_DELAY_PARAM: &'static str = "nvmeof.reconnectDelay";
+    pub const CTRL_LOSS_TMO_PARAM: &'static str = "nvmeof.ctrlLossTmo";
+
+    pub const PARAM_NAMES: &'static [&'static str] = &[
+        Self::NR_IO_QUEUES_PARAM,
+        Self::QUEUE_SIZE_PARAM,
+        Self::DISABLE_SQFLOW_PARAM,
+        Self::KEEP_ALIVE_TMO_PARAM,
+        Self::RECONNECT_DELAY_PARAM,
+        Self::CTRL_LOSS_TMO_PARAM,
+    ];
+
+    /// Parse NVMeoF connect options from StorageClass parameters or volume context.
+    pub fn parse(
+        parameters: &std::collections::HashMap<String, String>,
+    ) -> Result<Self, NvmeofConnectOptionsParseError> {
+        Ok(Self {
+            nr_io_queues: parse_positive_u32(parameters, Self::NR_IO_QUEUES_PARAM)?,
+            queue_size: parse_positive_u32(parameters, Self::QUEUE_SIZE_PARAM)?,
+            disable_sqflow: parse_bool(parameters, Self::DISABLE_SQFLOW_PARAM)?,
+            keep_alive_tmo: parse_non_negative_u32(parameters, Self::KEEP_ALIVE_TMO_PARAM)?,
+            reconnect_delay: parse_positive_u32(parameters, Self::RECONNECT_DELAY_PARAM)?,
+            ctrl_loss_tmo: parse_ctrl_loss_tmo(parameters)?,
+        })
+    }
+
+    /// Return true when at least one option is set.
+    pub const fn has_options(&self) -> bool {
+        self.nr_io_queues.is_some()
+            || self.queue_size.is_some()
+            || self.disable_sqflow.is_some()
+            || self.keep_alive_tmo.is_some()
+            || self.reconnect_delay.is_some()
+            || self.ctrl_loss_tmo.is_some()
+    }
+}
+
+fn parse_positive_u32(
+    parameters: &std::collections::HashMap<String, String>,
+    key: &'static str,
+) -> Result<Option<u32>, NvmeofConnectOptionsParseError> {
+    let Some(value) = parameters.get(key) else {
+        return Ok(None);
+    };
+
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| NvmeofConnectOptionsParseError {
+            key,
+            value: value.clone(),
+            expected: "a positive integer",
+        })?;
+
+    if parsed == 0 {
+        return Err(NvmeofConnectOptionsParseError {
+            key,
+            value: value.clone(),
+            expected: "a positive integer",
+        });
+    }
+
+    Ok(Some(parsed))
+}
+
+fn parse_non_negative_u32(
+    parameters: &std::collections::HashMap<String, String>,
+    key: &'static str,
+) -> Result<Option<u32>, NvmeofConnectOptionsParseError> {
+    let Some(value) = parameters.get(key) else {
+        return Ok(None);
+    };
+
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| NvmeofConnectOptionsParseError {
+            key,
+            value: value.clone(),
+            expected: "zero or a positive integer",
+        })?;
+
+    Ok(Some(parsed))
+}
+
+fn parse_bool(
+    parameters: &std::collections::HashMap<String, String>,
+    key: &'static str,
+) -> Result<Option<bool>, NvmeofConnectOptionsParseError> {
+    let Some(value) = parameters.get(key) else {
+        return Ok(None);
+    };
+
+    match value.to_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(Some(true)),
+        "false" | "0" | "no" => Ok(Some(false)),
+        _ => Err(NvmeofConnectOptionsParseError {
+            key,
+            value: value.clone(),
+            expected: "true or false",
+        }),
+    }
+}
+
+fn parse_ctrl_loss_tmo(
+    parameters: &std::collections::HashMap<String, String>,
+) -> Result<Option<i32>, NvmeofConnectOptionsParseError> {
+    let key = NvmeofConnectOptions::CTRL_LOSS_TMO_PARAM;
+    let Some(value) = parameters.get(key) else {
+        return Ok(None);
+    };
+
+    let parsed = value
+        .parse::<i32>()
+        .map_err(|_| NvmeofConnectOptionsParseError {
+            key,
+            value: value.clone(),
+            expected: "-1, 0, or a positive integer",
+        })?;
+
+    if parsed < -1 {
+        return Err(NvmeofConnectOptionsParseError {
+            key,
+            value: value.clone(),
+            expected: "-1, 0, or a positive integer",
+        });
+    }
+
+    Ok(Some(parsed))
+}
+
+/// Error returned when parsing invalid NVMeoF connect options.
+#[derive(Debug, Clone)]
+pub struct NvmeofConnectOptionsParseError {
+    key: &'static str,
+    value: String,
+    expected: &'static str,
+}
+
+impl Display for NvmeofConnectOptionsParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid {} value '{}': expected {}",
+            self.key, self.value, self.expected
+        )
+    }
+}
+
+impl std::error::Error for NvmeofConnectOptionsParseError {}
+
+// ============================================================================
 // Endpoint
 // ============================================================================
 
@@ -508,6 +683,84 @@ mod tests {
     fn test_provisioning_mode_requires_reservation() {
         assert!(!ProvisioningMode::Thin.requires_reservation());
         assert!(ProvisioningMode::Thick.requires_reservation());
+    }
+
+    #[test]
+    fn test_nvmeof_connect_options_parse_all_values() {
+        let mut params = std::collections::HashMap::new();
+        params.insert("nvmeof.nrIoQueues".to_string(), "2".to_string());
+        params.insert("nvmeof.queueSize".to_string(), "128".to_string());
+        params.insert("nvmeof.disableSqflow".to_string(), "true".to_string());
+        params.insert("nvmeof.keepAliveTmo".to_string(), "5".to_string());
+        params.insert("nvmeof.reconnectDelay".to_string(), "2".to_string());
+        params.insert("nvmeof.ctrlLossTmo".to_string(), "60".to_string());
+
+        let options = NvmeofConnectOptions::parse(&params).unwrap();
+
+        assert_eq!(options.nr_io_queues, Some(2));
+        assert_eq!(options.queue_size, Some(128));
+        assert_eq!(options.disable_sqflow, Some(true));
+        assert_eq!(options.keep_alive_tmo, Some(5));
+        assert_eq!(options.reconnect_delay, Some(2));
+        assert_eq!(options.ctrl_loss_tmo, Some(60));
+    }
+
+    #[test]
+    fn test_nvmeof_connect_options_absent_is_empty() {
+        let params = std::collections::HashMap::new();
+        let options = NvmeofConnectOptions::parse(&params).unwrap();
+
+        assert!(!options.has_options());
+    }
+
+    #[test]
+    fn test_nvmeof_connect_options_rejects_zero_numeric_value() {
+        let mut params = std::collections::HashMap::new();
+        params.insert("nvmeof.queueSize".to_string(), "0".to_string());
+
+        let err = NvmeofConnectOptions::parse(&params).unwrap_err();
+
+        assert!(err.to_string().contains("nvmeof.queueSize"));
+    }
+
+    #[test]
+    fn test_nvmeof_connect_options_accepts_zero_keep_alive_tmo() {
+        let mut params = std::collections::HashMap::new();
+        params.insert("nvmeof.keepAliveTmo".to_string(), "0".to_string());
+
+        let options = NvmeofConnectOptions::parse(&params).unwrap();
+
+        assert_eq!(options.keep_alive_tmo, Some(0));
+    }
+
+    #[test]
+    fn test_nvmeof_connect_options_accepts_negative_one_ctrl_loss_tmo() {
+        let mut params = std::collections::HashMap::new();
+        params.insert("nvmeof.ctrlLossTmo".to_string(), "-1".to_string());
+
+        let options = NvmeofConnectOptions::parse(&params).unwrap();
+
+        assert_eq!(options.ctrl_loss_tmo, Some(-1));
+    }
+
+    #[test]
+    fn test_nvmeof_connect_options_rejects_ctrl_loss_tmo_less_than_negative_one() {
+        let mut params = std::collections::HashMap::new();
+        params.insert("nvmeof.ctrlLossTmo".to_string(), "-2".to_string());
+
+        let err = NvmeofConnectOptions::parse(&params).unwrap_err();
+
+        assert!(err.to_string().contains("nvmeof.ctrlLossTmo"));
+    }
+
+    #[test]
+    fn test_nvmeof_connect_options_rejects_invalid_bool() {
+        let mut params = std::collections::HashMap::new();
+        params.insert("nvmeof.disableSqflow".to_string(), "maybe".to_string());
+
+        let err = NvmeofConnectOptions::parse(&params).unwrap_err();
+
+        assert!(err.to_string().contains("nvmeof.disableSqflow"));
     }
 
     // Endpoint tests
