@@ -91,22 +91,22 @@ parameters:
   enableUnmap: {{ .Values.storageClassNvmeof.parameters.enableUnmap | quote }}
   {{- end }}
   {{- /* Linux NVMeoF initiator connect options */ -}}
-  {{- if .Values.storageClassNvmeof.parameters.nrIoQueues }}
+  {{- if hasKey .Values.storageClassNvmeof.parameters "nrIoQueues" }}
   nvmeof.nrIoQueues: {{ .Values.storageClassNvmeof.parameters.nrIoQueues | quote }}
   {{- end }}
-  {{- if .Values.storageClassNvmeof.parameters.queueSize }}
+  {{- if hasKey .Values.storageClassNvmeof.parameters "queueSize" }}
   nvmeof.queueSize: {{ .Values.storageClassNvmeof.parameters.queueSize | quote }}
   {{- end }}
   {{- if .Values.storageClassNvmeof.parameters.disableSqflow }}
   nvmeof.disableSqflow: {{ .Values.storageClassNvmeof.parameters.disableSqflow | quote }}
   {{- end }}
-  {{- if .Values.storageClassNvmeof.parameters.keepAliveTmo }}
+  {{- if hasKey .Values.storageClassNvmeof.parameters "keepAliveTmo" }}
   nvmeof.keepAliveTmo: {{ .Values.storageClassNvmeof.parameters.keepAliveTmo | quote }}
   {{- end }}
-  {{- if .Values.storageClassNvmeof.parameters.reconnectDelay }}
+  {{- if hasKey .Values.storageClassNvmeof.parameters "reconnectDelay" }}
   nvmeof.reconnectDelay: {{ .Values.storageClassNvmeof.parameters.reconnectDelay | quote }}
   {{- end }}
-  {{- if .Values.storageClassNvmeof.parameters.ctrlLossTmo }}
+  {{- if hasKey .Values.storageClassNvmeof.parameters "ctrlLossTmo" }}
   nvmeof.ctrlLossTmo: {{ .Values.storageClassNvmeof.parameters.ctrlLossTmo | quote }}
   {{- end }}
   {{- /* NVMeoF DH-HMAC-CHAP authentication secret parameters */ -}}
