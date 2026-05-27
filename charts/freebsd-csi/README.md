@@ -77,7 +77,7 @@ helm install freebsd-csi charts/freebsd-csi \
 | `storageClassNvmeof.parameters.disableSqflow` | Linux `nvme connect --disable-sqflow` toggle | - |
 | `storageClassNvmeof.parameters.keepAliveTmo` | Linux `nvme connect --keep-alive-tmo` seconds | - |
 | `storageClassNvmeof.parameters.reconnectDelay` | Linux `nvme connect --reconnect-delay` seconds | - |
-| `storageClassNvmeof.parameters.ctrlLossTmo` | Linux `nvme connect --ctrl-loss-tmo` seconds | - |
+| `storageClassNvmeof.parameters.ctrlLossTmo` | Linux `nvme connect --ctrl-loss-tmo` seconds; `-1` retries forever | - |
 | `storageClassNvmeof.authSecret.name` | Existing secret with NVMeoF auth credentials | `""` |
 | `storageClassNvmeof.authSecret.namespace` | Namespace of auth secret | Release namespace |
 | `storageClassNvmeof.authSecret.credentials.hostNqn` | Host NQN for access control (creates secret if set) | `""` |

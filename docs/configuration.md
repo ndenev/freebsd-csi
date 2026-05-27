@@ -339,7 +339,7 @@ These optional parameters are copied into the PV volume context and applied by t
 | `nvmeof.disableSqflow` | `true`, `false` | `false` | Disable SQ flow control (`--disable-sqflow`) |
 | `nvmeof.keepAliveTmo` | positive integer | nvme-cli default | Keepalive timeout in seconds (`--keep-alive-tmo`) |
 | `nvmeof.reconnectDelay` | positive integer | nvme-cli default | Reconnect delay in seconds (`--reconnect-delay`) |
-| `nvmeof.ctrlLossTmo` | positive integer | nvme-cli default | Controller loss timeout in seconds (`--ctrl-loss-tmo`) |
+| `nvmeof.ctrlLossTmo` | `-1`, `0`, or positive integer | nvme-cli default | Controller loss timeout in seconds (`--ctrl-loss-tmo`); `-1` retries forever |
 
 #### Block Device Parameters
 

@@ -242,7 +242,7 @@ storageClassNvmeof:
     # disableSqflow: "true"       # --disable-sqflow
     # keepAliveTmo: "5"           # --keep-alive-tmo
     # reconnectDelay: "2"         # --reconnect-delay
-    # ctrlLossTmo: "60"           # --ctrl-loss-tmo
+    # ctrlLossTmo: "60"           # --ctrl-loss-tmo (-1 retries forever)
   # NVMeoF Access Control (optional, FreeBSD 15.0+)
   # Note: FreeBSD 15's ctld only supports host-nqn based access control for NVMeoF.
   #       DH-HMAC-CHAP is not yet implemented in ctld.
