@@ -188,8 +188,7 @@ parameters:
   endpoints: "192.168.1.100:3260"  # Required, default port: 3260
   blockSize: "4096"                # Optional: 4K block size
   enableUnmap: "true"              # Optional: Enable TRIM/discard
-  csi.storage.k8s.io/provisioner-secret-name: iscsi-chap-secret
-  csi.storage.k8s.io/provisioner-secret-namespace: default
+  authGroup: ag-secure             # Operator-defined auth-group in ctl.conf
   csi.storage.k8s.io/node-stage-secret-name: iscsi-chap-secret
   csi.storage.k8s.io/node-stage-secret-namespace: default
 ```

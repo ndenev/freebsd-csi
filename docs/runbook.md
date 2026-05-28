@@ -322,8 +322,9 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
-csi.storage.k8s.io/provisioner-secret-name: chap-secret
-csi.storage.k8s.io/provisioner-secret-namespace: default
+  authGroup: ag-secure
+csi.storage.k8s.io/node-stage-secret-name: chap-secret
+csi.storage.k8s.io/node-stage-secret-namespace: default
 ```
 
 ---

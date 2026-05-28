@@ -19,7 +19,7 @@ use tempfile::NamedTempFile;
 
 use super::error::{CtlError, Result};
 use super::types::{AuthConfig, DevicePath, ExportType, Iqn, Nqn, TargetName};
-use super::ucl_config::{AuthGroup, Controller, CtlOptions, Target, ToUcl};
+use super::ucl_config::{Controller, CtlOptions, Target, ToUcl};
 
 /// Default path for CSI-managed targets config
 const CSI_CONFIG_PATH: &str = "/var/db/ctld-agent/csi-targets.conf";
@@ -370,29 +370,21 @@ impl CtlManager {
     /// /etc/ctl.conf via .include directive. This keeps CSI-managed targets
     /// separate from user-managed targets.
     ///
-    /// Generates per-volume auth-groups for targets that require authentication.
+    /// References operator-managed auth-groups for targets that require authentication.
     #[instrument(skip(self))]
     pub async fn write_config(&self) -> Result<()> {
         use std::fmt::Write;
 
         // Collect targets and auth groups while holding the lock
         // Use a block to ensure the lock guard is dropped before any await points
-        let (iscsi_targets, nvme_controllers, auth_groups) = {
+        let (iscsi_targets, nvme_controllers) = {
             let exports = self.exports.read().unwrap();
 
             let mut iscsi_targets: Vec<(String, Target)> = Vec::new();
             let mut nvme_controllers: Vec<(String, Controller)> = Vec::new();
-            let mut auth_groups: Vec<(String, AuthGroup)> = Vec::new();
 
             for export in exports.values() {
-                // Get auth group name (either "no-authentication" or per-volume "ag-<name>")
                 let auth_group_name = export.auth.auth_group_name(&export.volume_name);
-
-                // If this export has authentication, create an auth group entry
-                // This validates CHAP credentials don't contain characters that would corrupt UCL
-                if let Some(ag) = AuthGroup::from_auth_config(&export.auth, &export.volume_name)? {
-                    auth_groups.push((auth_group_name.clone(), ag));
-                }
 
                 match export.export_type {
                     ExportType::Iscsi => {
@@ -420,15 +412,14 @@ impl CtlManager {
                 }
             }
 
-            (iscsi_targets, nvme_controllers, auth_groups)
+            (iscsi_targets, nvme_controllers)
         };
 
         info!(
-            "Writing CSI config to {} with {} iSCSI targets, {} NVMeoF controllers, {} auth groups",
+            "Writing CSI config to {} with {} iSCSI targets, {} NVMeoF controllers",
             self.csi_config_path,
             iscsi_targets.len(),
             nvme_controllers.len(),
-            auth_groups.len()
         );
 
         // Generate UCL config content
@@ -441,14 +432,6 @@ impl CtlManager {
         )
         .unwrap();
         writeln!(config).unwrap();
-
-        // Write auth groups
-        for (name, auth_group) in &auth_groups {
-            writeln!(config, "auth-group \"{}\" {{", name).unwrap();
-            write!(config, "{}", auth_group.to_ucl(1)).unwrap();
-            writeln!(config, "}}").unwrap();
-            writeln!(config).unwrap();
-        }
 
         // Write iSCSI targets
         for (iqn, target) in &iscsi_targets {
@@ -682,25 +665,22 @@ mod tests {
     }
 
     #[test]
-    fn test_export_with_chap_auth() {
-        use super::super::types::IscsiChapAuth;
-
+    fn test_export_with_auth_group_ref() {
         let device_path = DevicePath::parse("/dev/zvol/tank/vol2").unwrap();
         let iqn = Iqn::parse("iqn.2024-01.com.example:vol2").unwrap();
 
-        let chap = IscsiChapAuth::new("testuser", "testsecret");
         let export = Export {
             volume_name: "vol2".to_string(),
             device_path,
             export_type: ExportType::Iscsi,
             target_name: iqn.into(),
             lun_id: 0,
-            auth: AuthConfig::IscsiChap(chap),
+            auth: AuthConfig::GroupRef("ag-custom".to_string()),
             ctl_options: CtlOptions::default(),
         };
 
         assert!(export.auth.is_some());
-        assert_eq!(export.auth.auth_group_name("vol2"), "ag-vol2");
+        assert_eq!(export.auth.auth_group_name("vol2"), "ag-custom");
     }
 
     #[test]

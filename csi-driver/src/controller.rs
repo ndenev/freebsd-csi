@@ -9,31 +9,16 @@ use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
-use crate::agent::{
-    AuthCredentials, IscsiChapCredentials, NvmeAuthCredentials, VolumeContentSource,
-    auth_credentials,
-};
+use crate::agent::VolumeContentSource;
 use crate::agent_client::{AgentClient, TlsConfig};
 use crate::csi;
 use crate::metrics::{self, OperationTimer};
 use crate::types::{CloneMode, ExportType, NvmeofConnectOptions, ProvisioningMode};
 
-// Standard CSI secret keys for iSCSI CHAP authentication
-// These follow the Linux open-iscsi naming conventions used by the CSI spec
-const CHAP_USERNAME_KEY: &str = "node.session.auth.username";
-const CHAP_PASSWORD_KEY: &str = "node.session.auth.password";
-const CHAP_MUTUAL_USERNAME_KEY: &str = "node.session.auth.username_in";
-const CHAP_MUTUAL_PASSWORD_KEY: &str = "node.session.auth.password_in";
-
-// Secret keys for NVMeoF DH-HMAC-CHAP authentication
-const NVME_HOST_NQN_KEY: &str = "nvme.auth.host_nqn";
-const NVME_SECRET_KEY: &str = "nvme.auth.secret";
-const NVME_HASH_FUNCTION_KEY: &str = "nvme.auth.hash_function";
-const NVME_DH_GROUP_KEY: &str = "nvme.auth.dh_group";
-
 // StorageClass parameter for clone mode when restoring from snapshot
 // Values: "linked" (default, fast zfs clone) or "copy" (independent zfs send/recv)
 const CLONE_MODE_PARAM: &str = "cloneMode";
+const AUTH_GROUP_PARAM: &str = "authGroup";
 
 /// Default volume size: 1GB
 const DEFAULT_VOLUME_SIZE: i64 = 1024 * 1024 * 1024;
@@ -142,89 +127,17 @@ impl ControllerService {
             .unwrap_or_default()
     }
 
-    /// Extract authentication credentials from CSI secrets based on export type.
+    /// Extract target-side CTL auth-group reference from StorageClass parameters.
     ///
-    /// For iSCSI, extracts CHAP credentials using standard open-iscsi key names.
-    /// For NVMeoF, extracts DH-HMAC-CHAP credentials for FreeBSD 15+ support.
-    ///
-    /// Returns None if no authentication credentials are provided, allowing
-    /// backward compatibility with unauthenticated targets.
-    fn extract_auth_credentials(
-        secrets: &HashMap<String, String>,
-        export_type: ExportType,
-    ) -> Option<AuthCredentials> {
-        match export_type {
-            ExportType::Iscsi => Self::extract_iscsi_chap(secrets),
-            ExportType::Nvmeof => Self::extract_nvme_auth(secrets),
-        }
-    }
-
-    /// Extract iSCSI CHAP credentials from secrets.
-    fn extract_iscsi_chap(secrets: &HashMap<String, String>) -> Option<AuthCredentials> {
-        let username = secrets.get(CHAP_USERNAME_KEY)?;
-        let password = secrets.get(CHAP_PASSWORD_KEY)?;
-
-        // Username and password are required for CHAP
-        if username.is_empty() || password.is_empty() {
-            return None;
-        }
-
-        let credentials = IscsiChapCredentials {
-            username: username.clone(),
-            secret: password.clone(),
-            // Mutual CHAP is optional
-            mutual_username: secrets
-                .get(CHAP_MUTUAL_USERNAME_KEY)
-                .cloned()
-                .unwrap_or_default(),
-            mutual_secret: secrets
-                .get(CHAP_MUTUAL_PASSWORD_KEY)
-                .cloned()
-                .unwrap_or_default(),
-        };
-
-        debug!(
-            username = %credentials.username,
-            has_mutual = !credentials.mutual_username.is_empty(),
-            "Extracted iSCSI CHAP credentials"
-        );
-
-        Some(AuthCredentials {
-            credentials: Some(auth_credentials::Credentials::IscsiChap(credentials)),
-        })
-    }
-
-    /// Extract NVMeoF DH-HMAC-CHAP credentials from secrets.
-    fn extract_nvme_auth(secrets: &HashMap<String, String>) -> Option<AuthCredentials> {
-        let host_nqn = secrets.get(NVME_HOST_NQN_KEY)?;
-        let secret = secrets.get(NVME_SECRET_KEY)?;
-
-        // Host NQN and secret are required
-        if host_nqn.is_empty() || secret.is_empty() {
-            return None;
-        }
-
-        let credentials = NvmeAuthCredentials {
-            host_nqn: host_nqn.clone(),
-            secret: secret.clone(),
-            // Hash function and DH group have sensible defaults
-            hash_function: secrets
-                .get(NVME_HASH_FUNCTION_KEY)
-                .cloned()
-                .unwrap_or_else(|| "SHA-256".to_string()),
-            dh_group: secrets.get(NVME_DH_GROUP_KEY).cloned().unwrap_or_default(),
-        };
-
-        debug!(
-            host_nqn = %credentials.host_nqn,
-            hash_function = %credentials.hash_function,
-            has_dh = !credentials.dh_group.is_empty(),
-            "Extracted NVMeoF DH-HMAC-CHAP credentials"
-        );
-
-        Some(AuthCredentials {
-            credentials: Some(auth_credentials::Credentials::NvmeAuth(credentials)),
-        })
+    /// Credential material stays out of CreateVolume. Operators define the
+    /// auth-group in ctl.conf and configure matching node-side credentials via
+    /// CSI node-stage secrets.
+    fn extract_auth_group(parameters: &HashMap<String, String>) -> String {
+        parameters
+            .get(AUTH_GROUP_PARAM)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default()
     }
 
     /// Extract content source (snapshot or volume) from CSI request.
@@ -415,8 +328,7 @@ impl csi::controller_server::Controller for ControllerService {
             return Err(Status::invalid_argument(e.to_string()));
         }
 
-        // Extract authentication credentials from CSI secrets
-        let auth = Self::extract_auth_credentials(&req.secrets, export_type);
+        let auth_group = Self::extract_auth_group(&req.parameters);
 
         // Extract content source for snapshot restore
         let content_source =
@@ -434,7 +346,7 @@ impl csi::controller_server::Controller for ControllerService {
             size_bytes = size_bytes,
             export_type = ?export_type,
             provisioning_mode = %provisioning_mode,
-            has_auth = auth.is_some(),
+            has_auth = !auth_group.is_empty(),
             has_content_source = content_source.is_some(),
             "Creating volume"
         );
@@ -446,7 +358,7 @@ impl csi::controller_server::Controller for ControllerService {
                 size_bytes,
                 export_type.into(),
                 req.parameters.clone(),
-                auth,
+                auth_group,
                 content_source,
             )
             .await
@@ -1196,264 +1108,28 @@ mod tests {
         );
     }
 
-    // ===== iSCSI CHAP Extraction Tests =====
+    // ===== Target auth-group parameter tests =====
 
     #[test]
-    fn test_extract_iscsi_chap_with_credentials() {
-        let mut secrets = HashMap::new();
-        secrets.insert(
-            "node.session.auth.username".to_string(),
-            "chap_user".to_string(),
-        );
-        secrets.insert(
-            "node.session.auth.password".to_string(),
-            "chap_secret".to_string(),
-        );
+    fn test_extract_auth_group() {
+        let mut params = HashMap::new();
+        params.insert("authGroup".to_string(), "ag-secure".to_string());
 
-        let result = ControllerService::extract_iscsi_chap(&secrets);
-        assert!(result.is_some());
-
-        let auth = result.unwrap();
-        match auth.credentials {
-            Some(auth_credentials::Credentials::IscsiChap(chap)) => {
-                assert_eq!(chap.username, "chap_user");
-                assert_eq!(chap.secret, "chap_secret");
-                assert!(chap.mutual_username.is_empty());
-                assert!(chap.mutual_secret.is_empty());
-            }
-            _ => panic!("Expected IscsiChap credentials"),
-        }
+        assert_eq!(ControllerService::extract_auth_group(&params), "ag-secure");
     }
 
     #[test]
-    fn test_extract_iscsi_chap_with_mutual_auth() {
-        let mut secrets = HashMap::new();
-        secrets.insert(
-            "node.session.auth.username".to_string(),
-            "chap_user".to_string(),
-        );
-        secrets.insert(
-            "node.session.auth.password".to_string(),
-            "chap_secret".to_string(),
-        );
-        secrets.insert(
-            "node.session.auth.username_in".to_string(),
-            "mutual_user".to_string(),
-        );
-        secrets.insert(
-            "node.session.auth.password_in".to_string(),
-            "mutual_secret".to_string(),
-        );
+    fn test_extract_auth_group_trims_empty() {
+        let mut params = HashMap::new();
+        params.insert("authGroup".to_string(), "   ".to_string());
 
-        let result = ControllerService::extract_iscsi_chap(&secrets);
-        assert!(result.is_some());
-
-        let auth = result.unwrap();
-        match auth.credentials {
-            Some(auth_credentials::Credentials::IscsiChap(chap)) => {
-                assert_eq!(chap.username, "chap_user");
-                assert_eq!(chap.secret, "chap_secret");
-                assert_eq!(chap.mutual_username, "mutual_user");
-                assert_eq!(chap.mutual_secret, "mutual_secret");
-            }
-            _ => panic!("Expected IscsiChap credentials"),
-        }
+        assert_eq!(ControllerService::extract_auth_group(&params), "");
     }
 
     #[test]
-    fn test_extract_iscsi_chap_empty_secrets() {
-        let secrets = HashMap::new();
-        assert!(ControllerService::extract_iscsi_chap(&secrets).is_none());
-    }
+    fn test_extract_auth_group_missing() {
+        let params = HashMap::new();
 
-    #[test]
-    fn test_extract_iscsi_chap_missing_username() {
-        let mut secrets = HashMap::new();
-        secrets.insert(
-            "node.session.auth.password".to_string(),
-            "chap_secret".to_string(),
-        );
-        assert!(ControllerService::extract_iscsi_chap(&secrets).is_none());
-    }
-
-    #[test]
-    fn test_extract_iscsi_chap_missing_password() {
-        let mut secrets = HashMap::new();
-        secrets.insert(
-            "node.session.auth.username".to_string(),
-            "chap_user".to_string(),
-        );
-        assert!(ControllerService::extract_iscsi_chap(&secrets).is_none());
-    }
-
-    #[test]
-    fn test_extract_iscsi_chap_empty_username() {
-        let mut secrets = HashMap::new();
-        secrets.insert("node.session.auth.username".to_string(), "".to_string());
-        secrets.insert(
-            "node.session.auth.password".to_string(),
-            "chap_secret".to_string(),
-        );
-        assert!(ControllerService::extract_iscsi_chap(&secrets).is_none());
-    }
-
-    #[test]
-    fn test_extract_iscsi_chap_empty_password() {
-        let mut secrets = HashMap::new();
-        secrets.insert(
-            "node.session.auth.username".to_string(),
-            "chap_user".to_string(),
-        );
-        secrets.insert("node.session.auth.password".to_string(), "".to_string());
-        assert!(ControllerService::extract_iscsi_chap(&secrets).is_none());
-    }
-
-    // ===== NVMeoF DH-HMAC-CHAP Extraction Tests =====
-
-    #[test]
-    fn test_extract_nvme_auth_with_credentials() {
-        let mut secrets = HashMap::new();
-        secrets.insert(
-            "nvme.auth.host_nqn".to_string(),
-            "nqn.2014-08.org.nvmexpress:uuid:test".to_string(),
-        );
-        secrets.insert(
-            "nvme.auth.secret".to_string(),
-            "DHHC-1:00:YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXphYmNkZWZnaA==:".to_string(),
-        );
-
-        let result = ControllerService::extract_nvme_auth(&secrets);
-        assert!(result.is_some());
-
-        let auth = result.unwrap();
-        match auth.credentials {
-            Some(auth_credentials::Credentials::NvmeAuth(nvme)) => {
-                assert_eq!(nvme.host_nqn, "nqn.2014-08.org.nvmexpress:uuid:test");
-                assert_eq!(
-                    nvme.secret,
-                    "DHHC-1:00:YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXphYmNkZWZnaA==:"
-                );
-                assert_eq!(nvme.hash_function, "SHA-256"); // Default
-                assert!(nvme.dh_group.is_empty()); // Default empty
-            }
-            _ => panic!("Expected NvmeAuth credentials"),
-        }
-    }
-
-    #[test]
-    fn test_extract_nvme_auth_with_all_options() {
-        let mut secrets = HashMap::new();
-        secrets.insert(
-            "nvme.auth.host_nqn".to_string(),
-            "nqn.2014-08.org.nvmexpress:uuid:test".to_string(),
-        );
-        secrets.insert(
-            "nvme.auth.secret".to_string(),
-            "DHHC-1:00:YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXphYmNkZWZnaA==:".to_string(),
-        );
-        secrets.insert("nvme.auth.hash_function".to_string(), "SHA-384".to_string());
-        secrets.insert("nvme.auth.dh_group".to_string(), "ffdhe2048".to_string());
-
-        let result = ControllerService::extract_nvme_auth(&secrets);
-        assert!(result.is_some());
-
-        let auth = result.unwrap();
-        match auth.credentials {
-            Some(auth_credentials::Credentials::NvmeAuth(nvme)) => {
-                assert_eq!(nvme.host_nqn, "nqn.2014-08.org.nvmexpress:uuid:test");
-                assert_eq!(nvme.hash_function, "SHA-384");
-                assert_eq!(nvme.dh_group, "ffdhe2048");
-            }
-            _ => panic!("Expected NvmeAuth credentials"),
-        }
-    }
-
-    #[test]
-    fn test_extract_nvme_auth_empty_secrets() {
-        let secrets = HashMap::new();
-        assert!(ControllerService::extract_nvme_auth(&secrets).is_none());
-    }
-
-    #[test]
-    fn test_extract_nvme_auth_missing_host_nqn() {
-        let mut secrets = HashMap::new();
-        secrets.insert("nvme.auth.secret".to_string(), "secret".to_string());
-        assert!(ControllerService::extract_nvme_auth(&secrets).is_none());
-    }
-
-    #[test]
-    fn test_extract_nvme_auth_missing_secret() {
-        let mut secrets = HashMap::new();
-        secrets.insert(
-            "nvme.auth.host_nqn".to_string(),
-            "nqn.2014-08.org.nvmexpress:uuid:test".to_string(),
-        );
-        assert!(ControllerService::extract_nvme_auth(&secrets).is_none());
-    }
-
-    #[test]
-    fn test_extract_nvme_auth_empty_host_nqn() {
-        let mut secrets = HashMap::new();
-        secrets.insert("nvme.auth.host_nqn".to_string(), "".to_string());
-        secrets.insert("nvme.auth.secret".to_string(), "secret".to_string());
-        assert!(ControllerService::extract_nvme_auth(&secrets).is_none());
-    }
-
-    #[test]
-    fn test_extract_nvme_auth_empty_secret() {
-        let mut secrets = HashMap::new();
-        secrets.insert(
-            "nvme.auth.host_nqn".to_string(),
-            "nqn.2014-08.org.nvmexpress:uuid:test".to_string(),
-        );
-        secrets.insert("nvme.auth.secret".to_string(), "".to_string());
-        assert!(ControllerService::extract_nvme_auth(&secrets).is_none());
-    }
-
-    // ===== Auth Credentials Dispatcher Tests =====
-
-    #[test]
-    fn test_extract_auth_credentials_iscsi() {
-        let mut secrets = HashMap::new();
-        secrets.insert("node.session.auth.username".to_string(), "user".to_string());
-        secrets.insert("node.session.auth.password".to_string(), "pass".to_string());
-
-        let result = ControllerService::extract_auth_credentials(&secrets, ExportType::Iscsi);
-        assert!(result.is_some());
-        assert!(matches!(
-            result.unwrap().credentials,
-            Some(auth_credentials::Credentials::IscsiChap(_))
-        ));
-    }
-
-    #[test]
-    fn test_extract_auth_credentials_nvmeof() {
-        let mut secrets = HashMap::new();
-        secrets.insert(
-            "nvme.auth.host_nqn".to_string(),
-            "nqn.2014-08.org.nvmexpress:uuid:test".to_string(),
-        );
-        secrets.insert("nvme.auth.secret".to_string(), "secret".to_string());
-
-        let result = ControllerService::extract_auth_credentials(&secrets, ExportType::Nvmeof);
-        assert!(result.is_some());
-        assert!(matches!(
-            result.unwrap().credentials,
-            Some(auth_credentials::Credentials::NvmeAuth(_))
-        ));
-    }
-
-    #[test]
-    fn test_extract_auth_credentials_iscsi_no_secrets() {
-        let secrets = HashMap::new();
-        let result = ControllerService::extract_auth_credentials(&secrets, ExportType::Iscsi);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_extract_auth_credentials_nvmeof_no_secrets() {
-        let secrets = HashMap::new();
-        let result = ControllerService::extract_auth_credentials(&secrets, ExportType::Nvmeof);
-        assert!(result.is_none());
+        assert_eq!(ControllerService::extract_auth_group(&params), "");
     }
 }

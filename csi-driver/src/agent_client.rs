@@ -23,9 +23,9 @@ const MAX_BACKOFF_MS: u64 = 5000;
 const BACKOFF_MULTIPLIER: u64 = 2;
 
 use crate::agent::{
-    AuthCredentials, CreateSnapshotRequest, CreateVolumeRequest, DeleteSnapshotRequest,
-    DeleteVolumeRequest, ExpandVolumeRequest, ExportType, GetCapacityRequest, GetVolumeRequest,
-    ListSnapshotsRequest, ListVolumesRequest, Snapshot, Volume, VolumeContentSource,
+    CreateSnapshotRequest, CreateVolumeRequest, DeleteSnapshotRequest, DeleteVolumeRequest,
+    ExpandVolumeRequest, ExportType, GetCapacityRequest, GetVolumeRequest, ListSnapshotsRequest,
+    ListVolumesRequest, Snapshot, Volume, VolumeContentSource,
     storage_agent_client::StorageAgentClient,
 };
 
@@ -167,8 +167,8 @@ impl AgentClient {
 
     /// Create a new volume with the specified parameters.
     ///
-    /// If `auth` is provided, the target will be configured to require authentication.
-    /// For iSCSI, this means CHAP credentials. For NVMeoF, DH-HMAC-CHAP.
+    /// If `auth_group` is provided, the target references that operator-managed
+    /// CTL auth-group. Credential material is never sent to the agent.
     ///
     /// If `content_source` is provided, the volume will be created from the specified snapshot.
     /// The clone_mode determines whether to use fast linking (zfs clone) or full copy (zfs send/recv).
@@ -180,7 +180,7 @@ impl AgentClient {
         size_bytes: i64,
         export_type: ExportType,
         parameters: HashMap<String, String>,
-        auth: Option<AuthCredentials>,
+        auth_group: String,
         content_source: Option<VolumeContentSource>,
     ) -> Result<Volume, tonic::Status> {
         let request = CreateVolumeRequest {
@@ -188,7 +188,7 @@ impl AgentClient {
             size_bytes,
             export_type: export_type as i32,
             parameters,
-            auth,
+            auth_group,
             content_source,
         };
 

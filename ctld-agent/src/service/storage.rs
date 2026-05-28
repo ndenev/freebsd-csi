@@ -7,7 +7,6 @@
 //! storage operations.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -17,19 +16,16 @@ use tracing::{debug, error, info, instrument, warn};
 
 /// Default maximum number of concurrent storage operations
 const DEFAULT_MAX_CONCURRENT_OPS: usize = 10;
-const DEFAULT_AUTH_DB_PATH: &str = "/var/db/ctld-agent/auth.json";
 
 type VolumeCreateLocks = Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>;
 
-use crate::auth::{AuthDb, ChapCredentials, load_auth_db, write_auth_db};
 use crate::ctl::{
     AuthConfig, ConfigWriterHandle, CtlError, CtlManager, CtlOptions, ExportType as CtlExportType,
-    IscsiChapAuth, NvmeAuth, spawn_config_writer,
+    spawn_config_writer,
 };
 use crate::metrics::{self, OperationTimer};
 use crate::zfs::{
-    VolumeMetadata as ZfsVolumeMetadata, VolumeMetadataLookup as MissingMetadataLookup, ZfsError,
-    ZfsManager,
+    VolumeMetadata as ZfsVolumeMetadata, VolumeMetadataLookup as MissingMetadataLookup, ZfsManager,
 };
 
 /// Generated protobuf types and service trait
@@ -39,7 +35,7 @@ pub mod proto {
 
 use proto::storage_agent_server::StorageAgent;
 use proto::{
-    AuthCredentials, CloneMode, CreateSnapshotRequest, CreateSnapshotResponse, CreateVolumeRequest,
+    CloneMode, CreateSnapshotRequest, CreateSnapshotResponse, CreateVolumeRequest,
     CreateVolumeResponse, DeleteSnapshotRequest, DeleteSnapshotResponse, DeleteVolumeRequest,
     DeleteVolumeResponse, ExpandVolumeRequest, ExpandVolumeResponse, ExportType,
     GetCapacityRequest, GetCapacityResponse, GetSnapshotRequest, GetSnapshotResponse,
@@ -64,32 +60,12 @@ fn ctl_to_proto_export_type(export_type: CtlExportType) -> ExportType {
     }
 }
 
-/// Convert proto AuthCredentials to CTL AuthConfig
-fn proto_to_ctl_auth(auth: Option<&AuthCredentials>) -> AuthConfig {
-    use proto::auth_credentials::Credentials;
-
-    match auth.and_then(|a| a.credentials.as_ref()) {
-        None => AuthConfig::None,
-        Some(Credentials::IscsiChap(chap)) => {
-            let has_mutual = !chap.mutual_username.is_empty() && !chap.mutual_secret.is_empty();
-            if has_mutual {
-                AuthConfig::IscsiChap(IscsiChapAuth::with_mutual(
-                    &chap.username,
-                    &chap.secret,
-                    &chap.mutual_username,
-                    &chap.mutual_secret,
-                ))
-            } else {
-                AuthConfig::IscsiChap(IscsiChapAuth::new(&chap.username, &chap.secret))
-            }
-        }
-        Some(Credentials::NvmeAuth(nvme)) => {
-            let mut auth = NvmeAuth::new(&nvme.host_nqn, &nvme.secret, &nvme.hash_function);
-            if !nvme.dh_group.is_empty() {
-                auth = auth.with_dh_group(&nvme.dh_group);
-            }
-            AuthConfig::NvmeAuth(auth)
-        }
+fn auth_group_to_ctl_auth(auth_group: &str) -> AuthConfig {
+    let auth_group = auth_group.trim();
+    if auth_group.is_empty() {
+        AuthConfig::None
+    } else {
+        AuthConfig::GroupRef(auth_group.to_string())
     }
 }
 
@@ -152,52 +128,11 @@ fn is_idempotent_create_request(
 
 fn create_auth_matches(existing: &VolumeMetadata, requested_auth: &AuthConfig) -> bool {
     match (&existing.auth, requested_auth) {
-        (AuthConfig::IscsiChap(existing), AuthConfig::IscsiChap(requested)) => {
-            existing == requested
-        }
-        (AuthConfig::NvmeAuth(existing), AuthConfig::NvmeAuth(requested)) => existing == requested,
         (AuthConfig::None, AuthConfig::None) => true,
-        // ZFS metadata stores only the auth-group name, not credentials.
-        // Request credentials cannot be verified against a GroupRef alone.
         (AuthConfig::GroupRef(existing_group), AuthConfig::GroupRef(requested_group)) => {
             existing_group == requested_group
         }
         _ => false,
-    }
-}
-
-fn auth_config_to_chap_credentials(auth: &AuthConfig) -> Option<ChapCredentials> {
-    match auth {
-        AuthConfig::IscsiChap(chap) => {
-            if chap.has_mutual() {
-                Some(ChapCredentials::with_mutual(
-                    chap.username.clone(),
-                    chap.secret.clone(),
-                    chap.mutual_username.clone().unwrap_or_default(),
-                    chap.mutual_secret.clone().unwrap_or_default(),
-                ))
-            } else {
-                Some(ChapCredentials::new(
-                    chap.username.clone(),
-                    chap.secret.clone(),
-                ))
-            }
-        }
-        _ => None,
-    }
-}
-
-fn chap_credentials_to_auth_config(credentials: &ChapCredentials) -> AuthConfig {
-    match (&credentials.mutual_user, &credentials.mutual_secret) {
-        (Some(mutual_user), Some(mutual_secret)) => {
-            AuthConfig::IscsiChap(IscsiChapAuth::with_mutual(
-                &credentials.user,
-                &credentials.secret,
-                mutual_user,
-                mutual_secret,
-            ))
-        }
-        _ => AuthConfig::IscsiChap(IscsiChapAuth::new(&credentials.user, &credentials.secret)),
     }
 }
 
@@ -376,10 +311,6 @@ pub struct StorageService {
     config_writer: ConfigWriterHandle,
     /// Volume metadata tracking
     volumes: Arc<RwLock<HashMap<String, VolumeMetadata>>>,
-    /// Root-only store for CSI-managed target-side CHAP credentials
-    auth_db_path: PathBuf,
-    /// Serializes auth database read-modify-write updates
-    auth_db_lock: Arc<Mutex<()>>,
     /// Serializes same-name CreateVolume calls
     volume_create_locks: VolumeCreateLocks,
     // Note: Snapshot metadata is stored in ZFS properties and queried directly.
@@ -412,8 +343,6 @@ impl StorageService {
             ctl,
             config_writer,
             volumes: Arc::new(RwLock::new(HashMap::new())),
-            auth_db_path: PathBuf::from(DEFAULT_AUTH_DB_PATH),
-            auth_db_lock: Arc::new(Mutex::new(())),
             volume_create_locks: Arc::new(Mutex::new(HashMap::new())),
             ops_semaphore: Arc::new(Semaphore::new(max_concurrent_ops)),
             max_concurrent_ops,
@@ -431,136 +360,6 @@ impl StorageService {
         let lock = Arc::new(Mutex::new(()));
         locks.insert(volume_name.to_string(), Arc::downgrade(&lock));
         lock
-    }
-
-    fn auth_db_for_restore_result(result: Result<AuthDb, Status>) -> AuthDb {
-        match result {
-            Ok(auth_db) => auth_db,
-            Err(status) => {
-                warn!(
-                    error = %status,
-                    "Failed to load auth database during restore; restoring ZFS metadata without credential enrichment"
-                );
-                AuthDb::new()
-            }
-        }
-    }
-
-    async fn load_auth_db(&self) -> Result<AuthDb, Status> {
-        load_auth_db(&self.auth_db_path)
-            .await
-            .map_err(|e| Status::internal(format!("failed to load auth database: {}", e)))
-    }
-
-    async fn persist_auth_config(
-        &self,
-        volume_name: &str,
-        auth: &AuthConfig,
-    ) -> Result<(), Status> {
-        let Some(credentials) = auth_config_to_chap_credentials(auth) else {
-            return Ok(());
-        };
-
-        let _guard = self.auth_db_lock.lock().await;
-        let mut auth_db = self.load_auth_db().await?;
-        auth_db.insert(volume_name.to_string(), credentials);
-        write_auth_db(&self.auth_db_path, &auth_db)
-            .await
-            .map_err(|e| Status::internal(format!("failed to persist CHAP credentials: {}", e)))
-    }
-
-    async fn remove_auth_config(&self, volume_name: &str) -> Result<(), Status> {
-        let _guard = self.auth_db_lock.lock().await;
-        let mut auth_db = self.load_auth_db().await?;
-        if auth_db.remove(volume_name).is_some() {
-            write_auth_db(&self.auth_db_path, &auth_db)
-                .await
-                .map_err(|e| {
-                    Status::internal(format!("failed to remove CHAP credentials: {}", e))
-                })?;
-        }
-        Ok(())
-    }
-
-    fn auth_from_metadata_and_db(
-        volume_name: &str,
-        auth_group: Option<&String>,
-        auth_db: &AuthDb,
-    ) -> AuthConfig {
-        let Some(auth_group) = auth_group else {
-            return AuthConfig::None;
-        };
-
-        if let Some(credentials) = auth_db.get(volume_name) {
-            return chap_credentials_to_auth_config(credentials);
-        }
-
-        AuthConfig::GroupRef(auth_group.clone())
-    }
-
-    fn reconcile_export_skip_reason(metadata: &VolumeMetadata) -> Option<&'static str> {
-        if matches!(metadata.auth, AuthConfig::GroupRef(_)) {
-            Some("CSI-managed auth credentials are unavailable")
-        } else {
-            None
-        }
-    }
-
-    fn unavailable_auth_volume_names(volumes: &HashMap<String, VolumeMetadata>) -> Vec<String> {
-        let mut volume_names: Vec<_> = volumes
-            .values()
-            .filter(|metadata| matches!(metadata.auth, AuthConfig::GroupRef(_)))
-            .map(|metadata| metadata.name.clone())
-            .collect();
-        volume_names.sort();
-        volume_names
-    }
-
-    fn unavailable_auth_startup_error(volume_names: &[String]) -> Option<String> {
-        if volume_names.is_empty() {
-            None
-        } else {
-            Some(format!(
-                "CSI-managed authenticated volume credentials are unavailable for: {}. \
-                 Restore /var/db/ctld-agent/auth.json, recreate the affected PVCs, or manually remove/migrate the affected volumes before starting ctld-agent.",
-                volume_names.join(", ")
-            ))
-        }
-    }
-
-    async fn enrich_metadata_auth(&self, metadata: &mut VolumeMetadata) -> Result<(), Status> {
-        if !matches!(metadata.auth, AuthConfig::GroupRef(_)) {
-            return Ok(());
-        }
-
-        let auth_db = self.load_auth_db().await?;
-        if let Some(credentials) = auth_db.get(&metadata.name) {
-            metadata.auth = chap_credentials_to_auth_config(credentials);
-        }
-        Ok(())
-    }
-
-    async fn persist_auth_for_new_volume(
-        &self,
-        volume_name: &str,
-        auth: &AuthConfig,
-    ) -> Result<(), Status> {
-        let zfs = self.zfs.read().await;
-        match zfs.get_dataset(volume_name).await {
-            Ok(_) => Ok(()),
-            Err(ZfsError::DatasetNotFound(_)) => {
-                drop(zfs);
-                self.persist_auth_config(volume_name, auth).await
-            }
-            Err(ZfsError::InvalidName(msg)) => Err(Status::invalid_argument(format!(
-                "invalid volume name '{}': {}",
-                volume_name, msg
-            ))),
-            Err(e) => Err(Status::internal(format!(
-                "failed to check existing volume before persisting auth: {}",
-                e
-            ))),
-        }
     }
 
     /// Acquire rate limiting permit, returning ResourceExhausted if too many concurrent ops
@@ -600,19 +399,12 @@ impl StorageService {
                 .map_err(|e| format!("failed to list volumes with metadata: {}", e))?
         };
 
-        let auth_db = Self::auth_db_for_restore_result(self.load_auth_db().await);
         let mut restored_count = 0;
         let mut volumes = self.volumes.write().await;
 
         for (vol_name, zfs_meta) in volumes_with_metadata {
             // Convert CTL ExportType to proto ExportType
             let export_type = ctl_to_proto_export_type(zfs_meta.export_type);
-
-            // Reconstruct auth config from ZFS metadata.
-            // We only store the auth-group NAME in ZFS, not credentials.
-            // Credentials are kept in the root-only auth database.
-            let auth =
-                Self::auth_from_metadata_and_db(&vol_name, zfs_meta.auth_group.as_ref(), &auth_db);
 
             let metadata = VolumeMetadata {
                 id: vol_name.clone(),
@@ -627,7 +419,11 @@ impl StorageService {
                     )
                 })?,
                 parameters: zfs_meta.parameters.clone(),
-                auth,
+                auth: zfs_meta
+                    .auth_group
+                    .as_deref()
+                    .map(auth_group_to_ctl_auth)
+                    .unwrap_or_default(),
             };
 
             volumes.insert(vol_name.clone(), metadata);
@@ -636,11 +432,6 @@ impl StorageService {
                 "Restored volume '{}' (export_type={}, target={})",
                 vol_name, zfs_meta.export_type, zfs_meta.target_name
             );
-        }
-
-        let unavailable_auth_volumes = Self::unavailable_auth_volume_names(&volumes);
-        if let Some(error) = Self::unavailable_auth_startup_error(&unavailable_auth_volumes) {
-            return Err(error);
         }
 
         info!(
@@ -678,15 +469,6 @@ impl StorageService {
                 continue;
             }
 
-            if let Some(reason) = Self::reconcile_export_skip_reason(metadata) {
-                warn!(
-                    volume = %vol_name,
-                    reason = reason,
-                    "Skipping export reconciliation"
-                );
-                continue;
-            }
-
             let Some(ctl_export_type) = to_ctl_export_type(metadata.export_type) else {
                 debug!(
                     "Volume '{}' has no export type, skipping reconciliation",
@@ -708,9 +490,8 @@ impl StorageService {
             };
 
             let ctl = self.ctl.read().await;
-            // Auth-group NAME is stored in ZFS metadata; credentials are restored
-            // from the auth database when available. GroupRef references an
-            // existing auth-group without generating credential material.
+            // Auth-group NAME is stored in ZFS metadata. GroupRef references an
+            // operator-managed auth-group without generating credential material.
             // CTL options (blockSize, physicalBlockSize, enableUnmap) are stored in
             // metadata.parameters - parse them to restore the original configuration.
             let ctl_options = parse_ctl_options(&metadata.parameters);
@@ -893,48 +674,8 @@ impl StorageAgent for StorageService {
             }
         };
 
-        // Extract auth config for CTL export (credentials used in ctl.conf)
-        let mut auth_config = proto_to_ctl_auth(req.auth.as_ref());
-
-        // Reject NVMeoF authentication until FreeBSD supports DH-HMAC-CHAP
-        if export_type == ExportType::Nvmeof && matches!(auth_config, AuthConfig::NvmeAuth(_)) {
-            timer.failure("invalid_argument");
-            return Err(Status::invalid_argument(
-                "NVMeoF DH-HMAC-CHAP authentication is not yet supported on FreeBSD. \
-                 Use iSCSI with CHAP authentication, or NVMeoF without authentication.",
-            ));
-        }
-
-        // Phase 1: Validate all inputs BEFORE any state changes
-        // Validate CHAP credentials if present (prevents invalid creds from being stored)
-        if let Some(auth) = &req.auth {
-            use proto::auth_credentials::Credentials;
-            if let Some(Credentials::IscsiChap(chap)) = &auth.credentials {
-                if let Err(e) = crate::ctl::validate_chap_credentials(&chap.username, &chap.secret)
-                {
-                    timer.failure("validation_error");
-                    return Err(Status::invalid_argument(format!(
-                        "Invalid CHAP credentials: {}",
-                        e
-                    )));
-                }
-
-                // Validate mutual CHAP credentials if both are provided
-                if !chap.mutual_username.is_empty()
-                    && !chap.mutual_secret.is_empty()
-                    && let Err(e) = crate::ctl::validate_chap_credentials(
-                        &chap.mutual_username,
-                        &chap.mutual_secret,
-                    )
-                {
-                    timer.failure("validation_error");
-                    return Err(Status::invalid_argument(format!(
-                        "Invalid mutual CHAP credentials: {}",
-                        e
-                    )));
-                }
-            }
-        }
+        // Extract operator-managed target auth-group reference.
+        let mut auth_config = auth_group_to_ctl_auth(&req.auth_group);
 
         // Compute auth-group name for ZFS metadata (credentials NOT stored in ZFS)
         let auth_group_name = if auth_config.is_some() {
@@ -943,9 +684,8 @@ impl StorageAgent for StorageService {
             None
         };
 
-        // Build ZFS metadata to set atomically during volume creation
-        // SECURITY: Only the auth-group NAME is stored in ZFS metadata.
-        // Credentials are persisted in the root-only auth database.
+        // Build ZFS metadata to set atomically during volume creation.
+        // Only the auth-group NAME is stored in ZFS metadata.
         let zfs_metadata = ZfsVolumeMetadata::new(
             ctl_export_type,
             target_name.clone(),
@@ -959,17 +699,6 @@ impl StorageAgent for StorageService {
         let volume_create_lock =
             Self::create_volume_lock(&self.volume_create_locks, &req.name).await;
         let _volume_create_guard = volume_create_lock.lock().await;
-
-        if let Err(status) = self
-            .persist_auth_for_new_volume(&req.name, &auth_config)
-            .await
-        {
-            timer.failure(match status.code() {
-                tonic::Code::InvalidArgument => "invalid_argument",
-                _ => "auth_prepare_error",
-            });
-            return Err(status);
-        }
 
         // Create ZFS volume - either fresh or from content source (snapshot/volume)
         let dataset = if let Some(ref content_source) = req.content_source {
@@ -1176,7 +905,7 @@ impl StorageAgent for StorageService {
                         volumes.get(&req.name).cloned()
                     };
 
-                    let mut existing_metadata = match create_retry_metadata(
+                    let existing_metadata = match create_retry_metadata(
                         &req.name,
                         cached_metadata,
                         zfs.get_volume_metadata(&req.name).await,
@@ -1191,11 +920,6 @@ impl StorageAgent for StorageService {
                             return Err(status);
                         }
                     };
-
-                    if let Err(status) = self.enrich_metadata_auth(&mut existing_metadata).await {
-                        timer.failure("auth_load_error");
-                        return Err(status);
-                    }
 
                     if !is_idempotent_create_request(
                         &existing_metadata,
@@ -1669,14 +1393,6 @@ impl StorageAgent for StorageService {
             let mut volumes = self.volumes.write().await;
             volumes.remove(&req.volume_id);
             metrics::set_volumes_count(volumes.len());
-        }
-
-        if let Err(status) = self.remove_auth_config(&req.volume_id).await {
-            warn!(
-                volume = %req.volume_id,
-                error = %status,
-                "Failed to remove CHAP credentials after deleting volume"
-            );
         }
 
         info!("Deleted volume: {}", req.volume_id);
@@ -2409,7 +2125,7 @@ mod tests {
     }
 
     #[test]
-    fn test_idempotent_create_request_rejects_unverifiable_group_ref_credentials() {
+    fn test_idempotent_create_request_rejects_different_auth_group() {
         let mut params = HashMap::new();
         params.insert("blockSize".to_string(), "4096".to_string());
 
@@ -2428,85 +2144,32 @@ mod tests {
             ExportType::Iscsi,
             0,
             &params,
-            &AuthConfig::IscsiChap(IscsiChapAuth::new("user", "secret")),
+            &AuthConfig::GroupRef("ag-other".to_string()),
         ));
     }
 
     #[test]
-    fn test_chap_credentials_restore_auth_config() {
-        let credentials =
-            ChapCredentials::with_mutual("user", "secret", "target-user", "target-secret");
+    fn test_idempotent_create_request_accepts_matching_auth_group() {
+        let mut params = HashMap::new();
+        params.insert("blockSize".to_string(), "4096".to_string());
 
-        assert_eq!(
-            chap_credentials_to_auth_config(&credentials),
-            AuthConfig::IscsiChap(IscsiChapAuth::with_mutual(
-                "user",
-                "secret",
-                "target-user",
-                "target-secret"
-            ))
-        );
-    }
+        let existing = VolumeMetadata {
+            id: "vol1".to_string(),
+            name: "vol1".to_string(),
+            export_type: ExportType::Iscsi,
+            target_name: "iqn.2024-01.org.freebsd.csi:vol1".to_string(),
+            lun_id: 0,
+            parameters: params.clone(),
+            auth: AuthConfig::GroupRef("ag-vol1".to_string()),
+        };
 
-    #[test]
-    fn test_auth_config_persists_chap_credentials() {
-        let auth = AuthConfig::IscsiChap(IscsiChapAuth::new("user", "secret"));
-        let credentials = auth_config_to_chap_credentials(&auth).unwrap();
-
-        assert_eq!(credentials, ChapCredentials::new("user", "secret"));
-    }
-
-    #[test]
-    fn test_auth_from_metadata_uses_auth_db_credentials() {
-        let mut auth_db = AuthDb::new();
-        auth_db.insert(
-            "vol1".to_string(),
-            ChapCredentials::new("user", "stored-secret"),
-        );
-
-        assert_eq!(
-            StorageService::auth_from_metadata_and_db(
-                "vol1",
-                Some(&"ag-vol1".to_string()),
-                &auth_db
-            ),
-            AuthConfig::IscsiChap(IscsiChapAuth::new("user", "stored-secret"))
-        );
-    }
-
-    #[test]
-    fn test_auth_from_metadata_falls_back_to_group_ref_without_auth_db_credentials() {
-        assert_eq!(
-            StorageService::auth_from_metadata_and_db(
-                "vol1",
-                Some(&"ag-vol1".to_string()),
-                &AuthDb::new()
-            ),
-            AuthConfig::GroupRef("ag-vol1".to_string())
-        );
-    }
-
-    #[test]
-    fn test_auth_from_metadata_ignores_auth_db_without_metadata_auth_group() {
-        let mut auth_db = AuthDb::new();
-        auth_db.insert(
-            "vol1".to_string(),
-            ChapCredentials::new("user", "stale-secret"),
-        );
-
-        assert_eq!(
-            StorageService::auth_from_metadata_and_db("vol1", None, &auth_db),
-            AuthConfig::None
-        );
-    }
-
-    #[test]
-    fn test_auth_db_for_restore_falls_back_to_empty_on_error() {
-        let auth_db = StorageService::auth_db_for_restore_result(Err(Status::internal(
-            "failed to load auth database",
-        )));
-
-        assert!(auth_db.is_empty());
+        assert!(is_idempotent_create_request(
+            &existing,
+            ExportType::Iscsi,
+            0,
+            &params,
+            &AuthConfig::GroupRef("ag-vol1".to_string()),
+        ));
     }
 
     #[tokio::test]
@@ -2535,105 +2198,6 @@ mod tests {
 
         assert!(!locks.contains_key("vol1"));
         assert!(locks.contains_key("vol2"));
-    }
-
-    #[test]
-    fn test_reconcile_export_skip_reason_skips_group_ref_auth() {
-        let metadata = VolumeMetadata {
-            id: "vol1".to_string(),
-            name: "vol1".to_string(),
-            export_type: ExportType::Iscsi,
-            target_name: "iqn.2024-01.org.freebsd.csi:vol1".to_string(),
-            lun_id: 0,
-            parameters: HashMap::new(),
-            auth: AuthConfig::GroupRef("ag-vol1".to_string()),
-        };
-
-        assert_eq!(
-            StorageService::reconcile_export_skip_reason(&metadata),
-            Some("CSI-managed auth credentials are unavailable")
-        );
-    }
-
-    #[test]
-    fn test_reconcile_export_skip_reason_allows_credential_auth() {
-        let metadata = VolumeMetadata {
-            id: "vol1".to_string(),
-            name: "vol1".to_string(),
-            export_type: ExportType::Iscsi,
-            target_name: "iqn.2024-01.org.freebsd.csi:vol1".to_string(),
-            lun_id: 0,
-            parameters: HashMap::new(),
-            auth: AuthConfig::IscsiChap(IscsiChapAuth::new("user", "secret")),
-        };
-
-        assert_eq!(
-            StorageService::reconcile_export_skip_reason(&metadata),
-            None
-        );
-    }
-
-    #[test]
-    fn test_unavailable_auth_volume_names_lists_group_ref_volumes() {
-        let mut volumes = HashMap::new();
-        volumes.insert(
-            "vol2".to_string(),
-            VolumeMetadata {
-                id: "vol2".to_string(),
-                name: "vol2".to_string(),
-                export_type: ExportType::Iscsi,
-                target_name: "iqn.2024-01.org.freebsd.csi:vol2".to_string(),
-                lun_id: 0,
-                parameters: HashMap::new(),
-                auth: AuthConfig::GroupRef("ag-vol2".to_string()),
-            },
-        );
-        volumes.insert(
-            "vol1".to_string(),
-            VolumeMetadata {
-                id: "vol1".to_string(),
-                name: "vol1".to_string(),
-                export_type: ExportType::Iscsi,
-                target_name: "iqn.2024-01.org.freebsd.csi:vol1".to_string(),
-                lun_id: 0,
-                parameters: HashMap::new(),
-                auth: AuthConfig::None,
-            },
-        );
-        volumes.insert(
-            "vol3".to_string(),
-            VolumeMetadata {
-                id: "vol3".to_string(),
-                name: "vol3".to_string(),
-                export_type: ExportType::Iscsi,
-                target_name: "iqn.2024-01.org.freebsd.csi:vol3".to_string(),
-                lun_id: 0,
-                parameters: HashMap::new(),
-                auth: AuthConfig::IscsiChap(IscsiChapAuth::new("user", "secret")),
-            },
-        );
-
-        assert_eq!(
-            StorageService::unavailable_auth_volume_names(&volumes),
-            vec!["vol2".to_string()]
-        );
-    }
-
-    #[test]
-    fn test_unavailable_auth_startup_error_is_empty_without_group_refs() {
-        assert_eq!(StorageService::unavailable_auth_startup_error(&[]), None);
-    }
-
-    #[test]
-    fn test_unavailable_auth_startup_error_mentions_auth_db_and_volumes() {
-        let error = StorageService::unavailable_auth_startup_error(&[
-            "vol1".to_string(),
-            "vol2".to_string(),
-        ])
-        .unwrap();
-
-        assert!(error.contains("/var/db/ctld-agent/auth.json"));
-        assert!(error.contains("vol1, vol2"));
     }
 
     #[test]
@@ -2675,48 +2239,6 @@ mod tests {
             0,
             &HashMap::new(),
             &AuthConfig::None,
-        ));
-    }
-
-    #[test]
-    fn test_idempotent_create_request_rejects_changed_chap_secret() {
-        let existing = VolumeMetadata {
-            id: "vol1".to_string(),
-            name: "vol1".to_string(),
-            export_type: ExportType::Iscsi,
-            target_name: "iqn.2024-01.org.freebsd.csi:vol1".to_string(),
-            lun_id: 0,
-            parameters: HashMap::new(),
-            auth: AuthConfig::IscsiChap(IscsiChapAuth::new("user", "old-secret")),
-        };
-
-        assert!(!is_idempotent_create_request(
-            &existing,
-            ExportType::Iscsi,
-            0,
-            &HashMap::new(),
-            &AuthConfig::IscsiChap(IscsiChapAuth::new("user", "new-secret")),
-        ));
-    }
-
-    #[test]
-    fn test_idempotent_create_request_accepts_matching_chap_secret() {
-        let existing = VolumeMetadata {
-            id: "vol1".to_string(),
-            name: "vol1".to_string(),
-            export_type: ExportType::Iscsi,
-            target_name: "iqn.2024-01.org.freebsd.csi:vol1".to_string(),
-            lun_id: 0,
-            parameters: HashMap::new(),
-            auth: AuthConfig::IscsiChap(IscsiChapAuth::new("user", "same-secret")),
-        };
-
-        assert!(is_idempotent_create_request(
-            &existing,
-            ExportType::Iscsi,
-            0,
-            &HashMap::new(),
-            &AuthConfig::IscsiChap(IscsiChapAuth::new("user", "same-secret")),
         ));
     }
 }

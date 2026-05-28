@@ -2,7 +2,7 @@
 
 Tests the complete CHAP authentication flow:
 1. K8s Secret with CHAP credentials
-2. StorageClass with secret references
+2. StorageClass with authGroup and node-stage secret references
 3. PVC provisioning with authentication
 4. UCL config verification (auth-group with CHAP)
 5. Mutual CHAP authentication
@@ -35,7 +35,7 @@ class TestChapAuthentication:
         """Factory for creating CHAP secrets with automatic cleanup.
 
         Secrets are tracked via resource_tracker and cleaned up AFTER PVCs,
-        ensuring the CSI provisioner can access credentials during volume deletion.
+        ensuring the node can access credentials while the PVC exists.
         """
 
         def create(
@@ -196,7 +196,7 @@ class TestChapAuthentication:
             username=chap_username,
             password=chap_password,
         )
-        # Track secret for cleanup AFTER PVC (so provisioner can access credentials)
+        # Track secret for cleanup AFTER PVC so staged nodes can use it.
         resource_tracker.track_secret(secret_name)
 
         # Create PVC using the CHAP StorageClass
@@ -221,9 +221,8 @@ class TestChapAuthentication:
         # Verify volume is exported via iSCSI
         assert storage.verify_volume_exported(pv_name, "iscsi"), "Volume not exported"
 
-        # Verify auth-group was created with CHAP
-        # The CSI driver creates auth-group named "ag-{volume_id}"
-        auth_group_name = f"ag-{pv_name}"
+        # Verify target references the operator-managed auth-group
+        auth_group_name = "ag-e2e-chap"
         assert storage.verify_auth_group_has_chap(
             auth_group_name, expected_username=chap_username
         ), f"Auth-group {auth_group_name} doesn't have expected CHAP config"
@@ -269,7 +268,7 @@ class TestChapAuthentication:
         assert pv_name is not None
 
         # Verify mutual CHAP is configured
-        auth_group_name = f"ag-{pv_name}"
+        auth_group_name = "ag-e2e-mutual-chap"
         assert storage.verify_auth_group_has_mutual_chap(
             auth_group_name,
             expected_username=initiator_username,
@@ -310,7 +309,7 @@ class TestChapAuthentication:
         pv_name = k8s.get_pvc_volume(pvc_name)
 
         # Get the full auth-group info
-        auth_group_name = f"ag-{pv_name}"
+        auth_group_name = "ag-e2e-chap"
         ag_info = storage.get_auth_group(auth_group_name)
 
         assert ag_info is not None, f"Auth-group {auth_group_name} not found"
@@ -464,7 +463,7 @@ class TestChapAuthentication:
         assert wait_pvc_bound(pvc_name, timeout=120)
 
         pv_name = k8s.get_pvc_volume(pvc_name)
-        auth_group_name = f"ag-{pv_name}"
+        auth_group_name = "ag-e2e-chap"
 
         # Verify auth-group exists before deletion
         assert storage.verify_auth_group_exists(auth_group_name)
@@ -475,10 +474,8 @@ class TestChapAuthentication:
         # Wait for PV to be deleted (indicates cleanup is complete)
         assert wait_pv_deleted(pv_name, timeout=60), f"PV {pv_name} not deleted"
 
-        # Auth-group should be removed
-        assert not storage.verify_auth_group_exists(
-            auth_group_name
-        ), f"Auth-group {auth_group_name} not cleaned up after volume deletion"
+        # The operator-managed auth-group is not owned by CSI and should persist.
+        assert storage.verify_auth_group_exists(auth_group_name)
 
 
 class TestChapSecurityEdgeCases:
@@ -519,7 +516,7 @@ class TestChapSecurityEdgeCases:
         assert wait_pvc_bound(pvc_name, timeout=120)
 
         pv_name = k8s.get_pvc_volume(pvc_name)
-        auth_group_name = f"ag-{pv_name}"
+        auth_group_name = "ag-e2e-chap"
 
         # Verify the password was stored correctly (UCL escaping)
         ag_info = storage.get_auth_group(auth_group_name)
@@ -563,9 +560,9 @@ class TestChapSecurityEdgeCases:
         assert wait_pvc_bound(pvc_name, timeout=120)
 
         pv_name = k8s.get_pvc_volume(pvc_name)
-        auth_group_name = f"ag-{pv_name}"
+        auth_group_name = "ag-e2e-chap"
 
-        # Verify credentials were stored
+        # Verify the operator-managed auth-group is present and usable.
         ag_info = storage.get_auth_group(auth_group_name)
         assert ag_info is not None
         assert ag_info.chap_username == chap_username

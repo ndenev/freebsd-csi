@@ -24,45 +24,6 @@ enum CloneMode {
     CLONE_MODE_COPY = 2;
 }
 
-// iSCSI CHAP authentication credentials
-// Used for both initiator authentication (forward CHAP) and mutual authentication
-message IscsiChapCredentials {
-    // Forward CHAP: initiator authenticates to target
-    string username = 1;
-    string secret = 2;
-
-    // Mutual CHAP (optional): target authenticates to initiator
-    // Only used if mutual_username is non-empty
-    string mutual_username = 3;
-    string mutual_secret = 4;
-}
-
-// NVMeoF authentication credentials (FreeBSD 15+)
-//
-// Note: FreeBSD 15's ctld does not yet support DH-HMAC-CHAP for NVMeoF.
-// Currently only host-nqn based access control is implemented.
-// The secret/hash_function/dh_group fields are reserved for future use
-// when ctld adds DH-HMAC-CHAP support.
-message NvmeAuthCredentials {
-    // Host NQN for access control (required)
-    // Only hosts with matching NQN can connect to the controller
-    string host_nqn = 1;
-
-    // Reserved for future DH-HMAC-CHAP support
-    string secret = 2;
-    string hash_function = 3;
-    string dh_group = 4;
-}
-
-// Authentication credentials - protocol-specific
-// The auth type should match the export_type in the request
-message AuthCredentials {
-    oneof credentials {
-        IscsiChapCredentials iscsi_chap = 1;
-        NvmeAuthCredentials nvme_auth = 2;
-    }
-}
-
 // Content source for creating a volume from existing data
 message VolumeContentSource {
     // Source type: either a snapshot or an existing volume
@@ -102,10 +63,9 @@ message CreateVolumeRequest {
     ExportType export_type = 3;
     map<string, string> parameters = 4;
 
-    // Optional authentication credentials
-    // If provided, the target will require authentication
-    // Type should match export_type (iscsi_chap for iSCSI, nvme_auth for NVMeoF)
-    AuthCredentials auth = 5;
+    // Optional operator-managed CTL auth-group reference.
+    // Credentials are configured outside the agent in the main ctl.conf.
+    string auth_group = 5;
 
     // Optional: create volume from existing snapshot
     // If provided, volume data is populated from the specified snapshot

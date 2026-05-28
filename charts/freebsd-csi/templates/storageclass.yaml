@@ -30,6 +30,9 @@ parameters:
   {{- if .Values.storageClassIscsi.parameters.enableUnmap }}
   enableUnmap: {{ .Values.storageClassIscsi.parameters.enableUnmap | quote }}
   {{- end }}
+  {{- if .Values.storageClassIscsi.parameters.authGroup }}
+  authGroup: {{ .Values.storageClassIscsi.parameters.authGroup | quote }}
+  {{- end }}
   {{- /* CHAP authentication secret parameters */ -}}
   {{- $iscsiSecretName := "" }}
   {{- $iscsiSecretNamespace := .Release.Namespace }}
@@ -40,8 +43,6 @@ parameters:
   {{- $iscsiSecretName = printf "%s-chap" (include "freebsd-csi.fullname" .) }}
   {{- end }}
   {{- if $iscsiSecretName }}
-  csi.storage.k8s.io/provisioner-secret-name: {{ $iscsiSecretName | quote }}
-  csi.storage.k8s.io/provisioner-secret-namespace: {{ $iscsiSecretNamespace | quote }}
   csi.storage.k8s.io/node-stage-secret-name: {{ $iscsiSecretName | quote }}
   csi.storage.k8s.io/node-stage-secret-namespace: {{ $iscsiSecretNamespace | quote }}
   csi.storage.k8s.io/node-publish-secret-name: {{ $iscsiSecretName | quote }}
@@ -109,6 +110,9 @@ parameters:
   {{- if hasKey .Values.storageClassNvmeof.parameters "ctrlLossTmo" }}
   nvmeof.ctrlLossTmo: {{ .Values.storageClassNvmeof.parameters.ctrlLossTmo | quote }}
   {{- end }}
+  {{- if .Values.storageClassNvmeof.parameters.authGroup }}
+  authGroup: {{ .Values.storageClassNvmeof.parameters.authGroup | quote }}
+  {{- end }}
   {{- /* NVMeoF DH-HMAC-CHAP authentication secret parameters */ -}}
   {{- $nvmeSecretName := "" }}
   {{- $nvmeSecretNamespace := .Release.Namespace }}
@@ -119,8 +123,6 @@ parameters:
   {{- $nvmeSecretName = printf "%s-nvme-auth" (include "freebsd-csi.fullname" .) }}
   {{- end }}
   {{- if $nvmeSecretName }}
-  csi.storage.k8s.io/provisioner-secret-name: {{ $nvmeSecretName | quote }}
-  csi.storage.k8s.io/provisioner-secret-namespace: {{ $nvmeSecretNamespace | quote }}
   csi.storage.k8s.io/node-stage-secret-name: {{ $nvmeSecretName | quote }}
   csi.storage.k8s.io/node-stage-secret-namespace: {{ $nvmeSecretNamespace | quote }}
   csi.storage.k8s.io/node-publish-secret-name: {{ $nvmeSecretName | quote }}

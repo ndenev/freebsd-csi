@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Target-side authentication now references operator-managed CTL auth-groups via
+  the StorageClass `authGroup` parameter. The controller no longer receives CHAP
+  or NVMe auth credentials in `CreateVolume`, and `ctld-agent` no longer stores
+  credentials in `auth.json`.
+
+### Upgrade Notes
+
+Define any required `auth-group` entries in the main `ctl.conf`, set the
+StorageClass `authGroup` parameter to that group name, and keep matching
+initiator credentials in the node-stage Kubernetes Secret.
+
 ## 0.4.0
 
 - Require CSI-managed volumes to have a versioned `user:csi:metadata` ZFS user
