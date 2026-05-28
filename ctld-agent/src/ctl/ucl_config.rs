@@ -59,7 +59,7 @@ pub struct Lun {
 }
 
 /// CTL LUN/Namespace options parsed from StorageClass parameters
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CtlOptions {
     /// Logical block size (512 or 4096)
     pub blocksize: Option<u32>,

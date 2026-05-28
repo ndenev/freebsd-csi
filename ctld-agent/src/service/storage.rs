@@ -1216,7 +1216,7 @@ impl StorageAgent for StorageService {
         // Export the volume via unified CTL manager
         {
             let ctl = self.ctl.read().await;
-            if let Err(e) = ctl.export_volume_with_target_name(
+            if let Err(e) = ctl.ensure_export_volume_with_target_name(
                 &req.name,
                 &device_path,
                 &target_name,
