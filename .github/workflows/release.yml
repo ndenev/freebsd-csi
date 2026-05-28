@@ -79,6 +79,13 @@ jobs:
           sed -i "s/^appVersion:.*/appVersion: \"$NEW_VERSION\"/" charts/freebsd-csi/Chart.yaml
           echo "Updated Chart.yaml to $NEW_VERSION"
 
+      - name: Update FreeBSD package manifest
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          sed -i "s/^version: \".*\"/version: \"$NEW_VERSION\"/" pkg/freebsd/+MANIFEST
+          echo "Updated FreeBSD package manifest to $NEW_VERSION"
+
       - name: Show changes (dry run)
         if: inputs.dry_run
         run: |
@@ -91,6 +98,9 @@ jobs:
           echo ""
           echo "=== charts/freebsd-csi/Chart.yaml changes ==="
           git diff charts/freebsd-csi/Chart.yaml
+          echo ""
+          echo "=== pkg/freebsd/+MANIFEST changes ==="
+          git diff pkg/freebsd/+MANIFEST
 
       - name: Commit and tag
         if: ${{ !inputs.dry_run }}
@@ -99,7 +109,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml charts/freebsd-csi/Chart.yaml
+          git add Cargo.toml charts/freebsd-csi/Chart.yaml pkg/freebsd/+MANIFEST
           git commit -m "Release $TAG"
           git tag "$TAG"
           git push origin HEAD --tags
@@ -316,7 +326,7 @@ jobs:
           chmod +x pkg-staging/usr/local/etc/rc.d/ctld_agent
 
           # Update version in manifest
-          sed "s/version: \"0.1.0\"/version: \"${PKG_VERSION}\"/" \
+          sed "s/^version: \".*\"/version: \"${PKG_VERSION}\"/" \
             pkg/freebsd/+MANIFEST > pkg-staging/+MANIFEST
 
           # Update architecture for specific FreeBSD version
