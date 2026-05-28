@@ -506,6 +506,28 @@ impl StorageService {
         }
     }
 
+    fn unavailable_auth_volume_names(volumes: &HashMap<String, VolumeMetadata>) -> Vec<String> {
+        let mut volume_names: Vec<_> = volumes
+            .values()
+            .filter(|metadata| matches!(metadata.auth, AuthConfig::GroupRef(_)))
+            .map(|metadata| metadata.name.clone())
+            .collect();
+        volume_names.sort();
+        volume_names
+    }
+
+    fn unavailable_auth_startup_error(volume_names: &[String]) -> Option<String> {
+        if volume_names.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "CSI-managed authenticated volume credentials are unavailable for: {}. \
+                 Restore /var/db/ctld-agent/auth.json, recreate the affected PVCs, or manually remove/migrate the affected volumes before starting ctld-agent.",
+                volume_names.join(", ")
+            ))
+        }
+    }
+
     async fn enrich_metadata_auth(&self, metadata: &mut VolumeMetadata) -> Result<(), Status> {
         if !matches!(metadata.auth, AuthConfig::GroupRef(_)) {
             return Ok(());
@@ -614,6 +636,11 @@ impl StorageService {
                 "Restored volume '{}' (export_type={}, target={})",
                 vol_name, zfs_meta.export_type, zfs_meta.target_name
             );
+        }
+
+        let unavailable_auth_volumes = Self::unavailable_auth_volume_names(&volumes);
+        if let Some(error) = Self::unavailable_auth_startup_error(&unavailable_auth_volumes) {
+            return Err(error);
         }
 
         info!(
@@ -2544,6 +2571,69 @@ mod tests {
             StorageService::reconcile_export_skip_reason(&metadata),
             None
         );
+    }
+
+    #[test]
+    fn test_unavailable_auth_volume_names_lists_group_ref_volumes() {
+        let mut volumes = HashMap::new();
+        volumes.insert(
+            "vol2".to_string(),
+            VolumeMetadata {
+                id: "vol2".to_string(),
+                name: "vol2".to_string(),
+                export_type: ExportType::Iscsi,
+                target_name: "iqn.2024-01.org.freebsd.csi:vol2".to_string(),
+                lun_id: 0,
+                parameters: HashMap::new(),
+                auth: AuthConfig::GroupRef("ag-vol2".to_string()),
+            },
+        );
+        volumes.insert(
+            "vol1".to_string(),
+            VolumeMetadata {
+                id: "vol1".to_string(),
+                name: "vol1".to_string(),
+                export_type: ExportType::Iscsi,
+                target_name: "iqn.2024-01.org.freebsd.csi:vol1".to_string(),
+                lun_id: 0,
+                parameters: HashMap::new(),
+                auth: AuthConfig::None,
+            },
+        );
+        volumes.insert(
+            "vol3".to_string(),
+            VolumeMetadata {
+                id: "vol3".to_string(),
+                name: "vol3".to_string(),
+                export_type: ExportType::Iscsi,
+                target_name: "iqn.2024-01.org.freebsd.csi:vol3".to_string(),
+                lun_id: 0,
+                parameters: HashMap::new(),
+                auth: AuthConfig::IscsiChap(IscsiChapAuth::new("user", "secret")),
+            },
+        );
+
+        assert_eq!(
+            StorageService::unavailable_auth_volume_names(&volumes),
+            vec!["vol2".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_unavailable_auth_startup_error_is_empty_without_group_refs() {
+        assert_eq!(StorageService::unavailable_auth_startup_error(&[]), None);
+    }
+
+    #[test]
+    fn test_unavailable_auth_startup_error_mentions_auth_db_and_volumes() {
+        let error = StorageService::unavailable_auth_startup_error(&[
+            "vol1".to_string(),
+            "vol2".to_string(),
+        ])
+        .unwrap();
+
+        assert!(error.contains("/var/db/ctld-agent/auth.json"));
+        assert!(error.contains("vol1, vol2"));
     }
 
     #[test]
