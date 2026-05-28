@@ -63,9 +63,11 @@ message CreateVolumeRequest {
     ExportType export_type = 3;
     map<string, string> parameters = 4;
 
+    reserved 5;  // Previously AuthCredentials auth.
+
     // Optional operator-managed CTL auth-group reference.
     // Credentials are configured outside the agent in the main ctl.conf.
-    string auth_group = 5;
+    string auth_group = 7;
 
     // Optional: create volume from existing snapshot
     // If provided, volume data is populated from the specified snapshot
