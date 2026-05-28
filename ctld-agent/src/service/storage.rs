@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, RwLock, Semaphore};
@@ -19,7 +19,7 @@ use tracing::{debug, error, info, instrument, warn};
 const DEFAULT_MAX_CONCURRENT_OPS: usize = 10;
 const DEFAULT_AUTH_DB_PATH: &str = "/var/db/ctld-agent/auth.json";
 
-type VolumeCreateLocks = Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>;
+type VolumeCreateLocks = Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>;
 
 use crate::auth::{AuthDb, ChapCredentials, load_auth_db, write_auth_db};
 use crate::ctl::{
@@ -422,10 +422,15 @@ impl StorageService {
 
     async fn create_volume_lock(locks: &VolumeCreateLocks, volume_name: &str) -> Arc<Mutex<()>> {
         let mut locks = locks.lock().await;
-        locks
-            .entry(volume_name.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+        locks.retain(|_, lock| lock.strong_count() > 0);
+
+        if let Some(lock) = locks.get(volume_name).and_then(Weak::upgrade) {
+            return lock;
+        }
+
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(volume_name.to_string(), Arc::downgrade(&lock));
+        lock
     }
 
     fn auth_db_for_restore_result(result: Result<AuthDb, Status>) -> AuthDb {
@@ -2487,6 +2492,22 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first, &second));
         assert!(!Arc::ptr_eq(&first, &other));
+    }
+
+    #[tokio::test]
+    async fn test_create_volume_lock_prunes_unused_locks() {
+        let locks = Arc::new(Mutex::new(HashMap::new()));
+
+        {
+            let _first = StorageService::create_volume_lock(&locks, "vol1").await;
+            assert_eq!(locks.lock().await.len(), 1);
+        }
+
+        let _second = StorageService::create_volume_lock(&locks, "vol2").await;
+        let locks = locks.lock().await;
+
+        assert!(!locks.contains_key("vol1"));
+        assert!(locks.contains_key("vol2"));
     }
 
     #[test]
