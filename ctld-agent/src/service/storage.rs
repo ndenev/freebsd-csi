@@ -97,6 +97,22 @@ async fn validate_auth_group_reference_in_config(
         .map_err(|e| Status::invalid_argument(format!("invalid authGroup '{}': {}", auth_group, e)))
 }
 
+async fn validate_restored_auth_group_reference_in_config(
+    ctl_config_path: &Path,
+    volume_name: &str,
+    auth_config: &AuthConfig,
+) -> Result<(), String> {
+    validate_auth_group_reference_in_config(ctl_config_path, auth_config)
+        .await
+        .map_err(|status| {
+            format!(
+                "volume '{}' references invalid restored authGroup: {}",
+                volume_name,
+                status.message()
+            )
+        })
+}
+
 /// Parse CTL options from request parameters.
 ///
 /// Supports the following StorageClass parameters:
@@ -456,6 +472,18 @@ impl StorageService {
             // Convert CTL ExportType to proto ExportType
             let export_type = ctl_to_proto_export_type(zfs_meta.export_type);
 
+            let auth = zfs_meta
+                .auth_group
+                .as_deref()
+                .map(auth_group_to_ctl_auth)
+                .unwrap_or_default();
+            validate_restored_auth_group_reference_in_config(
+                &self.ctl_config_path,
+                &vol_name,
+                &auth,
+            )
+            .await?;
+
             let metadata = VolumeMetadata {
                 id: vol_name.clone(),
                 name: vol_name.clone(),
@@ -469,11 +497,7 @@ impl StorageService {
                     )
                 })?,
                 parameters: zfs_meta.parameters.clone(),
-                auth: zfs_meta
-                    .auth_group
-                    .as_deref()
-                    .map(auth_group_to_ctl_auth)
-                    .unwrap_or_default(),
+                auth,
             };
 
             volumes.insert(vol_name.clone(), metadata);
@@ -2093,6 +2117,36 @@ auth-group {{
             .await
             .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn test_validate_restored_auth_group_reference_rejects_missing_group() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+auth-group {{
+    ag-secure {{
+        chap [
+            {{
+                user = "initiator";
+                secret = "secret";
+            }}
+        ]
+    }}
+}}
+        "#
+        )
+        .unwrap();
+
+        let auth = AuthConfig::GroupRef("ag-missing".to_string());
+        let err = validate_restored_auth_group_reference_in_config(file.path(), "pvc-123", &auth)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("volume 'pvc-123'"));
+        assert!(err.contains("invalid restored authGroup"));
+        assert!(err.contains("ag-missing"));
     }
 
     #[test]
