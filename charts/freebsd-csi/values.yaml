@@ -185,8 +185,9 @@ storageClassIscsi:
     # blockSize: "4096"           # Logical block size: 512 or 4096
     # physicalBlockSize: "4096"   # Physical block size hint
     # enableUnmap: "true"         # Enable TRIM/discard for SSD-backed storage
-    # Target-side auth-group in ctl.conf (optional). The operator must define
-    # this auth-group on the FreeBSD host and configure matching node secrets.
+    # Target-side auth-group in ctl.conf. Required when chapSecret is configured.
+    # The operator must define this auth-group on the FreeBSD host and configure
+    # matching node secrets.
     # authGroup: ""
   # CHAP Authentication (optional)
   # Option 1: Reference an existing secret by name
@@ -246,8 +247,9 @@ storageClassNvmeof:
     # keepAliveTmo: "5"           # --keep-alive-tmo (0 disables keepalives)
     # reconnectDelay: "2"         # --reconnect-delay
     # ctrlLossTmo: "60"           # --ctrl-loss-tmo (-1 retries forever)
-    # Target-side auth-group in ctl.conf (optional). The operator must define
-    # this auth-group on the FreeBSD host and configure matching node secrets.
+    # Target-side auth-group in ctl.conf. Required when authSecret is configured.
+    # The operator must define this auth-group on the FreeBSD host and configure
+    # matching node secrets.
     # authGroup: ""
   # NVMeoF Access Control (optional, FreeBSD 15.0+)
   # Note: FreeBSD 15's ctld only supports host-nqn based access control for NVMeoF.
