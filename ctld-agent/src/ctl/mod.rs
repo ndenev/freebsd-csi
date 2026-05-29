@@ -5,7 +5,8 @@ pub mod types;
 pub mod ucl_config;
 
 pub use config_validator::{
-    ValidationError, validate_portal_group_exists, validate_transport_group_exists,
+    ValidationError, validate_auth_group_exists, validate_portal_group_exists,
+    validate_transport_group_exists,
 };
 
 // Re-exports for module API
@@ -15,5 +16,5 @@ pub use types::ExportType;
 
 // Re-export types that may be used externally
 #[allow(unused_imports)]
-pub use types::{AuthConfig, DevicePath, Iqn, IscsiChapAuth, Nqn, NvmeAuth, TargetName};
-pub use ucl_config::{CtlOptions, validate_chap_credentials};
+pub use types::{AuthConfig, DevicePath, Iqn, Nqn, TargetName};
+pub use ucl_config::CtlOptions;

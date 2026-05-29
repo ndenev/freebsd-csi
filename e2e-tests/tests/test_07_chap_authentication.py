@@ -2,20 +2,29 @@
 
 Tests the complete CHAP authentication flow:
 1. K8s Secret with CHAP credentials
-2. StorageClass with secret references
+2. StorageClass with authGroup and node-stage secret references
 3. PVC provisioning with authentication
-4. UCL config verification (auth-group with CHAP)
+4. UCL config verification (target references operator auth-group)
 5. Mutual CHAP authentication
-6. Error handling for credential mismatches
+6. Error handling for missing node-stage credentials
 """
 
-import time
 from typing import Callable
 
 import pytest
 
 from lib.k8s_client import K8sClient
 from lib.storage_monitor import StorageMonitor
+
+
+E2E_CHAP_AUTH_GROUP = "ag-e2e-chap"
+E2E_CHAP_USERNAME = "e2e-chap-user"
+E2E_CHAP_PASSWORD = "E2EChapPassword123!"
+E2E_MUTUAL_CHAP_AUTH_GROUP = "ag-e2e-mutual-chap"
+E2E_MUTUAL_INITIATOR_USERNAME = "e2e-initiator"
+E2E_MUTUAL_INITIATOR_PASSWORD = "InitiatorPass123!"
+E2E_MUTUAL_TARGET_USERNAME = "e2e-target"
+E2E_MUTUAL_TARGET_PASSWORD = "TargetPass456!"
 
 
 class TestChapAuthentication:
@@ -35,12 +44,12 @@ class TestChapAuthentication:
         """Factory for creating CHAP secrets with automatic cleanup.
 
         Secrets are tracked via resource_tracker and cleaned up AFTER PVCs,
-        ensuring the CSI provisioner can access credentials during volume deletion.
+        ensuring the node can access credentials while the PVC exists.
         """
 
         def create(
-            username: str = "e2e-chap-user",
-            password: str = "E2ESecretPassword123!",
+            username: str = E2E_CHAP_USERNAME,
+            password: str = E2E_CHAP_PASSWORD,
             mutual_username: str | None = None,
             mutual_password: str | None = None,
             name_suffix: str = "",
@@ -184,19 +193,16 @@ class TestChapAuthentication:
         3. Verify volume is created
         4. Verify UCL config has auth-group
         """
-        chap_username = "e2e-chap-user"
-        chap_password = "E2EChapPassword123!"
-
         # Create CHAP secret with naming pattern expected by StorageClass
         pvc_name = f"pvc-{unique_name}"
         secret_name = f"{pvc_name}-chap"
 
         k8s.create_chap_secret(
             name=secret_name,
-            username=chap_username,
-            password=chap_password,
+            username=E2E_CHAP_USERNAME,
+            password=E2E_CHAP_PASSWORD,
         )
-        # Track secret for cleanup AFTER PVC (so provisioner can access credentials)
+        # Track secret for cleanup AFTER PVC so staged nodes can use it.
         resource_tracker.track_secret(secret_name)
 
         # Create PVC using the CHAP StorageClass
@@ -221,12 +227,14 @@ class TestChapAuthentication:
         # Verify volume is exported via iSCSI
         assert storage.verify_volume_exported(pv_name, "iscsi"), "Volume not exported"
 
-        # Verify auth-group was created with CHAP
-        # The CSI driver creates auth-group named "ag-{volume_id}"
-        auth_group_name = f"ag-{pv_name}"
+        # Verify target references the operator-managed auth-group
         assert storage.verify_auth_group_has_chap(
-            auth_group_name, expected_username=chap_username
-        ), f"Auth-group {auth_group_name} doesn't have expected CHAP config"
+            E2E_CHAP_AUTH_GROUP
+        ), f"Auth-group {E2E_CHAP_AUTH_GROUP} doesn't have CHAP config"
+        target_ag = storage.get_target_auth_group(pv_name)
+        assert (
+            target_ag == E2E_CHAP_AUTH_GROUP
+        ), f"Target auth-group mismatch: {target_ag} != {E2E_CHAP_AUTH_GROUP}"
 
     def test_mutual_chap_volume_creation(
         self,
@@ -237,21 +245,16 @@ class TestChapAuthentication:
         wait_pvc_bound: Callable,
     ):
         """Create iSCSI volume with mutual CHAP authentication."""
-        initiator_username = "e2e-initiator"
-        initiator_password = "InitiatorPass123!"
-        target_username = "e2e-target"
-        target_password = "TargetPass456!"
-
         # Create mutual CHAP secret
         pvc_name = f"pvc-{unique_name}"
         secret_name = f"{pvc_name}-mutual-chap"
 
         k8s.create_chap_secret(
             name=secret_name,
-            username=initiator_username,
-            password=initiator_password,
-            mutual_username=target_username,
-            mutual_password=target_password,
+            username=E2E_MUTUAL_INITIATOR_USERNAME,
+            password=E2E_MUTUAL_INITIATOR_PASSWORD,
+            mutual_username=E2E_MUTUAL_TARGET_USERNAME,
+            mutual_password=E2E_MUTUAL_TARGET_PASSWORD,
         )
         resource_tracker.track_secret(secret_name)
 
@@ -268,13 +271,14 @@ class TestChapAuthentication:
         pv_name = k8s.get_pvc_volume(pvc_name)
         assert pv_name is not None
 
-        # Verify mutual CHAP is configured
-        auth_group_name = f"ag-{pv_name}"
+        # Verify target references the operator-managed mutual CHAP auth-group.
         assert storage.verify_auth_group_has_mutual_chap(
-            auth_group_name,
-            expected_username=initiator_username,
-            expected_mutual_username=target_username,
-        ), f"Auth-group {auth_group_name} doesn't have expected mutual CHAP config"
+            E2E_MUTUAL_CHAP_AUTH_GROUP
+        ), f"Auth-group {E2E_MUTUAL_CHAP_AUTH_GROUP} doesn't have mutual CHAP config"
+        target_ag = storage.get_target_auth_group(pv_name)
+        assert (
+            target_ag == E2E_MUTUAL_CHAP_AUTH_GROUP
+        ), f"Target auth-group mismatch: {target_ag} != {E2E_MUTUAL_CHAP_AUTH_GROUP}"
 
     def test_verify_ucl_config_with_chap(
         self,
@@ -285,16 +289,13 @@ class TestChapAuthentication:
         wait_pvc_bound: Callable,
     ):
         """Detailed verification of UCL config structure for CHAP."""
-        chap_username = "ucl-verify-user"
-        chap_password = "UclVerifyPass123!"
-
         pvc_name = f"pvc-{unique_name}"
         secret_name = f"{pvc_name}-chap"
 
         k8s.create_chap_secret(
             name=secret_name,
-            username=chap_username,
-            password=chap_password,
+            username=E2E_CHAP_USERNAME,
+            password=E2E_CHAP_PASSWORD,
         )
         resource_tracker.track_secret(secret_name)
 
@@ -310,20 +311,16 @@ class TestChapAuthentication:
         pv_name = k8s.get_pvc_volume(pvc_name)
 
         # Get the full auth-group info
-        auth_group_name = f"ag-{pv_name}"
-        ag_info = storage.get_auth_group(auth_group_name)
+        ag_info = storage.get_auth_group(E2E_CHAP_AUTH_GROUP)
 
-        assert ag_info is not None, f"Auth-group {auth_group_name} not found"
-        assert (
-            ag_info.chap_username == chap_username
-        ), f"Username mismatch: {ag_info.chap_username} != {chap_username}"
-        assert ag_info.chap_secret == chap_password, "Password mismatch"
+        assert ag_info is not None, f"Auth-group {E2E_CHAP_AUTH_GROUP} not found"
+        assert ag_info.chap_username, "Auth-group does not define CHAP"
 
         # Verify target references the auth-group
         target_ag = storage.get_target_auth_group(pv_name)
         assert (
-            target_ag == auth_group_name
-        ), f"Target auth-group mismatch: {target_ag} != {auth_group_name}"
+            target_ag == E2E_CHAP_AUTH_GROUP
+        ), f"Target auth-group mismatch: {target_ag} != {E2E_CHAP_AUTH_GROUP}"
 
     # -------------------------------------------------------------------------
     # Pod Mount Tests
@@ -332,7 +329,6 @@ class TestChapAuthentication:
     def test_pod_mount_with_chap(
         self,
         k8s: K8sClient,
-        storage: StorageMonitor,
         unique_name: str,
         resource_tracker,
         pod_factory: Callable,
@@ -340,16 +336,13 @@ class TestChapAuthentication:
         wait_pod_ready: Callable,
     ):
         """Test mounting a CHAP-authenticated volume in a Pod."""
-        chap_username = "pod-mount-user"
-        chap_password = "PodMountPass123!"
-
         pvc_name = f"pvc-{unique_name}"
         secret_name = f"{pvc_name}-chap"
 
         k8s.create_chap_secret(
             name=secret_name,
-            username=chap_username,
-            password=chap_password,
+            username=E2E_CHAP_USERNAME,
+            password=E2E_CHAP_PASSWORD,
         )
         resource_tracker.track_secret(secret_name)
 
@@ -391,13 +384,11 @@ class TestChapAuthentication:
         k8s: K8sClient,
         unique_name: str,
         resource_tracker,
+        pod_factory: Callable,
+        wait_pvc_bound: Callable,
+        wait_pod_ready: Callable,
     ):
-        """Test that PVC creation fails when CHAP secret is missing.
-
-        Note: The actual behavior depends on the CSI driver's error handling.
-        It may either fail immediately or during staging. This test verifies
-        that the error is surfaced appropriately.
-        """
+        """Test that pod staging fails when the CHAP secret is missing."""
         pvc_name = f"pvc-{unique_name}-no-secret"
 
         # Create PVC WITHOUT creating the corresponding CHAP secret
@@ -409,28 +400,19 @@ class TestChapAuthentication:
         )
         resource_tracker.track_pvc(pvc_name)
 
-        # PVC should not become bound (or should fail with events)
-        time.sleep(10)
+        # Provisioning does not consume node-stage secrets, so the PVC should bind.
+        assert wait_pvc_bound(pvc_name, timeout=120), f"PVC {pvc_name} not bound"
 
-        pvc = k8s.get("pvc", pvc_name)
-        assert pvc is not None
+        pod_name = pod_factory(pvc_name)
+        assert not wait_pod_ready(
+            pod_name, timeout=60
+        ), "Pod became ready despite missing CHAP secret"
 
-        # Check if PVC is pending (not bound)
-        phase = pvc.get("status", {}).get("phase")
-        if phase == "Bound":
-            # If it got bound, check events for warnings
-            events = k8s.get_events(f"involvedObject.name={pvc_name}")
-            warning_events = [e for e in events if e.get("type") == "Warning"]
-            # At minimum, we expect the system to have noticed the missing secret
-            # The exact behavior may vary
-            pytest.skip(
-                "PVC bound despite missing secret - driver may have fallback behavior"
-            )
-        else:
-            # PVC should be Pending
-            assert phase == "Pending", f"Unexpected PVC phase: {phase}"
+        events = k8s.get_events(f"involvedObject.name={pod_name}")
+        warning_events = [e for e in events if e.get("type") == "Warning"]
+        assert warning_events, "Missing CHAP secret did not produce pod warning events"
 
-    def test_volume_cleanup_removes_auth_group(
+    def test_volume_cleanup_preserves_auth_group(
         self,
         k8s: K8sClient,
         storage: StorageMonitor,
@@ -439,17 +421,14 @@ class TestChapAuthentication:
         wait_pvc_bound: Callable,
         wait_pv_deleted: Callable,
     ):
-        """Test that deleting a CHAP volume also removes its auth-group."""
-        chap_username = "cleanup-test-user"
-        chap_password = "CleanupTestPass123!"
-
+        """Test that deleting a CHAP volume preserves its operator auth-group."""
         pvc_name = f"pvc-{unique_name}"
         secret_name = f"{pvc_name}-chap"
 
         k8s.create_chap_secret(
             name=secret_name,
-            username=chap_username,
-            password=chap_password,
+            username=E2E_CHAP_USERNAME,
+            password=E2E_CHAP_PASSWORD,
         )
         # Track secret - will be cleaned up after any PVC cleanup
         resource_tracker.track_secret(secret_name)
@@ -464,10 +443,9 @@ class TestChapAuthentication:
         assert wait_pvc_bound(pvc_name, timeout=120)
 
         pv_name = k8s.get_pvc_volume(pvc_name)
-        auth_group_name = f"ag-{pv_name}"
 
         # Verify auth-group exists before deletion
-        assert storage.verify_auth_group_exists(auth_group_name)
+        assert storage.verify_auth_group_exists(E2E_CHAP_AUTH_GROUP)
 
         # Delete the PVC (with Delete reclaim policy, PV should also be deleted)
         k8s.delete("pvc", pvc_name, wait=True, timeout=120)
@@ -475,10 +453,8 @@ class TestChapAuthentication:
         # Wait for PV to be deleted (indicates cleanup is complete)
         assert wait_pv_deleted(pv_name, timeout=60), f"PV {pv_name} not deleted"
 
-        # Auth-group should be removed
-        assert not storage.verify_auth_group_exists(
-            auth_group_name
-        ), f"Auth-group {auth_group_name} not cleaned up after volume deletion"
+        # The operator-managed auth-group is not owned by CSI and should persist.
+        assert storage.verify_auth_group_exists(E2E_CHAP_AUTH_GROUP)
 
 
 class TestChapSecurityEdgeCases:
@@ -487,12 +463,10 @@ class TestChapSecurityEdgeCases:
     def test_special_characters_in_chap_password(
         self,
         k8s: K8sClient,
-        storage: StorageMonitor,
         unique_name: str,
         resource_tracker,
-        wait_pvc_bound: Callable,
     ):
-        """Test CHAP with special characters in password."""
+        """Test K8s CHAP secret creation with special characters in password."""
         # Password with various special characters
         chap_username = "special-char-user"
         # UCL config format forbids: " { } \
@@ -509,33 +483,18 @@ class TestChapSecurityEdgeCases:
         )
         resource_tracker.track_secret(secret_name)
 
-        k8s.create_pvc(
-            name=pvc_name,
-            storage_class="freebsd-e2e-iscsi-chap-basic",
-            size="1Gi",
-        )
-        resource_tracker.track_pvc(pvc_name)
-
-        assert wait_pvc_bound(pvc_name, timeout=120)
-
-        pv_name = k8s.get_pvc_volume(pvc_name)
-        auth_group_name = f"ag-{pv_name}"
-
-        # Verify the password was stored correctly (UCL escaping)
-        ag_info = storage.get_auth_group(auth_group_name)
-        assert ag_info is not None
-        # The password should match (UCL handles escaping internally)
-        assert ag_info.chap_username == chap_username
+        secret = k8s.get_secret(secret_name)
+        assert secret is not None
+        assert "node.session.auth.username" in secret.get("data", {})
+        assert "node.session.auth.password" in secret.get("data", {})
 
     def test_long_chap_credentials(
         self,
         k8s: K8sClient,
-        storage: StorageMonitor,
         unique_name: str,
         resource_tracker,
-        wait_pvc_bound: Callable,
     ):
-        """Test CHAP with maximum-length credentials.
+        """Test K8s CHAP secret creation with long credentials.
 
         iSCSI CHAP has limits: username max 256 chars, password max 255 chars.
         """
@@ -553,29 +512,16 @@ class TestChapSecurityEdgeCases:
         )
         resource_tracker.track_secret(secret_name)
 
-        k8s.create_pvc(
-            name=pvc_name,
-            storage_class="freebsd-e2e-iscsi-chap-basic",
-            size="1Gi",
-        )
-        resource_tracker.track_pvc(pvc_name)
-
-        assert wait_pvc_bound(pvc_name, timeout=120)
-
-        pv_name = k8s.get_pvc_volume(pvc_name)
-        auth_group_name = f"ag-{pv_name}"
-
-        # Verify credentials were stored
-        ag_info = storage.get_auth_group(auth_group_name)
-        assert ag_info is not None
-        assert ag_info.chap_username == chap_username
+        secret = k8s.get_secret(secret_name)
+        assert secret is not None
+        assert "node.session.auth.username" in secret.get("data", {})
+        assert "node.session.auth.password" in secret.get("data", {})
 
     def test_unicode_in_chap_username(
         self,
         k8s: K8sClient,
         unique_name: str,
         resource_tracker,
-        wait_pvc_bound: Callable,
     ):
         """Test behavior with unicode characters in CHAP username.
 
@@ -596,15 +542,7 @@ class TestChapSecurityEdgeCases:
         )
         resource_tracker.track_secret(secret_name)
 
-        k8s.create_pvc(
-            name=pvc_name,
-            storage_class="freebsd-e2e-iscsi-chap-basic",
-            size="1Gi",
-        )
-        resource_tracker.track_pvc(pvc_name)
-
-        # Should either work or fail gracefully
-        bound = wait_pvc_bound(pvc_name, timeout=60)
-        # Test passes if either bound successfully or failed gracefully
-        # (no crash, proper error handling)
-        assert True  # Just verify we didn't crash
+        secret = k8s.get_secret(secret_name)
+        assert secret is not None
+        assert "node.session.auth.username" in secret.get("data", {})
+        assert "node.session.auth.password" in secret.get("data", {})

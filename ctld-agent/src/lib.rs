@@ -9,12 +9,11 @@
 //! - `service`: gRPC service implementation
 //! - `metrics`: Prometheus metrics collection
 
-pub mod auth;
 pub mod ctl;
 pub mod metrics;
 pub mod service;
 pub mod zfs;
 
-pub use ctl::{AuthConfig, CtlError, CtlManager, ExportType, IscsiChapAuth, NvmeAuth};
+pub use ctl::{AuthConfig, CtlError, CtlManager, ExportType};
 pub use service::{StorageService, proto};
 pub use zfs::ZfsManager;

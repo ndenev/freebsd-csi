@@ -361,114 +361,16 @@ impl AsRef<Path> for DevicePath {
     }
 }
 
-// ============================================================================
-// Authentication credentials
-// ============================================================================
-
-/// iSCSI CHAP authentication credentials.
-///
-/// Supports both forward CHAP (initiator authenticates to target) and
-/// mutual CHAP (bidirectional authentication).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IscsiChapAuth {
-    /// Forward CHAP username (initiator → target)
-    pub username: String,
-    /// Forward CHAP secret
-    pub secret: String,
-    /// Mutual CHAP username (target → initiator, optional)
-    pub mutual_username: Option<String>,
-    /// Mutual CHAP secret (optional)
-    pub mutual_secret: Option<String>,
-}
-
-impl IscsiChapAuth {
-    /// Create new CHAP credentials with forward authentication only.
-    pub fn new(username: impl Into<String>, secret: impl Into<String>) -> Self {
-        Self {
-            username: username.into(),
-            secret: secret.into(),
-            mutual_username: None,
-            mutual_secret: None,
-        }
-    }
-
-    /// Create new CHAP credentials with mutual authentication.
-    pub fn with_mutual(
-        username: impl Into<String>,
-        secret: impl Into<String>,
-        mutual_username: impl Into<String>,
-        mutual_secret: impl Into<String>,
-    ) -> Self {
-        Self {
-            username: username.into(),
-            secret: secret.into(),
-            mutual_username: Some(mutual_username.into()),
-            mutual_secret: Some(mutual_secret.into()),
-        }
-    }
-
-    /// Check if mutual authentication is configured.
-    pub fn has_mutual(&self) -> bool {
-        self.mutual_username.is_some() && self.mutual_secret.is_some()
-    }
-}
-
-/// NVMeoF DH-HMAC-CHAP authentication credentials.
-///
-/// Implements NVMe-oF in-band authentication per the NVMe specification.
-/// Requires FreeBSD 15+ with NVMeoF controller auth support.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NvmeAuth {
-    /// Host NQN for authentication
-    pub host_nqn: String,
-    /// Pre-shared key (32-48 bytes, base64 encoded)
-    pub secret: String,
-    /// Hash function: SHA-256, SHA-384, or SHA-512
-    pub hash_function: String,
-    /// DH group (empty for HMAC-CHAP only, without key agreement)
-    pub dh_group: Option<String>,
-}
-
-impl NvmeAuth {
-    /// Create new NVMeoF auth credentials.
-    pub fn new(
-        host_nqn: impl Into<String>,
-        secret: impl Into<String>,
-        hash_function: impl Into<String>,
-    ) -> Self {
-        Self {
-            host_nqn: host_nqn.into(),
-            secret: secret.into(),
-            hash_function: hash_function.into(),
-            dh_group: None,
-        }
-    }
-
-    /// Create credentials with DH key agreement.
-    pub fn with_dh_group(mut self, dh_group: impl Into<String>) -> Self {
-        self.dh_group = Some(dh_group.into());
-        self
-    }
-}
-
 /// Authentication configuration for a CTL export.
 ///
-/// Wraps protocol-specific authentication credentials or references
-/// an existing auth-group by name.
+/// References an operator-managed auth-group by name. The agent does not own
+/// or persist authentication credentials.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AuthConfig {
     /// No authentication required
     #[default]
     None,
-    /// iSCSI CHAP authentication (contains credentials)
-    IscsiChap(IscsiChapAuth),
-    /// NVMeoF DH-HMAC-CHAP authentication (contains credentials)
-    NvmeAuth(NvmeAuth),
-    /// Reference to an existing auth-group by name (no credentials stored).
-    ///
-    /// Used when reconciling volumes from ZFS metadata where credentials
-    /// are already persisted in `/etc/ctl.conf`. This avoids storing
-    /// plaintext secrets in ZFS user properties.
+    /// Reference to an auth-group defined outside the agent-managed snippet.
     GroupRef(String),
 }
 
@@ -482,14 +384,11 @@ impl AuthConfig {
 
     /// Get the auth group name for UCL config.
     ///
-    /// Returns "no-authentication" if no auth is configured,
-    /// the stored name for `GroupRef`, or a generated name for credentials.
-    pub fn auth_group_name(&self, volume_name: &str) -> String {
+    /// Returns "no-authentication" if no auth is configured, or the configured
+    /// auth-group name for `GroupRef`.
+    pub fn auth_group_name(&self, _volume_name: &str) -> String {
         match self {
             AuthConfig::None => "no-authentication".to_string(),
-            AuthConfig::IscsiChap(_) | AuthConfig::NvmeAuth(_) => {
-                format!("ag-{}", volume_name)
-            }
             AuthConfig::GroupRef(name) => name.clone(),
         }
     }
@@ -655,20 +554,6 @@ mod tests {
             "no-authentication"
         );
 
-        // IscsiChap generates auth group name from volume
-        let chap = IscsiChapAuth::new("user", "secret");
-        assert_eq!(
-            AuthConfig::IscsiChap(chap).auth_group_name("vol1"),
-            "ag-vol1"
-        );
-
-        // NvmeAuth generates auth group name from volume
-        let nvme = NvmeAuth::new("nqn.host", "secret", "sha256");
-        assert_eq!(
-            AuthConfig::NvmeAuth(nvme).auth_group_name("vol1"),
-            "ag-vol1"
-        );
-
         // GroupRef returns the stored name directly
         assert_eq!(
             AuthConfig::GroupRef("ag-custom".to_string()).auth_group_name("vol1"),
@@ -689,12 +574,6 @@ mod tests {
     #[test]
     fn test_auth_config_is_some() {
         assert!(!AuthConfig::None.is_some());
-
-        let chap = IscsiChapAuth::new("user", "secret");
-        assert!(AuthConfig::IscsiChap(chap).is_some());
-
-        let nvme = NvmeAuth::new("nqn.host", "secret", "sha256");
-        assert!(AuthConfig::NvmeAuth(nvme).is_some());
 
         assert!(AuthConfig::GroupRef("ag-vol1".to_string()).is_some());
     }

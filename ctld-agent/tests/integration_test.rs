@@ -4,7 +4,7 @@
 //! actual ZFS/CTL operations (which would need root privileges and real hardware).
 //! Tests focus on:
 //! - Request validation and error handling
-//! - CHAP authentication configuration
+//! - Auth-group reference configuration
 //! - Export type conversion
 //! - Concurrent operation patterns
 //! - Rate limiting behavior
@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio::sync::{RwLock, Semaphore};
 
 // Import actual library types now that we have lib.rs
-use ctld_agent::{AuthConfig, ExportType, IscsiChapAuth, NvmeAuth};
+use ctld_agent::{AuthConfig, ExportType};
 
 /// Helper to create a test request with the given parameters
 fn create_volume_request(name: &str, size_bytes: i64, export_type: i32) -> HashMap<String, String> {
@@ -28,69 +28,17 @@ fn create_volume_request(name: &str, size_bytes: i64, export_type: i32) -> HashM
 }
 
 // ============================================================================
-// CHAP Authentication Tests
+// Auth-group Reference Tests
 // ============================================================================
 
-/// Test basic CHAP authentication construction
+/// Test target auth-group reference construction
 #[test]
-fn test_iscsi_chap_auth_basic() {
-    let auth = IscsiChapAuth::new("testuser", "testsecret");
-
-    // Verify auth can be constructed
-    let config = AuthConfig::IscsiChap(auth);
-
-    // Verify it's the right variant
-    match config {
-        AuthConfig::IscsiChap(_) => (), // expected
-        _ => panic!("Expected IscsiChap variant"),
-    }
-}
-
-/// Test mutual CHAP authentication construction
-#[test]
-fn test_iscsi_chap_auth_mutual() {
-    let auth = IscsiChapAuth::with_mutual("testuser", "testsecret", "reverseuser", "reversesecret");
-
-    let config = AuthConfig::IscsiChap(auth);
+fn test_auth_config_group_ref() {
+    let config = AuthConfig::GroupRef("ag-secure".to_string());
 
     match config {
-        AuthConfig::IscsiChap(_) => (),
-        _ => panic!("Expected IscsiChap variant"),
-    }
-}
-
-/// Test NVMe authentication construction
-#[test]
-fn test_nvme_auth_basic() {
-    let auth = NvmeAuth::new(
-        "nqn.2024-01.org.freebsd.host:initiator",
-        "secret123",
-        "sha256",
-    );
-
-    let config = AuthConfig::NvmeAuth(auth);
-
-    match config {
-        AuthConfig::NvmeAuth(_) => (),
-        _ => panic!("Expected NvmeAuth variant"),
-    }
-}
-
-/// Test NVMe authentication with DH group
-#[test]
-fn test_nvme_auth_with_dh_group() {
-    let auth = NvmeAuth::new(
-        "nqn.2024-01.org.freebsd.host:initiator",
-        "secret123",
-        "sha384",
-    )
-    .with_dh_group("dh-hmac-chap:ffdhe2048");
-
-    let config = AuthConfig::NvmeAuth(auth);
-
-    match config {
-        AuthConfig::NvmeAuth(_) => (),
-        _ => panic!("Expected NvmeAuth variant"),
+        AuthConfig::GroupRef(name) => assert_eq!(name, "ag-secure"),
+        _ => panic!("Expected GroupRef variant"),
     }
 }
 
@@ -105,9 +53,9 @@ fn test_auth_config_none() {
     }
 }
 
-/// Test CHAP username validation (non-empty)
+/// Test auth-group name validation (non-empty)
 #[test]
-fn test_chap_username_validation() {
+fn test_auth_group_name_validation() {
     // Valid usernames
     let valid_usernames = vec![
         "admin",
@@ -131,28 +79,6 @@ fn test_chap_username_validation() {
             username
         );
     }
-}
-
-/// Test CHAP secret length requirements
-#[test]
-fn test_chap_secret_length() {
-    // CHAP secrets typically need 12-16 characters minimum for security
-    let valid_secrets = vec![
-        "secretsecret",            // 12 chars
-        "longsecretvalue1",        // 16 chars
-        "averylongsecretpassword", // long
-    ];
-
-    for secret in valid_secrets {
-        assert!(
-            secret.len() >= 12,
-            "Secret should be at least 12 characters"
-        );
-    }
-
-    // Short secrets should be flagged
-    let short_secret = "short";
-    assert!(short_secret.len() < 12, "Short secrets should be detected");
 }
 
 // ============================================================================
@@ -839,56 +765,26 @@ fn test_snapshot_lifecycle_params() {
     assert_eq!(parts.len(), 2);
 }
 
-/// Test volume with CHAP authentication flow
+/// Test volume with target auth-group reference flow
 #[test]
-fn test_volume_with_chap_flow() {
-    // Setup auth
-    let auth = IscsiChapAuth::new("csi-user", "verysecretpass");
-    let config = AuthConfig::IscsiChap(auth);
-
-    // Create volume params
+fn test_volume_with_auth_group_ref_flow() {
+    let config = AuthConfig::GroupRef("ag-secure".to_string());
     let name = "test-vol-chap";
     let size_bytes: i64 = 1024 * 1024 * 1024; // 1GB
     let export_type = ExportType::Iscsi;
 
-    // Verify all components are valid
     assert!(size_bytes > 0);
     assert!(matches!(export_type, ExportType::Iscsi));
-    assert!(matches!(config, AuthConfig::IscsiChap(_)));
-
-    // Expected auth group
-    let auth_group = format!("ag-{}", name);
-    assert!(!auth_group.is_empty());
+    assert_eq!(config.auth_group_name(name), "ag-secure");
 }
 
-/// Test volume with mutual CHAP authentication
+/// Test NVMeoF volume can reference an operator-managed auth-group
 #[test]
-fn test_volume_with_mutual_chap() {
-    let auth = IscsiChapAuth::with_mutual(
-        "initiator-user",
-        "initiator-secret",
-        "target-user",
-        "target-secret",
-    );
-    let config = AuthConfig::IscsiChap(auth);
-
-    assert!(matches!(config, AuthConfig::IscsiChap(_)));
-}
-
-/// Test NVMeoF volume with DH-HMAC-CHAP
-#[test]
-fn test_nvmeof_volume_with_dh_hmac_chap() {
-    let auth = NvmeAuth::new(
-        "nqn.2024-01.org.freebsd.host:initiator01",
-        "supersecretkey123456789012345678901234567890",
-        "sha256",
-    )
-    .with_dh_group("dh-hmac-chap:ffdhe2048");
-
-    let config = AuthConfig::NvmeAuth(auth);
+fn test_nvmeof_volume_with_auth_group_ref() {
+    let config = AuthConfig::GroupRef("ag-nvme-hosts".to_string());
     let export_type = ExportType::Nvmeof;
 
-    assert!(matches!(config, AuthConfig::NvmeAuth(_)));
+    assert_eq!(config.auth_group_name("vol1"), "ag-nvme-hosts");
     assert!(matches!(export_type, ExportType::Nvmeof));
 }
 

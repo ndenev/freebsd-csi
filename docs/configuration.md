@@ -586,7 +586,7 @@ For production deployments, configure CHAP authentication in your iSCSI targets:
 
 1. Configure ctld with CHAP credentials
 2. Configure Kubernetes nodes with initiator credentials
-3. Reference credentials in your StorageClass
+3. Set `authGroup` in your StorageClass and reference node-stage credentials
 
 #### Network Segmentation
 

@@ -8,7 +8,7 @@ This guide explains how to configure CHAP (Challenge-Handshake Authentication Pr
 - [Prerequisites](#prerequisites)
 - [Basic CHAP Setup](#basic-chap-setup)
 - [Mutual CHAP Setup](#mutual-chap-setup)
-- [Per-Volume Authentication](#per-volume-authentication)
+- [Per-StorageClass Authentication](#per-storageclass-authentication)
 - [Security Best Practices](#security-best-practices)
 - [Troubleshooting](#troubleshooting)
 - [NVMeoF Authentication (Not Yet Supported)](#nvmeof-authentication-not-yet-supported)
@@ -21,9 +21,11 @@ CHAP provides authentication between iSCSI initiators (Kubernetes nodes) and tar
 
 - **One-way CHAP**: Target authenticates the initiator
 - **Mutual CHAP**: Both sides authenticate each other (more secure)
-- **Per-volume auth groups**: Each volume can have unique credentials
+- **Operator-managed auth groups**: CSI-managed targets reference an auth-group
+  defined in the FreeBSD host's main `ctl.conf`
 
-Authentication credentials are passed via Kubernetes Secrets using the standard CSI secrets mechanism.
+Initiator credentials are passed to Kubernetes nodes via CSI node-stage
+Secrets. Target credentials stay in the operator-managed `ctl.conf`.
 
 ### Authentication Flow
 
@@ -83,7 +85,7 @@ Apply the secret:
 kubectl apply -f chap-secret.yaml
 ```
 
-### Step 2: Create a StorageClass with Secret Reference
+### Step 2: Create a StorageClass with Auth-Group Reference
 
 ```yaml
 apiVersion: storage.k8s.io/v1
@@ -94,9 +96,8 @@ provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
   endpoints: "192.168.1.100:3260"
-# Reference the CHAP secret for volume provisioning
-csi.storage.k8s.io/provisioner-secret-name: iscsi-chap-secret
-csi.storage.k8s.io/provisioner-secret-namespace: default
+  # Operator-defined auth-group in the FreeBSD host's main ctl.conf
+  authGroup: ag-secure
 # Reference the same secret for node operations (staging/publishing)
 csi.storage.k8s.io/node-stage-secret-name: iscsi-chap-secret
 csi.storage.k8s.io/node-stage-secret-namespace: default
@@ -133,11 +134,11 @@ Check that the volume was created with authentication:
 grep -A10 "auth-group" /etc/ctl.conf
 ```
 
-You should see an auth-group specific to your volume:
+You should see the CSI-managed target reference the operator-defined auth-group:
 
 ```
-auth-group "ag-my-secure-volume" {
-    chap "csi-initiator" "MySecretPassword123!"
+target "iqn.2024-01.org.freebsd.csi:my-secure-volume" {
+    auth-group "ag-secure"
 }
 ```
 
@@ -177,7 +178,7 @@ grep -A10 "auth-group" /etc/ctl.conf
 You should see both `chap` and `chap-mutual` entries:
 
 ```
-auth-group "ag-my-secure-volume" {
+auth-group "ag-secure" {
     chap "csi-initiator" "InitiatorSecret123!"
     chap-mutual "csi-target" "TargetSecret456!"
 }
@@ -185,9 +186,10 @@ auth-group "ag-my-secure-volume" {
 
 ---
 
-## Per-Volume Authentication
+## Per-StorageClass Authentication
 
-For enhanced security, you can use different credentials for each volume by creating separate secrets and StorageClasses.
+For isolation, use separate StorageClasses with different `authGroup` values and
+matching node-stage Secrets.
 
 ### Example: Separate Secrets per Application
 
@@ -211,8 +213,7 @@ metadata:
 provisioner: csi.freebsd.org
 parameters:
   exportType: iscsi
-csi.storage.k8s.io/provisioner-secret-name: app-a-chap
-csi.storage.k8s.io/provisioner-secret-namespace: app-a
+  authGroup: ag-app-a
 csi.storage.k8s.io/node-stage-secret-name: app-a-chap
 csi.storage.k8s.io/node-stage-secret-namespace: app-a
 ```
@@ -290,18 +291,18 @@ stringData:
 
 ### Credential Storage
 
-The CSI driver stores CHAP credentials securely:
+The CSI driver does not store target-side CHAP credentials:
 
-- **Credentials are stored in `/etc/ctl.conf`** (FreeBSD's ctld configuration)
+- **Target credentials are stored in `/etc/ctl.conf`** (FreeBSD's ctld configuration)
   - File is root-owned with 0600 permissions
-  - This is ctld's native credential store
+  - This is ctld's native credential store and is managed by the operator
   
 - **ZFS metadata does NOT contain credentials**
   - Only the auth-group NAME is stored in ZFS user properties
   - This prevents credential exposure via `zfs get user:csi:metadata`
   
-- **On ctld-agent restart**: Credentials persist in `/etc/ctl.conf`, and the
-  agent references them by auth-group name from ZFS metadata
+- **On ctld-agent restart**: the agent restores the auth-group reference from
+  ZFS metadata and does not need any credential database
 
 ### 1. Use Strong Passwords
 
@@ -319,17 +320,19 @@ openssl rand -base64 24
 To rotate CHAP credentials:
 
 1. Create a new secret with updated credentials
-2. Update the StorageClass to reference the new secret
-3. Delete the old secret
+2. Update the node-stage secret reference if the Secret name changes
+3. Update the matching operator-managed CTL auth-group in `ctl.conf`
+4. Delete the old secret
 
-Note: Existing volumes keep their original credentials. New volumes use the updated credentials.
+Note: existing targets keep referencing the same `authGroup`; credential changes
+are applied by updating the CTL auth-group and the Kubernetes Secret together.
 
 ### 3. Use Namespaced Secrets
 
 Keep secrets in the same namespace as the application using them:
 
 ```yaml
-csi.storage.k8s.io/provisioner-secret-namespace: ${pvc.namespace}
+csi.storage.k8s.io/node-stage-secret-namespace: ${pvc.namespace}
 ```
 
 ### 4. Enable RBAC for Secrets
@@ -426,8 +429,6 @@ kubectl describe storageclass freebsd-zfs-iscsi-chap | grep -i secret
 
 Expected output:
 ```
-csi.storage.k8s.io/provisioner-secret-name: iscsi-chap-secret
-csi.storage.k8s.io/provisioner-secret-namespace: default
 csi.storage.k8s.io/node-stage-secret-name: iscsi-chap-secret
 csi.storage.k8s.io/node-stage-secret-namespace: default
 ```
