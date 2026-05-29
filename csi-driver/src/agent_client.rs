@@ -23,11 +23,14 @@ const MAX_BACKOFF_MS: u64 = 5000;
 const BACKOFF_MULTIPLIER: u64 = 2;
 
 use crate::agent::{
-    CreateSnapshotRequest, CreateVolumeRequest, DeleteSnapshotRequest, DeleteVolumeRequest,
-    ExpandVolumeRequest, ExportType, GetCapacityRequest, GetVolumeRequest, ListSnapshotsRequest,
+    AgentFeature, CreateSnapshotRequest, CreateVolumeRequest, DeleteSnapshotRequest,
+    DeleteVolumeRequest, ExpandVolumeRequest, ExportType, GetAgentInfoRequest,
+    GetAgentInfoResponse, GetCapacityRequest, GetVolumeRequest, ListSnapshotsRequest,
     ListVolumesRequest, Snapshot, Volume, VolumeContentSource,
     storage_agent_client::StorageAgentClient,
 };
+
+const REQUIRED_AGENT_PROTOCOL_VERSION: u32 = 2;
 
 /// TLS configuration for connecting to ctld-agent
 #[derive(Debug, Clone)]
@@ -112,10 +115,51 @@ where
     }
 }
 
+fn validate_agent_compatibility(info: &GetAgentInfoResponse) -> Result<(), tonic::Status> {
+    if info.protocol_version < REQUIRED_AGENT_PROTOCOL_VERSION {
+        return Err(tonic::Status::failed_precondition(format!(
+            "ctld-agent protocol version {} is too old; version {} is required",
+            info.protocol_version, REQUIRED_AGENT_PROTOCOL_VERSION
+        )));
+    }
+
+    if !info
+        .features
+        .contains(&(AgentFeature::OperatorAuthGroup as i32))
+    {
+        return Err(tonic::Status::failed_precondition(
+            "ctld-agent does not support operator-managed auth groups",
+        ));
+    }
+
+    Ok(())
+}
+
+async fn verify_agent_compatibility(
+    client: &mut StorageAgentClient<Channel>,
+) -> Result<(), tonic::Status> {
+    let info = client
+        .get_agent_info(GetAgentInfoRequest {})
+        .await
+        .map_err(|status| {
+            if status.code() == tonic::Code::Unimplemented {
+                tonic::Status::failed_precondition(
+                    "ctld-agent protocol is too old; upgrade ctld-agent before using this driver",
+                )
+            } else {
+                status
+            }
+        })?
+        .into_inner();
+
+    validate_agent_compatibility(&info)
+}
+
 impl AgentClient {
     /// Connect to the ctld-agent at the specified endpoint (plaintext).
-    pub async fn connect(endpoint: &str) -> Result<Self, tonic::transport::Error> {
-        let client = StorageAgentClient::connect(endpoint.to_string()).await?;
+    pub async fn connect(endpoint: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let mut client = StorageAgentClient::connect(endpoint.to_string()).await?;
+        verify_agent_compatibility(&mut client).await?;
         Ok(Self { client })
     }
 
@@ -161,7 +205,8 @@ impl AgentClient {
         }
 
         let channel = endpoint_builder.connect().await?;
-        let client = StorageAgentClient::new(channel);
+        let mut client = StorageAgentClient::new(channel);
+        verify_agent_compatibility(&mut client).await?;
         Ok(Self { client })
     }
 
@@ -188,6 +233,7 @@ impl AgentClient {
             size_bytes,
             export_type: export_type as i32,
             parameters,
+            legacy_auth: None,
             auth_group,
             content_source,
         };
@@ -473,6 +519,43 @@ mod tests {
         assert!(!is_retryable(&tonic::Status::permission_denied("denied")));
         assert!(!is_retryable(&tonic::Status::already_exists("exists")));
         assert!(!is_retryable(&tonic::Status::internal("internal error")));
+    }
+
+    #[test]
+    fn test_validate_agent_compatibility_accepts_required_feature() {
+        let info = GetAgentInfoResponse {
+            protocol_version: REQUIRED_AGENT_PROTOCOL_VERSION,
+            version: "0.5.0".to_string(),
+            features: vec![AgentFeature::OperatorAuthGroup as i32],
+        };
+
+        assert!(validate_agent_compatibility(&info).is_ok());
+    }
+
+    #[test]
+    fn test_validate_agent_compatibility_rejects_old_protocol() {
+        let info = GetAgentInfoResponse {
+            protocol_version: REQUIRED_AGENT_PROTOCOL_VERSION - 1,
+            version: "0.4.1".to_string(),
+            features: vec![AgentFeature::OperatorAuthGroup as i32],
+        };
+
+        let err = validate_agent_compatibility(&info).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(err.message().contains("protocol version"));
+    }
+
+    #[test]
+    fn test_validate_agent_compatibility_rejects_missing_auth_group_feature() {
+        let info = GetAgentInfoResponse {
+            protocol_version: REQUIRED_AGENT_PROTOCOL_VERSION,
+            version: "0.5.0".to_string(),
+            features: vec![],
+        };
+
+        let err = validate_agent_compatibility(&info).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(err.message().contains("operator-managed auth groups"));
     }
 
     #[tokio::test]

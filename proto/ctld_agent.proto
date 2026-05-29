@@ -24,6 +24,46 @@ enum CloneMode {
     CLONE_MODE_COPY = 2;
 }
 
+enum AgentFeature {
+    AGENT_FEATURE_UNSPECIFIED = 0;
+
+    // CreateVolumeRequest.auth_group is supported and legacy field-5
+    // AuthCredentials are rejected instead of silently ignored.
+    AGENT_FEATURE_OPERATOR_AUTH_GROUP = 1;
+}
+
+message GetAgentInfoRequest {}
+
+message GetAgentInfoResponse {
+    uint32 protocol_version = 1;
+    string version = 2;
+    repeated AgentFeature features = 3;
+}
+
+// Legacy authentication credential messages are kept only so new agents can
+// detect old controllers that still send credentials on CreateVolume field 5
+// and fail closed instead of creating unauthenticated targets.
+message IscsiChapCredentials {
+    string username = 1;
+    string secret = 2;
+    string mutual_username = 3;
+    string mutual_secret = 4;
+}
+
+message NvmeAuthCredentials {
+    string host_nqn = 1;
+    string secret = 2;
+    string hash_function = 3;
+    string dh_group = 4;
+}
+
+message AuthCredentials {
+    oneof credentials {
+        IscsiChapCredentials iscsi_chap = 1;
+        NvmeAuthCredentials nvme_auth = 2;
+    }
+}
+
 // Content source for creating a volume from existing data
 message VolumeContentSource {
     // Source type: either a snapshot or an existing volume
@@ -63,7 +103,9 @@ message CreateVolumeRequest {
     ExportType export_type = 3;
     map<string, string> parameters = 4;
 
-    reserved 5;  // Previously AuthCredentials auth.
+    // Deprecated field 5 is accepted only to detect and reject mixed-version
+    // callers. Do not populate it from new clients.
+    AuthCredentials legacy_auth = 5;
 
     // Optional operator-managed CTL auth-group reference.
     // Credentials are configured outside the agent in the main ctl.conf.
@@ -171,6 +213,8 @@ message GetCapacityResponse {
 
 // The storage agent service
 service StorageAgent {
+    rpc GetAgentInfo(GetAgentInfoRequest) returns (GetAgentInfoResponse);
+
     // Volume operations
     rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
     rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);

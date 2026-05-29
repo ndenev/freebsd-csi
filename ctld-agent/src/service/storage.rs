@@ -16,6 +16,8 @@ use tracing::{debug, error, info, instrument, warn};
 
 /// Default maximum number of concurrent storage operations
 const DEFAULT_MAX_CONCURRENT_OPS: usize = 10;
+const AGENT_PROTOCOL_VERSION: u32 = 2;
+const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 type VolumeCreateLocks = Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>;
 
@@ -35,12 +37,13 @@ pub mod proto {
 
 use proto::storage_agent_server::StorageAgent;
 use proto::{
-    CloneMode, CreateSnapshotRequest, CreateSnapshotResponse, CreateVolumeRequest,
-    CreateVolumeResponse, DeleteSnapshotRequest, DeleteSnapshotResponse, DeleteVolumeRequest,
-    DeleteVolumeResponse, ExpandVolumeRequest, ExpandVolumeResponse, ExportType,
-    GetCapacityRequest, GetCapacityResponse, GetSnapshotRequest, GetSnapshotResponse,
-    GetVolumeRequest, GetVolumeResponse, ListSnapshotsRequest, ListSnapshotsResponse,
-    ListVolumesRequest, ListVolumesResponse, Snapshot, Volume,
+    AgentFeature, AuthCredentials, CloneMode, CreateSnapshotRequest, CreateSnapshotResponse,
+    CreateVolumeRequest, CreateVolumeResponse, DeleteSnapshotRequest, DeleteSnapshotResponse,
+    DeleteVolumeRequest, DeleteVolumeResponse, ExpandVolumeRequest, ExpandVolumeResponse,
+    ExportType, GetAgentInfoRequest, GetAgentInfoResponse, GetCapacityRequest, GetCapacityResponse,
+    GetSnapshotRequest, GetSnapshotResponse, GetVolumeRequest, GetVolumeResponse,
+    ListSnapshotsRequest, ListSnapshotsResponse, ListVolumesRequest, ListVolumesResponse, Snapshot,
+    Volume,
 };
 
 /// Convert proto ExportType to CTL ExportType
@@ -67,6 +70,17 @@ fn auth_group_to_ctl_auth(auth_group: &str) -> AuthConfig {
     } else {
         AuthConfig::GroupRef(auth_group.to_string())
     }
+}
+
+fn reject_legacy_create_auth(legacy_auth: Option<&AuthCredentials>) -> Result<(), Status> {
+    if legacy_auth.is_some() {
+        return Err(Status::failed_precondition(
+            "legacy CreateVolume auth credentials are no longer supported; \
+             upgrade the CSI controller and use the authGroup StorageClass parameter",
+        ));
+    }
+
+    Ok(())
 }
 
 /// Parse CTL options from request parameters.
@@ -613,6 +627,17 @@ impl StorageService {
 
 #[tonic::async_trait]
 impl StorageAgent for StorageService {
+    async fn get_agent_info(
+        &self,
+        _request: Request<GetAgentInfoRequest>,
+    ) -> Result<Response<GetAgentInfoResponse>, Status> {
+        Ok(Response::new(GetAgentInfoResponse {
+            protocol_version: AGENT_PROTOCOL_VERSION,
+            version: AGENT_VERSION.to_string(),
+            features: vec![AgentFeature::OperatorAuthGroup as i32],
+        }))
+    }
+
     /// Create a new volume, export via iSCSI or NVMeoF
     #[instrument(skip(self, request))]
     async fn create_volume(
@@ -629,6 +654,8 @@ impl StorageAgent for StorageService {
             "CreateVolume request: name={}, size={}",
             req.name, req.size_bytes
         );
+
+        reject_legacy_create_auth(req.legacy_auth.as_ref())?;
 
         if req.name.is_empty() {
             timer.failure("invalid_argument");
@@ -1940,6 +1967,23 @@ impl StorageAgent for StorageService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_reject_legacy_create_auth() {
+        let legacy_auth = AuthCredentials { credentials: None };
+        let err = reject_legacy_create_auth(Some(&legacy_auth)).unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            err.message()
+                .contains("legacy CreateVolume auth credentials")
+        );
+    }
+
+    #[test]
+    fn test_accept_create_without_legacy_auth() {
+        assert!(reject_legacy_create_auth(None).is_ok());
+    }
 
     #[test]
     fn test_paginate_empty_token() {

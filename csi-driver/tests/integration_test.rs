@@ -435,6 +435,7 @@ fn test_agent_create_volume_auth_group() {
         size_bytes: 1024 * 1024 * 1024,
         export_type: ExportType::Iscsi as i32,
         parameters: HashMap::new(),
+        legacy_auth: None,
         auth_group: "ag-secure".to_string(),
         content_source: None,
     };

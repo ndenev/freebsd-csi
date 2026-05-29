@@ -89,7 +89,11 @@ impl ControllerService {
                 error!(error = %e, "Failed to connect to ctld-agent");
                 metrics::record_connection_attempt(false);
                 metrics::set_agent_connected(false);
-                Status::unavailable("Agent connection failed")
+                if let Some(status) = e.downcast_ref::<Status>() {
+                    status.clone()
+                } else {
+                    Status::unavailable("Agent connection failed")
+                }
             })?;
 
         metrics::record_connection_attempt(true);

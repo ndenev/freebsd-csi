@@ -35,6 +35,11 @@ class StorageAgentStub(object):
         Args:
             channel: A grpc.Channel.
         """
+        self.GetAgentInfo = channel.unary_unary(
+                '/ctld_agent.v1.StorageAgent/GetAgentInfo',
+                request_serializer=ctld__agent__pb2.GetAgentInfoRequest.SerializeToString,
+                response_deserializer=ctld__agent__pb2.GetAgentInfoResponse.FromString,
+                _registered_method=True)
         self.CreateVolume = channel.unary_unary(
                 '/ctld_agent.v1.StorageAgent/CreateVolume',
                 request_serializer=ctld__agent__pb2.CreateVolumeRequest.SerializeToString,
@@ -90,6 +95,12 @@ class StorageAgentStub(object):
 class StorageAgentServicer(object):
     """The storage agent service
     """
+
+    def GetAgentInfo(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
 
     def CreateVolume(self, request, context):
         """Volume operations
@@ -157,6 +168,11 @@ class StorageAgentServicer(object):
 
 def add_StorageAgentServicer_to_server(servicer, server):
     rpc_method_handlers = {
+            'GetAgentInfo': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetAgentInfo,
+                    request_deserializer=ctld__agent__pb2.GetAgentInfoRequest.FromString,
+                    response_serializer=ctld__agent__pb2.GetAgentInfoResponse.SerializeToString,
+            ),
             'CreateVolume': grpc.unary_unary_rpc_method_handler(
                     servicer.CreateVolume,
                     request_deserializer=ctld__agent__pb2.CreateVolumeRequest.FromString,
@@ -218,6 +234,33 @@ def add_StorageAgentServicer_to_server(servicer, server):
 class StorageAgent(object):
     """The storage agent service
     """
+
+    @staticmethod
+    def GetAgentInfo(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ctld_agent.v1.StorageAgent/GetAgentInfo',
+            ctld__agent__pb2.GetAgentInfoRequest.SerializeToString,
+            ctld__agent__pb2.GetAgentInfoResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
 
     @staticmethod
     def CreateVolume(request,
