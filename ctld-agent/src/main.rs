@@ -153,7 +153,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctl = Arc::new(RwLock::new(ctl_manager));
 
     // Create the storage service with rate limiting
-    let storage_service = StorageService::with_concurrency_limit(zfs, ctl, args.max_concurrent_ops);
+    let storage_service = StorageService::with_concurrency_limit_and_ctl_config_path(
+        zfs,
+        ctl,
+        args.max_concurrent_ops,
+        args.ctl_config.clone(),
+    );
 
     // Restore volume metadata from ZFS user properties
     let restored_count = storage_service

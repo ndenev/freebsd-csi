@@ -7,6 +7,7 @@
 //! storage operations.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,7 +24,7 @@ type VolumeCreateLocks = Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>;
 
 use crate::ctl::{
     AuthConfig, ConfigWriterHandle, CtlError, CtlManager, CtlOptions, ExportType as CtlExportType,
-    spawn_config_writer,
+    spawn_config_writer, validate_auth_group_exists,
 };
 use crate::metrics::{self, OperationTimer};
 use crate::zfs::{
@@ -81,6 +82,19 @@ fn reject_legacy_create_auth(legacy_auth: Option<&AuthCredentials>) -> Result<()
     }
 
     Ok(())
+}
+
+async fn validate_auth_group_reference_in_config(
+    ctl_config_path: &Path,
+    auth_config: &AuthConfig,
+) -> Result<(), Status> {
+    let AuthConfig::GroupRef(auth_group) = auth_config else {
+        return Ok(());
+    };
+
+    validate_auth_group_exists(ctl_config_path, auth_group)
+        .await
+        .map_err(|e| Status::invalid_argument(format!("invalid authGroup '{}': {}", auth_group, e)))
 }
 
 /// Parse CTL options from request parameters.
@@ -327,6 +341,8 @@ pub struct StorageService {
     volumes: Arc<RwLock<HashMap<String, VolumeMetadata>>>,
     /// Serializes same-name CreateVolume calls
     volume_create_locks: VolumeCreateLocks,
+    /// Main CTL config path used to validate operator-managed auth-groups
+    ctl_config_path: PathBuf,
     // Note: Snapshot metadata is stored in ZFS properties and queried directly.
     // No in-memory cache needed - ZFS is the single source of truth.
     /// Semaphore for rate limiting concurrent operations
@@ -347,6 +363,21 @@ impl StorageService {
         ctl: Arc<RwLock<CtlManager>>,
         max_concurrent_ops: usize,
     ) -> Self {
+        Self::with_concurrency_limit_and_ctl_config_path(
+            zfs,
+            ctl,
+            max_concurrent_ops,
+            "/etc/ctl.conf",
+        )
+    }
+
+    /// Create a new StorageService with configurable concurrency and CTL config path.
+    pub fn with_concurrency_limit_and_ctl_config_path(
+        zfs: Arc<RwLock<ZfsManager>>,
+        ctl: Arc<RwLock<CtlManager>>,
+        max_concurrent_ops: usize,
+        ctl_config_path: impl Into<PathBuf>,
+    ) -> Self {
         // Spawn the serialized config writer task.
         // This ensures all config writes are serialized with debouncing,
         // preventing race conditions during parallel volume operations.
@@ -358,9 +389,14 @@ impl StorageService {
             config_writer,
             volumes: Arc::new(RwLock::new(HashMap::new())),
             volume_create_locks: Arc::new(Mutex::new(HashMap::new())),
+            ctl_config_path: ctl_config_path.into(),
             ops_semaphore: Arc::new(Semaphore::new(max_concurrent_ops)),
             max_concurrent_ops,
         }
+    }
+
+    async fn validate_auth_group_reference(&self, auth_config: &AuthConfig) -> Result<(), Status> {
+        validate_auth_group_reference_in_config(&self.ctl_config_path, auth_config).await
     }
 
     async fn create_volume_lock(locks: &VolumeCreateLocks, volume_name: &str) -> Arc<Mutex<()>> {
@@ -703,6 +739,10 @@ impl StorageAgent for StorageService {
 
         // Extract operator-managed target auth-group reference.
         let mut auth_config = auth_group_to_ctl_auth(&req.auth_group);
+        if let Err(status) = self.validate_auth_group_reference(&auth_config).await {
+            timer.failure("invalid_auth_group");
+            return Err(status);
+        }
 
         // Compute auth-group name for ZFS metadata (credentials NOT stored in ZFS)
         let auth_group_name = if auth_config.is_some() {
@@ -1967,6 +2007,8 @@ impl StorageAgent for StorageService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_reject_legacy_create_auth() {
@@ -1983,6 +2025,74 @@ mod tests {
     #[test]
     fn test_accept_create_without_legacy_auth() {
         assert!(reject_legacy_create_auth(None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_auth_group_reference_accepts_defined_group() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+auth-group {{
+    ag-secure {{
+        chap [
+            {{
+                user = "initiator";
+                secret = "secret";
+            }}
+        ]
+    }}
+}}
+        "#
+        )
+        .unwrap();
+
+        let auth = AuthConfig::GroupRef("ag-secure".to_string());
+        assert!(
+            validate_auth_group_reference_in_config(file.path(), &auth)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_auth_group_reference_rejects_missing_group() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+auth-group {{
+    ag-secure {{
+        chap [
+            {{
+                user = "initiator";
+                secret = "secret";
+            }}
+        ]
+    }}
+}}
+        "#
+        )
+        .unwrap();
+
+        let auth = AuthConfig::GroupRef("ag-missing".to_string());
+        let err = validate_auth_group_reference_in_config(file.path(), &auth)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("invalid authGroup"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_auth_group_reference_allows_no_auth() {
+        assert!(
+            validate_auth_group_reference_in_config(
+                Path::new("/path/does/not/matter"),
+                &AuthConfig::None,
+            )
+            .await
+            .is_ok()
+        );
     }
 
     #[test]

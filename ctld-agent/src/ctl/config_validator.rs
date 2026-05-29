@@ -5,7 +5,7 @@
 
 use std::path::Path;
 use thiserror::Error;
-use uclicious::{DEFAULT_DUPLICATE_STRATEGY, Priority, raw::object::ObjectRef};
+use uclicious::{DEFAULT_DUPLICATE_STRATEGY, Object, Priority, raw::object::ObjectRef};
 
 #[derive(Debug, Error)]
 pub enum ValidationError {
@@ -19,6 +19,19 @@ pub enum ValidationError {
     PortalGroupNotFound(String, String),
     #[error("transport-group '{0}' not found in {1}")]
     TransportGroupNotFound(String, String),
+    #[error("auth-group '{0}' not found in {1}")]
+    AuthGroupNotFound(String, String),
+}
+
+fn parse_ucl_config(path: &Path, content: &str) -> Result<Object, ValidationError> {
+    let mut parser = uclicious::raw::Parser::default();
+    parser
+        .add_chunk_full(content, Priority::default(), DEFAULT_DUPLICATE_STRATEGY)
+        .map_err(|e| ValidationError::ParseError(e.to_string()))?;
+
+    parser
+        .get_object()
+        .map_err(|e| ValidationError::ParseError(format!("{}: {}", path.display(), e)))
 }
 
 /// Validate that a portal-group with the given name exists in the config file.
@@ -34,15 +47,7 @@ pub async fn validate_portal_group_exists(
 
     let content = tokio::fs::read_to_string(path).await?;
 
-    // Parse the UCL config
-    let mut parser = uclicious::raw::Parser::default();
-    parser
-        .add_chunk_full(&content, Priority::default(), DEFAULT_DUPLICATE_STRATEGY)
-        .map_err(|e| ValidationError::ParseError(e.to_string()))?;
-
-    let obj = parser
-        .get_object()
-        .map_err(|e| ValidationError::ParseError(e.to_string()))?;
+    let obj = parse_ucl_config(path, &content)?;
 
     // Look for portal-group section
     if let Some(portal_groups) = obj.lookup("portal-group") {
@@ -71,15 +76,7 @@ pub async fn validate_transport_group_exists(
 
     let content = tokio::fs::read_to_string(path).await?;
 
-    // Parse the UCL config
-    let mut parser = uclicious::raw::Parser::default();
-    parser
-        .add_chunk_full(&content, Priority::default(), DEFAULT_DUPLICATE_STRATEGY)
-        .map_err(|e| ValidationError::ParseError(e.to_string()))?;
-
-    let obj = parser
-        .get_object()
-        .map_err(|e| ValidationError::ParseError(e.to_string()))?;
+    let obj = parse_ucl_config(path, &content)?;
 
     // Look for transport-group section
     if let Some(transport_groups) = obj.lookup("transport-group") {
@@ -90,6 +87,32 @@ pub async fn validate_transport_group_exists(
     }
 
     Err(ValidationError::TransportGroupNotFound(
+        group_name.to_string(),
+        path.display().to_string(),
+    ))
+}
+
+/// Validate that an auth-group with the given name exists in the config file.
+pub async fn validate_auth_group_exists(
+    config_path: impl AsRef<Path>,
+    group_name: &str,
+) -> Result<(), ValidationError> {
+    let path = config_path.as_ref();
+
+    if !tokio::fs::try_exists(path).await.unwrap_or(false) {
+        return Err(ValidationError::FileNotFound(path.display().to_string()));
+    }
+
+    let content = tokio::fs::read_to_string(path).await?;
+    let obj = parse_ucl_config(path, &content)?;
+
+    if let Some(auth_groups) = obj.lookup("auth-group")
+        && find_group_in_object(&auth_groups, group_name)
+    {
+        return Ok(());
+    }
+
+    Err(ValidationError::AuthGroupNotFound(
         group_name.to_string(),
         path.display().to_string(),
     ))
@@ -234,6 +257,77 @@ transport-group tg0 {{
     }
 
     #[tokio::test]
+    async fn test_find_auth_group_inline_format() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+auth-group ag-secure {{
+    chap [
+        {{
+            user = "initiator";
+            secret = "secret";
+        }}
+    ]
+}}
+        "#
+        )
+        .unwrap();
+
+        let result = validate_auth_group_exists(file.path(), "ag-secure").await;
+        assert!(result.is_ok(), "Error: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_find_auth_group_nested_format() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+auth-group {{
+    ag-secure {{
+        chap [
+            {{
+                user = "initiator";
+                secret = "secret";
+            }}
+        ]
+    }}
+}}
+        "#
+        )
+        .unwrap();
+
+        let result = validate_auth_group_exists(file.path(), "ag-secure").await;
+        assert!(result.is_ok(), "Error: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_find_auth_group_not_exists() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+auth-group {{
+    ag-secure {{
+        chap [
+            {{
+                user = "initiator";
+                secret = "secret";
+            }}
+        ]
+    }}
+}}
+        "#
+        )
+        .unwrap();
+
+        let result = validate_auth_group_exists(file.path(), "ag-missing").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[tokio::test]
     async fn test_missing_config_file() {
         let result = validate_portal_group_exists("/nonexistent/path", "pg0").await;
         assert!(result.is_err());
@@ -301,6 +395,13 @@ transport-group {{
             tg_result.is_ok(),
             "Transport group tg0 should exist: {:?}",
             tg_result.err()
+        );
+
+        let ag_result = validate_auth_group_exists(file.path(), "ag0").await;
+        assert!(
+            ag_result.is_ok(),
+            "Auth group ag0 should exist: {:?}",
+            ag_result.err()
         );
     }
 }

@@ -5,7 +5,8 @@ pub mod types;
 pub mod ucl_config;
 
 pub use config_validator::{
-    ValidationError, validate_portal_group_exists, validate_transport_group_exists,
+    ValidationError, validate_auth_group_exists, validate_portal_group_exists,
+    validate_transport_group_exists,
 };
 
 // Re-exports for module API
