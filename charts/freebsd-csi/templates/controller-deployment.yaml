@@ -32,6 +32,9 @@ spec:
             - "--csi-address=/csi/csi.sock"
             - "--v=5"
             - "--feature-gates=Topology=true"
+            {{- with .Values.sidecars.provisioner.timeout }}
+            - "--timeout={{ . }}"
+            {{- end }}
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:
