@@ -161,9 +161,6 @@ The ctld-agent will create and manage the following files in this directory:
 | File | Permissions | Description |
 |------|-------------|-------------|
 | `csi-targets.conf` | 0644 | Generated UCL config with all CSI-managed targets |
-| `auth.json` | 0600 | CHAP authentication credentials (if CHAP is enabled) |
-
-**Security Note:** The `auth.json` file contains sensitive CHAP credentials and is readable only by root.
 
 ### ZFS Pool Configuration
 
@@ -579,9 +576,9 @@ Check that the agent starts without errors:
 service ctld_agent status
 ```
 
-Review the agent logs for any warnings about missing auth credentials (existing CHAP credentials from the old configuration are not automatically migrated).
-
-**Note on CHAP Credentials:** If you had volumes with CHAP authentication enabled, the credentials were stored in the old UCL config and are not automatically migrated to the new `auth.json` format. You may need to recreate PVCs with CHAP or manually populate `auth.json`.
+If you use authenticated targets, define the CTL `auth-group` in the main
+`ctl.conf`, set the StorageClass `authGroup` parameter to that name, and keep
+matching initiator credentials in the node-stage Kubernetes Secret.
 
 ---
 

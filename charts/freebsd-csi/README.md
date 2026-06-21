@@ -59,6 +59,7 @@ helm install freebsd-csi charts/freebsd-csi \
 | `storageClassIscsi.parameters.blockSize` | Logical block size (512 or 4096) | - |
 | `storageClassIscsi.parameters.physicalBlockSize` | Physical block size hint | - |
 | `storageClassIscsi.parameters.enableUnmap` | Enable TRIM/discard for SSD-backed storage | - |
+| `storageClassIscsi.parameters.authGroup` | Target-side CTL auth-group. Required when `chapSecret` is configured. | `""` |
 | `storageClassIscsi.chapSecret.name` | Existing secret with CHAP credentials | `""` |
 | `storageClassIscsi.chapSecret.namespace` | Namespace of CHAP secret | Release namespace |
 | `storageClassIscsi.chapSecret.credentials.username` | CHAP username (creates secret if set) | `""` |
@@ -78,6 +79,7 @@ helm install freebsd-csi charts/freebsd-csi \
 | `storageClassNvmeof.parameters.keepAliveTmo` | Linux `nvme connect --keep-alive-tmo` seconds; `0` disables keepalives | - |
 | `storageClassNvmeof.parameters.reconnectDelay` | Linux `nvme connect --reconnect-delay` seconds | - |
 | `storageClassNvmeof.parameters.ctrlLossTmo` | Linux `nvme connect --ctrl-loss-tmo` seconds; `-1` retries forever | - |
+| `storageClassNvmeof.parameters.authGroup` | Target-side CTL auth-group. Required when `authSecret` is configured. | `""` |
 | `storageClassNvmeof.authSecret.name` | Existing secret with NVMeoF auth credentials | `""` |
 | `storageClassNvmeof.authSecret.namespace` | Namespace of auth secret | Release namespace |
 | `storageClassNvmeof.authSecret.credentials.hostNqn` | Host NQN for access control (creates secret if set) | `""` |
@@ -134,6 +136,7 @@ helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
   --set agent.endpoint=http://192.168.1.100:50051 \
   --set storageClassIscsi.create=true \
   --set storageClassIscsi.parameters.endpoints=192.168.1.100:3260 \
+  --set storageClassIscsi.parameters.authGroup=iscsi-chap \
   --set storageClassIscsi.chapSecret.name=iscsi-chap
 ```
 
@@ -145,6 +148,7 @@ helm install freebsd-csi oci://ghcr.io/ndenev/charts/freebsd-csi \
   --set agent.endpoint=http://192.168.1.100:50051 \
   --set storageClassIscsi.create=true \
   --set storageClassIscsi.parameters.endpoints=192.168.1.100:3260 \
+  --set storageClassIscsi.parameters.authGroup=iscsi-chap \
   --set storageClassIscsi.chapSecret.credentials.username=myuser \
   --set storageClassIscsi.chapSecret.credentials.password=mysecret
 ```

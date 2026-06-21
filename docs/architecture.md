@@ -127,7 +127,7 @@ The storage agent runs on FreeBSD and manages:
 |----------------|-------------|
 | ZFS Operations | Create/delete zvols, snapshots, clones |
 | CTL Configuration | Manage iSCSI/NVMeoF targets and exports |
-| Authentication | Generate per-volume auth groups for CHAP |
+| Authentication | Reference operator-managed CTL auth-groups |
 | State Recovery | Restore volume metadata from ZFS properties |
 | Rate Limiting | Semaphore-based concurrency control |
 
@@ -250,12 +250,12 @@ The storage agent runs on FreeBSD and manages:
 │  ┌────────────────────┐         ┌────────────────────┐                     │
 │  │    StorageClass    │         │    CSI Controller  │                     │
 │  │                    │         │                    │                     │
-│  │ provisioner-secret─┼────────►│  Extract CHAP      │                     │
-│  │ node-stage-secret──┼─────┐   │  credentials       │                     │
+│  │ authGroup param ───┼────────►│  Forward auth-group│                     │
+│  │ node-stage-secret──┼─────┐   │  reference only    │                     │
 │  └────────────────────┘     │   │  from secrets      │                     │
 │                             │   └─────────┬──────────┘                     │
 │                             │             │                                 │
-│                             │             │ gRPC + AuthCredentials          │
+│                             │             │ gRPC + auth_group               │
 │                             │             ▼                                 │
 └─────────────────────────────┼─────────────────────────────────────────────┘
                               │             │
@@ -269,10 +269,9 @@ The storage agent runs on FreeBSD and manages:
 │  │  ┌────────────────────────▼────────────────────────────────────────┐  ││
 │  │  │                   Auth Processing                               │  ││
 │  │  │                                                                 │  ││
-│  │  │  1. Receive CHAP credentials in CreateVolume request            │  ││
-│  │  │  2. Generate unique auth-group name: "ag-<volume-id>"           │  ││
-│  │  │  3. Create auth-group in UCL config                             │  ││
-│  │  │  4. Associate auth-group with target                            │  ││
+│  │  │  1. Receive auth-group name in CreateVolume request             │  ││
+│  │  │  2. Store auth-group name in ZFS metadata                       │  ││
+│  │  │  3. Associate auth-group with target                            │  ││
 │  │  │                                                                 │  ││
 │  │  └─────────────────────────────────────────────────────────────────┘  ││
 │  │                                                                       ││
@@ -281,13 +280,13 @@ The storage agent runs on FreeBSD and manages:
 │  ┌───────────────────────────────────────────────────────────────────────┐│
 │  │                        /etc/ctl.conf                                  ││
 │  │                                                                       ││
-│  │  auth-group "ag-pvc-12345" {                                          ││
+│  │  auth-group "ag-secure" {                                             ││
 │  │      chap "user1" "pass1"                                             ││
 │  │      chap-mutual "target-user" "target-pass"  # if mutual CHAP       ││
 │  │  }                                                                    ││
 │  │                                                                       ││
 │  │  target "iqn.2024-01.org.freebsd.csi:pvc-12345" {                     ││
-│  │      auth-group "ag-pvc-12345"                                        ││
+│  │      auth-group "ag-secure"                                           ││
 │  │      portal-group "pg0"                                               ││
 │  │      lun 0 {                                                          ││
 │  │          path "/dev/zvol/tank/csi/pvc-12345"                          ││

@@ -1,4 +1,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("cargo:rerun-if-changed=../proto/csi.proto");
+    println!("cargo:rerun-if-changed=../proto/ctld_agent.proto");
+
     // Compile CSI proto (from official CSI spec)
     tonic_prost_build::configure()
         .build_server(true)

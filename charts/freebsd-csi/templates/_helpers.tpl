@@ -105,10 +105,18 @@ Validate required values
 {{- if and (not .Values.storageClassIscsi.parameters.endpoints) (not .Values.storageClassIscsi.parameters.portal) }}
 {{- fail "storageClassIscsi.parameters.endpoints is required when storageClassIscsi.create is true (e.g., --set storageClassIscsi.parameters.endpoints=192.168.1.100:3260)" }}
 {{- end }}
+{{- $iscsiChapSecretConfigured := or .Values.storageClassIscsi.chapSecret.name .Values.storageClassIscsi.chapSecret.credentials.username }}
+{{- if and $iscsiChapSecretConfigured (not .Values.storageClassIscsi.parameters.authGroup) }}
+{{- fail "storageClassIscsi.parameters.authGroup is required when storageClassIscsi.chapSecret is configured. Define a matching operator-managed auth-group in ctl.conf." }}
+{{- end }}
 {{- end }}
 {{- if .Values.storageClassNvmeof.create }}
 {{- if and (not .Values.storageClassNvmeof.parameters.endpoints) (not .Values.storageClassNvmeof.parameters.transportAddr) }}
 {{- fail "storageClassNvmeof.parameters.endpoints is required when storageClassNvmeof.create is true (e.g., --set storageClassNvmeof.parameters.endpoints=192.168.1.100:4420)" }}
+{{- end }}
+{{- $nvmeofAuthSecretConfigured := or .Values.storageClassNvmeof.authSecret.name .Values.storageClassNvmeof.authSecret.credentials.hostNqn }}
+{{- if and $nvmeofAuthSecretConfigured (not .Values.storageClassNvmeof.parameters.authGroup) }}
+{{- fail "storageClassNvmeof.parameters.authGroup is required when storageClassNvmeof.authSecret is configured. Define a matching operator-managed auth-group in ctl.conf." }}
 {{- end }}
 {{- end }}
 {{- end }}

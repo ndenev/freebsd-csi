@@ -19,13 +19,13 @@ use tempfile::NamedTempFile;
 
 use super::error::{CtlError, Result};
 use super::types::{AuthConfig, DevicePath, ExportType, Iqn, Nqn, TargetName};
-use super::ucl_config::{AuthGroup, Controller, CtlOptions, Target, ToUcl};
+use super::ucl_config::{Controller, CtlOptions, Target, ToUcl};
 
 /// Default path for CSI-managed targets config
 const CSI_CONFIG_PATH: &str = "/var/db/ctld-agent/csi-targets.conf";
 
 /// Represents a CTL export (either iSCSI target or NVMeoF controller)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Export {
     /// Volume name (used as key)
     pub volume_name: String,
@@ -137,6 +137,96 @@ impl CtlManager {
         auth: AuthConfig,
         ctl_options: CtlOptions,
     ) -> Result<Export> {
+        let target_name: TargetName = match export_type {
+            ExportType::Iscsi => self.generate_iqn(volume_name)?.into(),
+            ExportType::Nvmeof => self.generate_nqn(volume_name)?.into(),
+        };
+
+        self.export_volume_with_target(
+            volume_name,
+            device_path,
+            target_name,
+            lun_id,
+            auth,
+            ctl_options,
+        )
+    }
+
+    /// Export a volume with a previously persisted target name.
+    ///
+    /// This is used when reconstructing or retrying existing CSI-managed
+    /// volumes whose target identity is stored in ZFS metadata.
+    #[instrument(skip(self, auth, ctl_options))]
+    pub fn export_volume_with_target_name(
+        &self,
+        volume_name: &str,
+        device_path: &str,
+        target_name: &str,
+        lun_id: u32,
+        auth: AuthConfig,
+        ctl_options: CtlOptions,
+    ) -> Result<Export> {
+        let target_name = Self::parse_target_name(target_name)?;
+
+        self.export_volume_with_target(
+            volume_name,
+            device_path,
+            target_name,
+            lun_id,
+            auth,
+            ctl_options,
+        )
+    }
+
+    /// Ensure a volume is exported with a previously persisted target name.
+    ///
+    /// If the export already exists with the same configuration, this returns
+    /// the existing export. If it exists with different configuration, this
+    /// reports a configuration error rather than mutating the existing export.
+    #[instrument(skip(self, auth, ctl_options))]
+    pub fn ensure_export_volume_with_target_name(
+        &self,
+        volume_name: &str,
+        device_path: &str,
+        target_name: &str,
+        lun_id: u32,
+        auth: AuthConfig,
+        ctl_options: CtlOptions,
+    ) -> Result<Export> {
+        let target_name = Self::parse_target_name(target_name)?;
+
+        self.ensure_export_volume_with_target(
+            volume_name,
+            device_path,
+            target_name,
+            lun_id,
+            auth,
+            ctl_options,
+        )
+    }
+
+    fn parse_target_name(target_name: &str) -> Result<TargetName> {
+        if target_name.starts_with("iqn.") {
+            Ok(Iqn::parse(target_name)?.into())
+        } else if target_name.starts_with("nqn.") {
+            Ok(Nqn::parse(target_name)?.into())
+        } else {
+            Err(CtlError::InvalidName(format!(
+                "target name '{}' must be an IQN or NQN",
+                target_name
+            )))
+        }
+    }
+
+    fn build_export(
+        &self,
+        volume_name: &str,
+        device_path: &str,
+        target_name: TargetName,
+        lun_id: u32,
+        auth: AuthConfig,
+        ctl_options: CtlOptions,
+    ) -> Result<Export> {
         // Validate and parse inputs using newtypes
         let device_path = DevicePath::parse(device_path)?;
 
@@ -145,9 +235,9 @@ impl CtlManager {
         // volumes within our managed ZFS dataset hierarchy.
         device_path.validate_parent_dataset(&self.parent_dataset)?;
 
-        let target_name: TargetName = match export_type {
-            ExportType::Iscsi => self.generate_iqn(volume_name)?.into(),
-            ExportType::Nvmeof => self.generate_nqn(volume_name)?.into(),
+        let export_type = match &target_name {
+            TargetName::Iqn(_) => ExportType::Iscsi,
+            TargetName::Nqn(_) => ExportType::Nvmeof,
         };
 
         debug!(
@@ -158,7 +248,7 @@ impl CtlManager {
             if auth.is_some() { "enabled" } else { "none" }
         );
 
-        let export = Export {
+        Ok(Export {
             volume_name: volume_name.to_string(),
             device_path,
             export_type,
@@ -166,7 +256,27 @@ impl CtlManager {
             lun_id,
             auth,
             ctl_options,
-        };
+        })
+    }
+
+    fn export_volume_with_target(
+        &self,
+        volume_name: &str,
+        device_path: &str,
+        target_name: TargetName,
+        lun_id: u32,
+        auth: AuthConfig,
+        ctl_options: CtlOptions,
+    ) -> Result<Export> {
+        let export = self.build_export(
+            volume_name,
+            device_path,
+            target_name,
+            lun_id,
+            auth,
+            ctl_options,
+        )?;
+        let export_type = export.export_type;
 
         // Use Entry API for atomic check-and-insert
         let mut exports = self
@@ -184,6 +294,49 @@ impl CtlManager {
 
         info!("Exported {} as {} (cache only)", volume_name, export_type);
         Ok(export)
+    }
+
+    fn ensure_export_volume_with_target(
+        &self,
+        volume_name: &str,
+        device_path: &str,
+        target_name: TargetName,
+        lun_id: u32,
+        auth: AuthConfig,
+        ctl_options: CtlOptions,
+    ) -> Result<Export> {
+        let export = self.build_export(
+            volume_name,
+            device_path,
+            target_name,
+            lun_id,
+            auth,
+            ctl_options,
+        )?;
+        let export_type = export.export_type;
+
+        let mut exports = self
+            .exports
+            .write()
+            .map_err(|e| CtlError::ConfigError(format!("Lock poisoned: {}", e)))?;
+        match exports.entry(volume_name.to_string()) {
+            Entry::Occupied(existing) if existing.get() == &export => {
+                debug!(
+                    "Export for {} already exists with matching configuration",
+                    volume_name
+                );
+                Ok(existing.get().clone())
+            }
+            Entry::Occupied(_) => Err(CtlError::ConfigError(format!(
+                "target '{}' already exists with different export configuration",
+                volume_name
+            ))),
+            Entry::Vacant(vacant) => {
+                vacant.insert(export.clone());
+                info!("Exported {} as {} (cache only)", volume_name, export_type);
+                Ok(export)
+            }
+        }
     }
 
     /// Unexport a volume
@@ -217,29 +370,21 @@ impl CtlManager {
     /// /etc/ctl.conf via .include directive. This keeps CSI-managed targets
     /// separate from user-managed targets.
     ///
-    /// Generates per-volume auth-groups for targets that require authentication.
+    /// References operator-managed auth-groups for targets that require authentication.
     #[instrument(skip(self))]
     pub async fn write_config(&self) -> Result<()> {
         use std::fmt::Write;
 
         // Collect targets and auth groups while holding the lock
         // Use a block to ensure the lock guard is dropped before any await points
-        let (iscsi_targets, nvme_controllers, auth_groups) = {
+        let (iscsi_targets, nvme_controllers) = {
             let exports = self.exports.read().unwrap();
 
             let mut iscsi_targets: Vec<(String, Target)> = Vec::new();
             let mut nvme_controllers: Vec<(String, Controller)> = Vec::new();
-            let mut auth_groups: Vec<(String, AuthGroup)> = Vec::new();
 
             for export in exports.values() {
-                // Get auth group name (either "no-authentication" or per-volume "ag-<name>")
                 let auth_group_name = export.auth.auth_group_name(&export.volume_name);
-
-                // If this export has authentication, create an auth group entry
-                // This validates CHAP credentials don't contain characters that would corrupt UCL
-                if let Some(ag) = AuthGroup::from_auth_config(&export.auth, &export.volume_name)? {
-                    auth_groups.push((auth_group_name.clone(), ag));
-                }
 
                 match export.export_type {
                     ExportType::Iscsi => {
@@ -267,15 +412,14 @@ impl CtlManager {
                 }
             }
 
-            (iscsi_targets, nvme_controllers, auth_groups)
+            (iscsi_targets, nvme_controllers)
         };
 
         info!(
-            "Writing CSI config to {} with {} iSCSI targets, {} NVMeoF controllers, {} auth groups",
+            "Writing CSI config to {} with {} iSCSI targets, {} NVMeoF controllers",
             self.csi_config_path,
             iscsi_targets.len(),
             nvme_controllers.len(),
-            auth_groups.len()
         );
 
         // Generate UCL config content
@@ -288,14 +432,6 @@ impl CtlManager {
         )
         .unwrap();
         writeln!(config).unwrap();
-
-        // Write auth groups
-        for (name, auth_group) in &auth_groups {
-            writeln!(config, "auth-group \"{}\" {{", name).unwrap();
-            write!(config, "{}", auth_group.to_ucl(1)).unwrap();
-            writeln!(config, "}}").unwrap();
-            writeln!(config).unwrap();
-        }
 
         // Write iSCSI targets
         for (iqn, target) in &iscsi_targets {
@@ -529,24 +665,121 @@ mod tests {
     }
 
     #[test]
-    fn test_export_with_chap_auth() {
-        use super::super::types::IscsiChapAuth;
-
+    fn test_export_with_auth_group_ref() {
         let device_path = DevicePath::parse("/dev/zvol/tank/vol2").unwrap();
         let iqn = Iqn::parse("iqn.2024-01.com.example:vol2").unwrap();
 
-        let chap = IscsiChapAuth::new("testuser", "testsecret");
         let export = Export {
             volume_name: "vol2".to_string(),
             device_path,
             export_type: ExportType::Iscsi,
             target_name: iqn.into(),
             lun_id: 0,
-            auth: AuthConfig::IscsiChap(chap),
+            auth: AuthConfig::GroupRef("ag-custom".to_string()),
             ctl_options: CtlOptions::default(),
         };
 
         assert!(export.auth.is_some());
-        assert_eq!(export.auth.auth_group_name("vol2"), "ag-vol2");
+        assert_eq!(export.auth.auth_group_name("vol2"), "ag-custom");
+    }
+
+    #[test]
+    fn test_export_volume_with_target_name_uses_persisted_target() {
+        let manager = CtlManager::new(
+            "iqn.2026-05.com.example.changed".to_string(),
+            "nqn.2026-05.com.example.changed".to_string(),
+            "pg0".to_string(),
+            "tg0".to_string(),
+            "tank/csi".to_string(),
+        )
+        .unwrap();
+
+        let export = manager
+            .export_volume_with_target_name(
+                "vol1",
+                "/dev/zvol/tank/csi/vol1",
+                "iqn.2024-01.org.freebsd.csi:vol1",
+                0,
+                AuthConfig::None,
+                CtlOptions::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            export.target_name.to_string(),
+            "iqn.2024-01.org.freebsd.csi:vol1"
+        );
+    }
+
+    #[test]
+    fn test_ensure_export_volume_with_target_name_accepts_matching_existing_export() {
+        let manager = CtlManager::new(
+            "iqn.2026-05.com.example".to_string(),
+            "nqn.2026-05.com.example".to_string(),
+            "pg0".to_string(),
+            "tg0".to_string(),
+            "tank/csi".to_string(),
+        )
+        .unwrap();
+
+        let first = manager
+            .export_volume_with_target_name(
+                "vol1",
+                "/dev/zvol/tank/csi/vol1",
+                "iqn.2024-01.org.freebsd.csi:vol1",
+                0,
+                AuthConfig::None,
+                CtlOptions::default(),
+            )
+            .unwrap();
+
+        let ensured = manager
+            .ensure_export_volume_with_target_name(
+                "vol1",
+                "/dev/zvol/tank/csi/vol1",
+                "iqn.2024-01.org.freebsd.csi:vol1",
+                0,
+                AuthConfig::None,
+                CtlOptions::default(),
+            )
+            .unwrap();
+
+        assert_eq!(ensured, first);
+    }
+
+    #[test]
+    fn test_ensure_export_volume_with_target_name_rejects_conflicting_existing_export() {
+        let manager = CtlManager::new(
+            "iqn.2026-05.com.example".to_string(),
+            "nqn.2026-05.com.example".to_string(),
+            "pg0".to_string(),
+            "tg0".to_string(),
+            "tank/csi".to_string(),
+        )
+        .unwrap();
+
+        manager
+            .export_volume_with_target_name(
+                "vol1",
+                "/dev/zvol/tank/csi/vol1",
+                "iqn.2024-01.org.freebsd.csi:vol1",
+                0,
+                AuthConfig::None,
+                CtlOptions::default(),
+            )
+            .unwrap();
+
+        let err = manager
+            .ensure_export_volume_with_target_name(
+                "vol1",
+                "/dev/zvol/tank/csi/vol1",
+                "iqn.2024-01.org.freebsd.csi:vol1",
+                1,
+                AuthConfig::None,
+                CtlOptions::default(),
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("different export configuration"));
     }
 }

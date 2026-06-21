@@ -16,9 +16,8 @@ parameters:
   endpoints: "10.0.0.10:3260"
   # Filesystem type
   fsType: ext4
-  # CHAP secret references for provisioner (controller)
-  csi.storage.k8s.io/provisioner-secret-name: ${pvc.name}-chap
-  csi.storage.k8s.io/provisioner-secret-namespace: ${pvc.namespace}
+  # Operator-managed target auth-group defined in ctl.conf
+  authGroup: ag-e2e-chap
   # CHAP secret references for node staging
   csi.storage.k8s.io/node-stage-secret-name: ${pvc.name}-chap
   csi.storage.k8s.io/node-stage-secret-namespace: ${pvc.namespace}

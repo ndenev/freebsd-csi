@@ -153,25 +153,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctl = Arc::new(RwLock::new(ctl_manager));
 
     // Create the storage service with rate limiting
-    let storage_service = StorageService::with_concurrency_limit(zfs, ctl, args.max_concurrent_ops);
+    let storage_service = StorageService::with_concurrency_limit_and_ctl_config_path(
+        zfs,
+        ctl,
+        args.max_concurrent_ops,
+        args.ctl_config.clone(),
+    );
 
     // Restore volume metadata from ZFS user properties
-    match storage_service.restore_from_zfs().await {
-        Ok(count) => {
-            if count > 0 {
-                info!(
-                    "Successfully restored {} volume(s) from ZFS metadata",
-                    count
-                );
-            }
-        }
-        Err(e) => {
-            tracing::error!(
-                "Failed to restore volume metadata from ZFS: {} - service starting in degraded mode",
-                e
-            );
-            // Continue anyway - service can still operate on new volumes
-        }
+    let restored_count = storage_service
+        .restore_from_zfs()
+        .await
+        .map_err(|e| format!("Startup restore failed: {}", e))?;
+    if restored_count > 0 {
+        info!(
+            "Successfully restored {} volume(s) from ZFS metadata",
+            restored_count
+        );
     }
 
     // Reconcile exports: ensure all volumes in ZFS metadata are exported

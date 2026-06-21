@@ -425,55 +425,22 @@ fn test_agent_export_type_enum() {
     assert_eq!(nvmeof, 2);
 }
 
-/// Test agent CHAP credentials message construction
+/// Test agent CreateVolume auth-group reference field
 #[test]
-fn test_agent_chap_credentials() {
-    use agent::IscsiChapCredentials;
+fn test_agent_create_volume_auth_group() {
+    use agent::{CreateVolumeRequest, ExportType};
 
-    let chap = IscsiChapCredentials {
-        username: "testuser".to_string(),
-        secret: "testsecret".to_string(),
-        mutual_username: String::new(),
-        mutual_secret: String::new(),
+    let request = CreateVolumeRequest {
+        name: "vol1".to_string(),
+        size_bytes: 1024 * 1024 * 1024,
+        export_type: ExportType::Iscsi as i32,
+        parameters: HashMap::new(),
+        legacy_auth: None,
+        auth_group: "ag-secure".to_string(),
+        content_source: None,
     };
 
-    assert_eq!(chap.username, "testuser");
-    assert_eq!(chap.secret, "testsecret");
-    assert!(chap.mutual_username.is_empty());
-    assert!(chap.mutual_secret.is_empty());
-}
-
-/// Test agent mutual CHAP credentials
-#[test]
-fn test_agent_mutual_chap_credentials() {
-    use agent::IscsiChapCredentials;
-
-    let chap = IscsiChapCredentials {
-        username: "initiator".to_string(),
-        secret: "init_secret".to_string(),
-        mutual_username: "target".to_string(),
-        mutual_secret: "target_secret".to_string(),
-    };
-
-    assert!(!chap.mutual_username.is_empty());
-    assert!(!chap.mutual_secret.is_empty());
-}
-
-/// Test agent NVMe auth credentials
-#[test]
-fn test_agent_nvme_auth_credentials() {
-    use agent::NvmeAuthCredentials;
-
-    let nvme_auth = NvmeAuthCredentials {
-        host_nqn: "nqn.2024-01.org.freebsd.host:initiator01".to_string(),
-        secret: "dhhmacchapsecret".to_string(),
-        hash_function: "sha256".to_string(),
-        dh_group: "ffdhe2048".to_string(),
-    };
-
-    assert!(nvme_auth.host_nqn.starts_with("nqn."));
-    assert!(!nvme_auth.secret.is_empty());
-    assert_eq!(nvme_auth.hash_function, "sha256");
+    assert_eq!(request.auth_group, "ag-secure");
 }
 
 // ============================================================================
@@ -915,28 +882,18 @@ fn test_volume_provisioning_flow() {
     assert!(export_type == "iscsi" || export_type == "nvmeof");
 }
 
-/// Test volume provisioning with CHAP authentication
+/// Test volume provisioning with operator-managed auth-group reference
 #[test]
-fn test_volume_provisioning_with_chap() {
+fn test_volume_provisioning_with_auth_group() {
     // StorageClass parameters
     let mut params: HashMap<String, String> = HashMap::new();
     params.insert("exportType".to_string(), "iscsi".to_string());
+    params.insert("authGroup".to_string(), "ag-secure".to_string());
 
-    // Secrets from provisioner-secret-ref
-    let mut secrets: HashMap<String, String> = HashMap::new();
-    secrets.insert(
-        "node.session.auth.username".to_string(),
-        "csi-user".to_string(),
+    assert_eq!(
+        params.get("authGroup").map(String::as_str),
+        Some("ag-secure")
     );
-    secrets.insert(
-        "node.session.auth.password".to_string(),
-        "csi-password".to_string(),
-    );
-
-    // Verify we can extract auth from secrets
-    let has_chap = secrets.contains_key("node.session.auth.username")
-        && secrets.contains_key("node.session.auth.password");
-    assert!(has_chap, "CHAP credentials should be present");
 
     // Verify export type is iSCSI (CHAP only applies to iSCSI)
     let export_type = params.get("exportType").map(|s| s.to_lowercase());
