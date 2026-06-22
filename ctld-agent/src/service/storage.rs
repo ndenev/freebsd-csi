@@ -269,8 +269,24 @@ fn create_retry_metadata(
     }
 }
 
+fn auth_configs_match(volume_name: &str, existing: &AuthConfig, requested: &AuthConfig) -> bool {
+    if existing == requested {
+        return true;
+    }
+
+    match (existing, requested) {
+        (AuthConfig::GroupRef(existing_group), requested_auth) => {
+            existing_group == &requested_auth.auth_group_name(volume_name)
+        }
+        (existing_auth, AuthConfig::GroupRef(requested_group)) => {
+            &existing_auth.auth_group_name(volume_name) == requested_group
+        }
+        _ => false,
+    }
+}
+
 fn create_auth_matches(existing: &VolumeMetadata, requested_auth: &AuthConfig) -> bool {
-    existing.auth == *requested_auth
+    auth_configs_match(&existing.name, &existing.auth, requested_auth)
 }
 
 fn is_idempotent_create_request(
@@ -1230,11 +1246,26 @@ impl StorageAgent for StorageService {
                 ctl_export_type,
                 lun_id,
                 auth_config.clone(),
-                ctl_options,
+                ctl_options.clone(),
             ) {
-                warn!("Failed to export volume: {}", e);
-                timer.failure("export_error");
-                return Err(Status::internal(format!("failed to export volume: {}", e)));
+                if matches!(e, CtlError::TargetExists(_))
+                    && let Some(existing) = ctl.get_export(&req.name)
+                    && existing.device_path.to_string() == device_path
+                    && existing.export_type == ctl_export_type
+                    && existing.target_name.to_string() == target_name
+                    && existing.lun_id == lun_id
+                    && auth_configs_match(&req.name, &existing.auth, &auth_config)
+                    && existing.ctl_options == ctl_options
+                {
+                    info!(
+                        volume = %req.name,
+                        "Export already exists with matching configuration (idempotent success)"
+                    );
+                } else {
+                    warn!("Failed to export volume: {}", e);
+                    timer.failure("export_error");
+                    return Err(Status::internal(format!("failed to export volume: {}", e)));
+                }
             }
         }
 
@@ -2363,5 +2394,24 @@ mod tests {
             "source-vol",
             "target-vol",
         ));
+    }
+
+    #[test]
+    fn test_auth_match_accepts_restored_group_ref_for_generated_chap_group() {
+        let requested = AuthConfig::IscsiChap(IscsiChapAuth::new("user", "secret"));
+
+        assert!(auth_configs_match(
+            "vol1",
+            &AuthConfig::GroupRef("ag-vol1".to_string()),
+            &requested,
+        ));
+    }
+
+    #[test]
+    fn test_auth_match_rejects_different_cached_chap_credentials() {
+        let existing = AuthConfig::IscsiChap(IscsiChapAuth::new("user", "old-secret"));
+        let requested = AuthConfig::IscsiChap(IscsiChapAuth::new("user", "new-secret"));
+
+        assert!(!auth_configs_match("vol1", &existing, &requested));
     }
 }
