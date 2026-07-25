@@ -1041,7 +1041,7 @@ impl StorageAgent for StorageService {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis())
                         .unwrap_or(0);
-                    let temp_snap_name = format!("pvc-clone-{}-{}", &req.name, timestamp);
+                    let temp_snap_name = format!("pvc-clone-{}-{}", req.name, timestamp);
 
                     info!(
                         source_volume = %source_volume_id,
@@ -1567,19 +1567,8 @@ impl StorageAgent for StorageService {
             )));
         }
 
-        // Clear ZFS metadata before deleting (for consistency)
-        {
-            let zfs = self.zfs.read().await;
-            if let Err(e) = zfs.clear_volume_metadata(&volume_name).await {
-                debug!(
-                    "Failed to clear volume metadata from ZFS: {} (may already be cleared)",
-                    e
-                );
-                // Continue anyway - we're deleting the volume
-            }
-        }
-
-        // Delete ZFS volume (this is now idempotent - returns Ok if doesn't exist)
+        // Keep the CSI ownership metadata until destroy succeeds so retries after
+        // an agent restart can still recognize a busy volume as CSI-managed.
         {
             let zfs = self.zfs.read().await;
             if let Err(e) = zfs.delete_volume(&volume_name).await {

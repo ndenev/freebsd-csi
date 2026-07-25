@@ -817,23 +817,6 @@ impl ZfsManager {
         Ok(VolumeMetadataLookup::Found(metadata))
     }
 
-    /// Clear volume metadata (on deletion)
-    #[instrument(skip(self))]
-    pub async fn clear_volume_metadata(&self, name: &str) -> Result<()> {
-        validate_name(name)?;
-        let full_name = self.full_path(name);
-
-        // Use 'inherit' to remove user property
-        let output = Command::new("zfs")
-            .args(["inherit", METADATA_PROPERTY, &full_name])
-            .output()
-            .await?;
-
-        // Ignore errors - property might not exist
-        let _ = output;
-        Ok(())
-    }
-
     /// List all volumes with CSI metadata (for startup recovery)
     #[instrument(skip(self))]
     pub async fn list_volumes_with_metadata(&self) -> Result<Vec<(String, VolumeMetadata)>> {
