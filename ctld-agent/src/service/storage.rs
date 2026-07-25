@@ -234,6 +234,105 @@ fn volume_metadata_from_zfs(
     })
 }
 
+fn create_retry_metadata(
+    volume_id: &str,
+    cached_metadata: Option<VolumeMetadata>,
+    metadata_lookup: std::result::Result<MissingMetadataLookup, crate::zfs::ZfsError>,
+) -> Result<VolumeMetadata, Status> {
+    if let Some(metadata) = cached_metadata {
+        return Ok(metadata);
+    }
+
+    let lookup = metadata_lookup.map_err(|e| match e {
+        crate::zfs::ZfsError::InvalidName(msg) => {
+            Status::invalid_argument(format!("invalid volume name '{}': {}", volume_id, msg))
+        }
+        crate::zfs::ZfsError::ParseError(msg) => Status::already_exists(format!(
+            "Volume '{}' already exists but has invalid CSI metadata: {}",
+            volume_id, msg
+        )),
+        other => Status::internal(format!("failed to read volume metadata: {}", other)),
+    })?;
+
+    match lookup {
+        MissingMetadataLookup::Found(zfs_metadata) => {
+            volume_metadata_from_zfs(volume_id, &zfs_metadata)
+        }
+        MissingMetadataLookup::MissingMetadata => Err(Status::already_exists(format!(
+            "Volume '{}' already exists but versioned CSI metadata is unavailable for idempotency validation",
+            volume_id
+        ))),
+        MissingMetadataLookup::DatasetNotFound => Err(Status::internal(format!(
+            "Volume '{}' existed during create but disappeared before metadata validation",
+            volume_id
+        ))),
+    }
+}
+
+fn auth_configs_match(volume_name: &str, existing: &AuthConfig, requested: &AuthConfig) -> bool {
+    if existing == requested {
+        return true;
+    }
+
+    match (existing, requested) {
+        (AuthConfig::GroupRef(existing_group), requested_auth) => {
+            existing_group == &requested_auth.auth_group_name(volume_name)
+        }
+        (existing_auth, AuthConfig::GroupRef(requested_group)) => {
+            &existing_auth.auth_group_name(volume_name) == requested_group
+        }
+        _ => false,
+    }
+}
+
+fn create_auth_matches(existing: &VolumeMetadata, requested_auth: &AuthConfig) -> bool {
+    auth_configs_match(&existing.name, &existing.auth, requested_auth)
+}
+
+fn is_idempotent_create_request(
+    existing: &VolumeMetadata,
+    requested_export_type: ExportType,
+    requested_lun_id: u32,
+    requested_parameters: &HashMap<String, String>,
+    requested_auth: &AuthConfig,
+) -> bool {
+    existing.export_type == requested_export_type
+        && existing.lun_id == requested_lun_id as i32
+        && existing.parameters == *requested_parameters
+        && create_auth_matches(existing, requested_auth)
+}
+
+fn retry_failure_label(status: &Status) -> &'static str {
+    match status.code() {
+        tonic::Code::InvalidArgument => "invalid_argument",
+        tonic::Code::AlreadyExists => "metadata_mismatch",
+        _ => "zfs_error",
+    }
+}
+
+fn origin_matches_snapshot(origin: &str, source_volume: &str, snap_name: &str) -> bool {
+    let Some((source_path, origin_snap_name)) = origin.rsplit_once('@') else {
+        return false;
+    };
+
+    let origin_source = source_path.rsplit('/').next().unwrap_or(source_path);
+    origin_source == source_volume && origin_snap_name == snap_name
+}
+
+fn origin_matches_source_volume_clone(
+    origin: &str,
+    source_volume: &str,
+    target_volume: &str,
+) -> bool {
+    let Some((source_path, origin_snap_name)) = origin.rsplit_once('@') else {
+        return false;
+    };
+
+    let origin_source = source_path.rsplit('/').next().unwrap_or(source_path);
+    let expected_prefix = format!("pvc-clone-{}-", target_volume);
+    origin_source == source_volume && origin_snap_name.starts_with(&expected_prefix)
+}
+
 /// Internal tracking of volume metadata
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VolumeMetadata {
@@ -535,7 +634,14 @@ impl StorageService {
                 zfs.copy_from_snapshot(source_volume, snap_name, target_name, metadata)
                     .await
                     .map_err(|e| {
-                        Status::internal(format!("failed to copy volume from snapshot: {}", e))
+                        if matches!(e, crate::zfs::ZfsError::DatasetExists(_)) {
+                            Status::already_exists(format!(
+                                "volume '{}' already exists",
+                                target_name
+                            ))
+                        } else {
+                            Status::internal(format!("failed to copy volume from snapshot: {}", e))
+                        }
                     })
             }
             CloneMode::Linked | CloneMode::Unspecified => {
@@ -549,10 +655,158 @@ impl StorageService {
                 zfs.clone_from_snapshot(source_volume, snap_name, target_name, metadata)
                     .await
                     .map_err(|e| {
-                        Status::internal(format!("failed to clone volume from snapshot: {}", e))
+                        if matches!(e, crate::zfs::ZfsError::DatasetExists(_)) {
+                            Status::already_exists(format!(
+                                "volume '{}' already exists",
+                                target_name
+                            ))
+                        } else {
+                            Status::internal(format!("failed to clone volume from snapshot: {}", e))
+                        }
                     })
             }
         }
+    }
+
+    async fn recover_existing_volume_for_create(
+        &self,
+        volume_name: &str,
+        requested_size: u64,
+        requested_export_type: ExportType,
+        requested_lun_id: u32,
+        requested_parameters: &HashMap<String, String>,
+        requested_auth: &AuthConfig,
+    ) -> Result<(crate::zfs::Dataset, VolumeMetadata), Status> {
+        info!(
+            volume = %volume_name,
+            "Volume already exists, checking parameters for idempotency"
+        );
+
+        let existing = {
+            let zfs = self.zfs.read().await;
+            zfs.get_dataset(volume_name).await.map_err(|e| {
+                Status::internal(format!("Failed to get existing volume info: {}", e))
+            })?
+        };
+
+        let existing_size = existing.volsize.unwrap_or(0);
+        if existing_size < requested_size {
+            return Err(Status::already_exists(format!(
+                "Volume '{}' exists with size {} bytes but {} bytes was requested. Existing volume is smaller than requested.",
+                volume_name, existing_size, requested_size
+            )));
+        }
+
+        let cached_metadata = {
+            let volumes = self.volumes.read().await;
+            volumes.get(volume_name).cloned()
+        };
+
+        let metadata_lookup = if cached_metadata.is_some() {
+            Ok(MissingMetadataLookup::DatasetNotFound)
+        } else {
+            let zfs = self.zfs.read().await;
+            zfs.get_volume_metadata(volume_name).await
+        };
+
+        let existing_metadata =
+            create_retry_metadata(volume_name, cached_metadata, metadata_lookup)?;
+
+        if !is_idempotent_create_request(
+            &existing_metadata,
+            requested_export_type,
+            requested_lun_id,
+            requested_parameters,
+            requested_auth,
+        ) {
+            return Err(Status::already_exists(format!(
+                "Volume '{}' already exists but requested export/auth parameters differ",
+                volume_name
+            )));
+        }
+
+        Ok((existing, existing_metadata))
+    }
+
+    async fn validate_snapshot_retry_origin(
+        &self,
+        volume_name: &str,
+        source_volume: &str,
+        snap_name: &str,
+        clone_mode: CloneMode,
+    ) -> Result<(), Status> {
+        if clone_mode == CloneMode::Copy {
+            return Err(Status::already_exists(format!(
+                "Volume '{}' already exists after COPY-mode snapshot restore retry; content source cannot be validated safely",
+                volume_name
+            )));
+        }
+
+        let origin = {
+            let zfs = self.zfs.read().await;
+            zfs.get_origin(volume_name).await.map_err(|e| {
+                Status::internal(format!(
+                    "Failed to get origin for existing volume '{}': {}",
+                    volume_name, e
+                ))
+            })?
+        };
+
+        let Some(origin) = origin else {
+            return Err(Status::already_exists(format!(
+                "Volume '{}' already exists but is not a ZFS clone; refusing snapshot restore retry recovery",
+                volume_name
+            )));
+        };
+
+        if !origin_matches_snapshot(&origin, source_volume, snap_name) {
+            return Err(Status::already_exists(format!(
+                "Volume '{}' already exists but origin '{}' does not match requested snapshot '{}@{}'",
+                volume_name, origin, source_volume, snap_name
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn validate_source_volume_retry_origin(
+        &self,
+        volume_name: &str,
+        source_volume: &str,
+        clone_mode: CloneMode,
+    ) -> Result<(), Status> {
+        if clone_mode == CloneMode::Copy {
+            return Err(Status::already_exists(format!(
+                "Volume '{}' already exists after COPY-mode volume clone retry; content source cannot be validated safely",
+                volume_name
+            )));
+        }
+
+        let origin = {
+            let zfs = self.zfs.read().await;
+            zfs.get_origin(volume_name).await.map_err(|e| {
+                Status::internal(format!(
+                    "Failed to get origin for existing volume '{}': {}",
+                    volume_name, e
+                ))
+            })?
+        };
+
+        let Some(origin) = origin else {
+            return Err(Status::already_exists(format!(
+                "Volume '{}' already exists but is not a ZFS clone; refusing volume clone retry recovery",
+                volume_name
+            )));
+        };
+
+        if !origin_matches_source_volume_clone(&origin, source_volume, volume_name) {
+            return Err(Status::already_exists(format!(
+                "Volume '{}' already exists but origin '{}' does not match requested source volume '{}'",
+                volume_name, origin, source_volume
+            )));
+        }
+
+        Ok(())
     }
 }
 
@@ -605,7 +859,7 @@ impl StorageAgent for StorageService {
 
         // Generate target name (IQN/NQN) before volume creation
         let ctl_export_type = to_ctl_export_type(export_type).expect("already validated");
-        let target_name = {
+        let mut target_name = {
             let ctl = self.ctl.read().await;
             match ctl_export_type {
                 crate::ctl::ExportType::Iscsi => ctl
@@ -724,6 +978,41 @@ impl StorageAgent for StorageService {
                         .await
                     {
                         Ok(d) => d,
+                        Err(e) if e.code() == tonic::Code::AlreadyExists => {
+                            if let Err(status) = self
+                                .validate_snapshot_retry_origin(
+                                    &req.name,
+                                    source_volume,
+                                    snap_name,
+                                    clone_mode,
+                                )
+                                .await
+                            {
+                                timer.failure(retry_failure_label(&status));
+                                return Err(status);
+                            }
+
+                            match self
+                                .recover_existing_volume_for_create(
+                                    &req.name,
+                                    req.size_bytes as u64,
+                                    export_type,
+                                    lun_id,
+                                    &req.parameters,
+                                    &auth_config,
+                                )
+                                .await
+                            {
+                                Ok((existing, existing_metadata)) => {
+                                    target_name = existing_metadata.target_name.clone();
+                                    existing
+                                }
+                                Err(status) => {
+                                    timer.failure(retry_failure_label(&status));
+                                    return Err(status);
+                                }
+                            }
+                        }
                         Err(e) => {
                             timer.failure("zfs_error");
                             return Err(e);
@@ -828,6 +1117,40 @@ impl StorageAgent for StorageService {
 
                     match result {
                         Ok(d) => d,
+                        Err(e) if e.code() == tonic::Code::AlreadyExists => {
+                            if let Err(status) = self
+                                .validate_source_volume_retry_origin(
+                                    &req.name,
+                                    source_volume_id,
+                                    clone_mode,
+                                )
+                                .await
+                            {
+                                timer.failure(retry_failure_label(&status));
+                                return Err(status);
+                            }
+
+                            match self
+                                .recover_existing_volume_for_create(
+                                    &req.name,
+                                    req.size_bytes as u64,
+                                    export_type,
+                                    lun_id,
+                                    &req.parameters,
+                                    &auth_config,
+                                )
+                                .await
+                            {
+                                Ok((existing, existing_metadata)) => {
+                                    target_name = existing_metadata.target_name.clone();
+                                    existing
+                                }
+                                Err(status) => {
+                                    timer.failure(retry_failure_label(&status));
+                                    return Err(status);
+                                }
+                            }
+                        }
                         Err(e) => {
                             timer.failure("zfs_error");
                             return Err(e);
@@ -923,11 +1246,26 @@ impl StorageAgent for StorageService {
                 ctl_export_type,
                 lun_id,
                 auth_config.clone(),
-                ctl_options,
+                ctl_options.clone(),
             ) {
-                warn!("Failed to export volume: {}", e);
-                timer.failure("export_error");
-                return Err(Status::internal(format!("failed to export volume: {}", e)));
+                if matches!(e, CtlError::TargetExists(_))
+                    && let Some(existing) = ctl.get_export(&req.name)
+                    && existing.device_path.to_string() == device_path
+                    && existing.export_type == ctl_export_type
+                    && existing.target_name.to_string() == target_name
+                    && existing.lun_id == lun_id
+                    && auth_configs_match(&req.name, &existing.auth, &auth_config)
+                    && existing.ctl_options == ctl_options
+                {
+                    info!(
+                        volume = %req.name,
+                        "Export already exists with matching configuration (idempotent success)"
+                    );
+                } else {
+                    warn!("Failed to export volume: {}", e);
+                    timer.failure("export_error");
+                    return Err(Status::internal(format!("failed to export volume: {}", e)));
+                }
             }
         }
 
@@ -2018,5 +2356,62 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
         assert!(err.message().contains("invalid CSI metadata"));
         assert!(err.message().contains("refusing deletion"));
+    }
+
+    #[test]
+    fn test_origin_matches_snapshot_requires_same_source_and_snapshot() {
+        assert!(origin_matches_snapshot(
+            "tank/csi/source-vol@snap-a",
+            "source-vol",
+            "snap-a",
+        ));
+        assert!(!origin_matches_snapshot(
+            "tank/csi/other-vol@snap-a",
+            "source-vol",
+            "snap-a",
+        ));
+        assert!(!origin_matches_snapshot(
+            "tank/csi/source-vol@snap-b",
+            "source-vol",
+            "snap-a",
+        ));
+    }
+
+    #[test]
+    fn test_origin_matches_source_volume_clone_requires_source_and_target_prefix() {
+        assert!(origin_matches_source_volume_clone(
+            "tank/csi/source-vol@pvc-clone-target-vol-1234",
+            "source-vol",
+            "target-vol",
+        ));
+        assert!(!origin_matches_source_volume_clone(
+            "tank/csi/other-vol@pvc-clone-target-vol-1234",
+            "source-vol",
+            "target-vol",
+        ));
+        assert!(!origin_matches_source_volume_clone(
+            "tank/csi/source-vol@pvc-clone-other-target-1234",
+            "source-vol",
+            "target-vol",
+        ));
+    }
+
+    #[test]
+    fn test_auth_match_accepts_restored_group_ref_for_generated_chap_group() {
+        let requested = AuthConfig::IscsiChap(IscsiChapAuth::new("user", "secret"));
+
+        assert!(auth_configs_match(
+            "vol1",
+            &AuthConfig::GroupRef("ag-vol1".to_string()),
+            &requested,
+        ));
+    }
+
+    #[test]
+    fn test_auth_match_rejects_different_cached_chap_credentials() {
+        let existing = AuthConfig::IscsiChap(IscsiChapAuth::new("user", "old-secret"));
+        let requested = AuthConfig::IscsiChap(IscsiChapAuth::new("user", "new-secret"));
+
+        assert!(!auth_configs_match("vol1", &existing, &requested));
     }
 }
