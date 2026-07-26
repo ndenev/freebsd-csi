@@ -7,7 +7,7 @@ use crate::ctl::ExportType;
 
 /// Current metadata schema version.
 /// Increment when making breaking changes to VolumeMetadata.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// Metadata stored as ZFS user property for each volume
 ///
@@ -15,6 +15,7 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// The `schema_version` field tracks the metadata format version.
 /// - Version 1: Original versioned format
 /// - Version 2: Standardized camelCase parameters
+/// - Version 3: Deletion-pending lifecycle marker
 ///
 /// Metadata without `schema_version` is not a valid CSI ownership marker.
 ///
@@ -47,6 +48,9 @@ pub struct VolumeMetadata {
     /// None means "no-authentication".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_group: Option<String>,
+    /// Volume deletion has started and must not be re-exported.
+    #[serde(default)]
+    pub deletion_pending: bool,
 }
 
 impl VolumeMetadata {
@@ -69,6 +73,7 @@ impl VolumeMetadata {
             parameters,
             created_at,
             auth_group,
+            deletion_pending: false,
         }
     }
 
@@ -134,6 +139,7 @@ mod tests {
         );
 
         assert_eq!(metadata.schema_version, CURRENT_SCHEMA_VERSION);
+        assert!(!metadata.deletion_pending);
     }
 
     #[test]
@@ -153,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn test_volume_metadata_explicit_v1_migration_to_v2() {
+    fn test_volume_metadata_explicit_v1_migration_to_current() {
         let mut params = HashMap::new();
         params.insert("fs_type".to_string(), "ext4".to_string());
         params.insert("block_size".to_string(), "4096".to_string());
@@ -244,11 +250,12 @@ mod tests {
 
         assert_eq!(metadata.schema_version, 2);
         assert_eq!(metadata.auth_group, Some("ag-vol1".to_string()));
+        assert!(!metadata.deletion_pending);
     }
 
     #[test]
     fn test_volume_metadata_roundtrip() {
-        let metadata = VolumeMetadata::new(
+        let mut metadata = VolumeMetadata::new(
             ExportType::Iscsi,
             "iqn.2024-01.org.freebsd.csi:vol1".to_string(),
             Some(0),
@@ -257,6 +264,7 @@ mod tests {
             1234567890,
             Some("ag-vol1".to_string()),
         );
+        metadata.deletion_pending = true;
 
         let json = serde_json::to_string(&metadata).unwrap();
         let parsed: VolumeMetadata = serde_json::from_str(&json).unwrap();
@@ -265,5 +273,6 @@ mod tests {
         assert_eq!(parsed.export_type, ExportType::Iscsi);
         assert_eq!(parsed.target_name, "iqn.2024-01.org.freebsd.csi:vol1");
         assert_eq!(parsed.auth_group, Some("ag-vol1".to_string()));
+        assert!(parsed.deletion_pending);
     }
 }

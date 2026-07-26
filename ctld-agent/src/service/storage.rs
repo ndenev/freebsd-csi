@@ -231,18 +231,14 @@ fn volume_metadata_from_zfs(
         })?,
         parameters: zfs_meta.parameters.clone(),
         auth,
+        deletion_pending: zfs_meta.deletion_pending,
     })
 }
 
 fn create_retry_metadata(
     volume_id: &str,
-    cached_metadata: Option<VolumeMetadata>,
     metadata_lookup: std::result::Result<MissingMetadataLookup, crate::zfs::ZfsError>,
 ) -> Result<VolumeMetadata, Status> {
-    if let Some(metadata) = cached_metadata {
-        return Ok(metadata);
-    }
-
     let lookup = metadata_lookup.map_err(|e| match e {
         crate::zfs::ZfsError::InvalidName(msg) => {
             Status::invalid_argument(format!("invalid volume name '{}': {}", volume_id, msg))
@@ -289,23 +285,39 @@ fn create_auth_matches(existing: &VolumeMetadata, requested_auth: &AuthConfig) -
     auth_configs_match(&existing.name, &existing.auth, requested_auth)
 }
 
-fn is_idempotent_create_request(
+fn validate_idempotent_create_request(
     existing: &VolumeMetadata,
     requested_export_type: ExportType,
     requested_lun_id: u32,
     requested_parameters: &HashMap<String, String>,
     requested_auth: &AuthConfig,
-) -> bool {
-    existing.export_type == requested_export_type
+) -> Result<(), Status> {
+    if existing.deletion_pending {
+        return Err(Status::aborted(format!(
+            "Volume '{}' is pending deletion",
+            existing.name
+        )));
+    }
+
+    if existing.export_type == requested_export_type
         && existing.lun_id == requested_lun_id as i32
         && existing.parameters == *requested_parameters
         && create_auth_matches(existing, requested_auth)
+    {
+        return Ok(());
+    }
+
+    Err(Status::already_exists(format!(
+        "Volume '{}' already exists but requested export/auth parameters differ",
+        existing.name
+    )))
 }
 
 fn retry_failure_label(status: &Status) -> &'static str {
     match status.code() {
         tonic::Code::InvalidArgument => "invalid_argument",
         tonic::Code::AlreadyExists => "metadata_mismatch",
+        tonic::Code::Aborted => "deletion_pending",
         _ => "zfs_error",
     }
 }
@@ -350,6 +362,8 @@ struct VolumeMetadata {
     parameters: HashMap<String, String>,
     /// Authentication configuration
     auth: AuthConfig,
+    /// Deletion has started; startup must not restore the export.
+    deletion_pending: bool,
 }
 
 /// gRPC Storage Agent service
@@ -467,6 +481,7 @@ impl StorageService {
                 })?,
                 parameters: zfs_meta.parameters.clone(),
                 auth,
+                deletion_pending: zfs_meta.deletion_pending,
             };
 
             volumes.insert(vol_name.clone(), metadata);
@@ -494,8 +509,18 @@ impl StorageService {
 
         let volumes = self.volumes.read().await;
         let mut reconciled_count = 0;
+        let mut deletion_pending_count = 0;
 
         for (vol_name, metadata) in volumes.iter() {
+            if metadata.deletion_pending {
+                deletion_pending_count += 1;
+                info!(
+                    volume = %vol_name,
+                    "Skipping export reconciliation for volume pending deletion"
+                );
+                continue;
+            }
+
             // Get device path for this volume
             let device_path = {
                 let zfs = self.zfs.read().await;
@@ -565,10 +590,11 @@ impl StorageService {
         drop(volumes);
 
         // Write unified UCL config after reconciliation
-        if reconciled_count > 0
-            && let Err(e) = self.config_writer.write_config().await
-        {
-            warn!("Failed to write CTL config after reconciliation: {}", e);
+        if reconciled_count > 0 || deletion_pending_count > 0 {
+            self.config_writer
+                .write_config()
+                .await
+                .map_err(|e| format!("failed to write CTL config after reconciliation: {}", e))?;
         }
 
         info!("Reconciled {} export(s)", reconciled_count);
@@ -697,33 +723,20 @@ impl StorageService {
             )));
         }
 
-        let cached_metadata = {
-            let volumes = self.volumes.read().await;
-            volumes.get(volume_name).cloned()
-        };
-
-        let metadata_lookup = if cached_metadata.is_some() {
-            Ok(MissingMetadataLookup::DatasetNotFound)
-        } else {
+        let metadata_lookup = {
             let zfs = self.zfs.read().await;
             zfs.get_volume_metadata(volume_name).await
         };
 
-        let existing_metadata =
-            create_retry_metadata(volume_name, cached_metadata, metadata_lookup)?;
+        let existing_metadata = create_retry_metadata(volume_name, metadata_lookup)?;
 
-        if !is_idempotent_create_request(
+        validate_idempotent_create_request(
             &existing_metadata,
             requested_export_type,
             requested_lun_id,
             requested_parameters,
             requested_auth,
-        ) {
-            return Err(Status::already_exists(format!(
-                "Volume '{}' already exists but requested export/auth parameters differ",
-                volume_name
-            )));
-        }
+        )?;
 
         Ok((existing, existing_metadata))
     }
@@ -1041,7 +1054,7 @@ impl StorageAgent for StorageService {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis())
                         .unwrap_or(0);
-                    let temp_snap_name = format!("pvc-clone-{}-{}", &req.name, timestamp);
+                    let temp_snap_name = format!("pvc-clone-{}-{}", req.name, timestamp);
 
                     info!(
                         source_volume = %source_volume_id,
@@ -1166,54 +1179,34 @@ impl StorageAgent for StorageService {
             }
         } else {
             // Fresh volume creation with metadata set atomically
-            let zfs = self.zfs.read().await;
-            match zfs
-                .create_volume(&req.name, req.size_bytes as u64, &zfs_metadata)
-                .await
-            {
+            let create_result = {
+                let zfs = self.zfs.read().await;
+                zfs.create_volume(&req.name, req.size_bytes as u64, &zfs_metadata)
+                    .await
+            };
+            match create_result {
                 Ok(d) => d,
                 Err(crate::zfs::ZfsError::DatasetExists(_)) => {
-                    // Recovery: Volume already exists - check if it matches requested parameters
-                    // This handles idempotent retries per CSI spec
-                    info!(
-                        volume = %req.name,
-                        "Volume already exists, checking parameters for idempotency"
-                    );
-
-                    // Get existing volume info to compare parameters
-                    let existing = match zfs.get_dataset(&req.name).await {
-                        Ok(d) => d,
-                        Err(e) => {
-                            timer.failure("zfs_error");
-                            return Err(Status::internal(format!(
-                                "Failed to get existing volume info: {}",
-                                e
-                            )));
+                    match self
+                        .recover_existing_volume_for_create(
+                            &req.name,
+                            req.size_bytes as u64,
+                            export_type,
+                            lun_id,
+                            &req.parameters,
+                            &auth_config,
+                        )
+                        .await
+                    {
+                        Ok((existing, existing_metadata)) => {
+                            target_name = existing_metadata.target_name.clone();
+                            existing
                         }
-                    };
-
-                    // Check size: existing >= requested is OK (volume may have been expanded)
-                    let existing_size = existing.volsize.unwrap_or(0);
-                    let requested_size = req.size_bytes as u64;
-
-                    if existing_size < requested_size {
-                        timer.failure("size_mismatch");
-                        return Err(Status::already_exists(format!(
-                            "Volume '{}' exists with size {} bytes but {} bytes was requested. \
-                             Existing volume is smaller than requested.",
-                            req.name, existing_size, requested_size
-                        )));
+                        Err(status) => {
+                            timer.failure(retry_failure_label(&status));
+                            return Err(status);
+                        }
                     }
-
-                    info!(
-                        volume = %req.name,
-                        existing_size = existing_size,
-                        requested_size = requested_size,
-                        "Existing volume matches requested parameters (idempotent success)"
-                    );
-
-                    // Return existing dataset info - continue with target export setup
-                    existing
                 }
                 Err(e) => {
                     timer.failure("zfs_error");
@@ -1296,6 +1289,7 @@ impl StorageAgent for StorageService {
                 .map_err(|_| Status::internal(format!("LUN ID {} exceeds i32::MAX", lun_id)))?,
             parameters: req.parameters.clone(),
             auth: auth_config,
+            deletion_pending: false,
         };
 
         {
@@ -1529,6 +1523,25 @@ impl StorageAgent for StorageService {
             }
         };
 
+        // Persist the deletion state before removing the export. If destroy is
+        // temporarily blocked, startup can retain ownership without re-exporting it.
+        {
+            let zfs = self.zfs.read().await;
+            if let Err(e) = zfs.mark_volume_deletion_pending(&volume_name).await {
+                timer.failure("zfs_error");
+                return Err(Status::internal(format!(
+                    "failed to mark ZFS volume pending deletion: {}",
+                    e
+                )));
+            }
+        }
+        if let Some(metadata) = metadata.as_mut() {
+            metadata.deletion_pending = true;
+        }
+        if let Some(cached) = self.volumes.write().await.get_mut(&req.volume_id) {
+            cached.deletion_pending = true;
+        }
+
         // Try to unexport the volume via unified CTL manager
         // This is idempotent - if already unexported, we continue
         // Track whether we need to write config
@@ -1537,9 +1550,10 @@ impl StorageAgent for StorageService {
             match ctl.unexport_volume(&req.volume_id) {
                 Ok(()) => true,
                 Err(CtlError::TargetNotFound(_)) => {
-                    // Already unexported - this is fine (idempotent per CSI spec)
+                    // The in-memory export may be empty after restart while stale
+                    // generated config still exists, so force a config rewrite.
                     debug!("Volume {} already unexported (idempotent)", req.volume_id);
-                    false
+                    true
                 }
                 Err(e) => {
                     // Unexport failed - export is still active.
@@ -1567,19 +1581,8 @@ impl StorageAgent for StorageService {
             )));
         }
 
-        // Clear ZFS metadata before deleting (for consistency)
-        {
-            let zfs = self.zfs.read().await;
-            if let Err(e) = zfs.clear_volume_metadata(&volume_name).await {
-                debug!(
-                    "Failed to clear volume metadata from ZFS: {} (may already be cleared)",
-                    e
-                );
-                // Continue anyway - we're deleting the volume
-            }
-        }
-
-        // Delete ZFS volume (this is now idempotent - returns Ok if doesn't exist)
+        // Keep the CSI ownership metadata until destroy succeeds so retries after
+        // an agent restart can still recognize a busy volume as CSI-managed.
         {
             let zfs = self.zfs.read().await;
             if let Err(e) = zfs.delete_volume(&volume_name).await {
@@ -2267,11 +2270,37 @@ mod tests {
     }
 
     #[test]
+    fn test_create_retry_rejects_volume_pending_deletion() {
+        let metadata = VolumeMetadata {
+            id: "pvc-123".to_string(),
+            name: "pvc-123".to_string(),
+            export_type: ExportType::Iscsi,
+            target_name: "iqn.2024-01.org.freebsd.csi:pvc-123".to_string(),
+            lun_id: 0,
+            parameters: HashMap::new(),
+            auth: AuthConfig::None,
+            deletion_pending: true,
+        };
+
+        let err = validate_idempotent_create_request(
+            &metadata,
+            ExportType::Iscsi,
+            0,
+            &HashMap::new(),
+            &AuthConfig::None,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Aborted);
+        assert!(err.message().contains("pending deletion"));
+    }
+
+    #[test]
     fn test_missing_metadata_delete_with_zfs_metadata_uses_metadata() {
         let mut parameters = HashMap::new();
         parameters.insert("exportType".to_string(), "nvmeof".to_string());
 
-        let zfs_metadata = ZfsVolumeMetadata::new(
+        let mut zfs_metadata = ZfsVolumeMetadata::new(
             CtlExportType::Nvmeof,
             "nqn.2024-01.org.freebsd.csi:pvc-123".to_string(),
             Some(7),
@@ -2280,6 +2309,7 @@ mod tests {
             1234567890,
             Some("ag-pvc-123".to_string()),
         );
+        zfs_metadata.deletion_pending = true;
 
         let action = missing_metadata_delete_action(
             "pvc-123",
@@ -2297,6 +2327,7 @@ mod tests {
         assert_eq!(metadata.target_name, "nqn.2024-01.org.freebsd.csi:pvc-123");
         assert_eq!(metadata.lun_id, 7);
         assert_eq!(metadata.parameters, parameters);
+        assert!(metadata.deletion_pending);
         assert_eq!(
             metadata.auth,
             AuthConfig::GroupRef("ag-pvc-123".to_string())

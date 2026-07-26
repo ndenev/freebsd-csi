@@ -741,17 +741,34 @@ impl ZfsManager {
             .output()
             .await?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(volume = %full_name, error = %stderr, "Failed to set volume metadata");
-            return Err(ZfsError::CommandFailed(format!(
-                "failed to set metadata: {}",
-                stderr
-            )));
+        if let Err(e) = check_command_result(&output, &full_name) {
+            warn!(volume = %full_name, error = %e, "Failed to set volume metadata");
+            return Err(e);
         }
 
         debug!(volume = %full_name, "Volume metadata saved");
         Ok(())
+    }
+
+    /// Mark a CSI volume as pending deletion before removing its export.
+    pub async fn mark_volume_deletion_pending(&self, name: &str) -> Result<()> {
+        match self.get_volume_metadata(name).await? {
+            VolumeMetadataLookup::Found(mut metadata) => {
+                if !metadata.deletion_pending {
+                    metadata.deletion_pending = true;
+                    match self.set_volume_metadata(name, &metadata).await {
+                        Ok(()) | Err(ZfsError::DatasetNotFound(_)) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(())
+            }
+            VolumeMetadataLookup::DatasetNotFound => Ok(()),
+            VolumeMetadataLookup::MissingMetadata => Err(ZfsError::ParseError(format!(
+                "volume '{}' is missing CSI ownership metadata",
+                name
+            ))),
+        }
     }
 
     /// Read CSI metadata for a single managed child volume.
@@ -815,23 +832,6 @@ impl ZfsManager {
         }
 
         Ok(VolumeMetadataLookup::Found(metadata))
-    }
-
-    /// Clear volume metadata (on deletion)
-    #[instrument(skip(self))]
-    pub async fn clear_volume_metadata(&self, name: &str) -> Result<()> {
-        validate_name(name)?;
-        let full_name = self.full_path(name);
-
-        // Use 'inherit' to remove user property
-        let output = Command::new("zfs")
-            .args(["inherit", METADATA_PROPERTY, &full_name])
-            .output()
-            .await?;
-
-        // Ignore errors - property might not exist
-        let _ = output;
-        Ok(())
     }
 
     /// List all volumes with CSI metadata (for startup recovery)
@@ -1457,6 +1457,21 @@ impl ZfsManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn test_command_result_maps_vanished_dataset() {
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(1),
+            stdout: Vec::new(),
+            stderr: b"cannot open 'tank/csi/vol1': dataset does not exist".to_vec(),
+        };
+
+        assert!(matches!(
+            check_command_result(&output, "tank/csi/vol1"),
+            Err(ZfsError::DatasetNotFound(_))
+        ));
+    }
 
     #[test]
     fn test_parse_size() {
