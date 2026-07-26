@@ -741,13 +741,9 @@ impl ZfsManager {
             .output()
             .await?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(volume = %full_name, error = %stderr, "Failed to set volume metadata");
-            return Err(ZfsError::CommandFailed(format!(
-                "failed to set metadata: {}",
-                stderr
-            )));
+        if let Err(e) = check_command_result(&output, &full_name) {
+            warn!(volume = %full_name, error = %e, "Failed to set volume metadata");
+            return Err(e);
         }
 
         debug!(volume = %full_name, "Volume metadata saved");
@@ -760,7 +756,10 @@ impl ZfsManager {
             VolumeMetadataLookup::Found(mut metadata) => {
                 if !metadata.deletion_pending {
                     metadata.deletion_pending = true;
-                    self.set_volume_metadata(name, &metadata).await?;
+                    match self.set_volume_metadata(name, &metadata).await {
+                        Ok(()) | Err(ZfsError::DatasetNotFound(_)) => {}
+                        Err(e) => return Err(e),
+                    }
                 }
                 Ok(())
             }
@@ -1458,6 +1457,21 @@ impl ZfsManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn test_command_result_maps_vanished_dataset() {
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(1),
+            stdout: Vec::new(),
+            stderr: b"cannot open 'tank/csi/vol1': dataset does not exist".to_vec(),
+        };
+
+        assert!(matches!(
+            check_command_result(&output, "tank/csi/vol1"),
+            Err(ZfsError::DatasetNotFound(_))
+        ));
+    }
 
     #[test]
     fn test_parse_size() {
