@@ -231,6 +231,7 @@ fn volume_metadata_from_zfs(
         })?,
         parameters: zfs_meta.parameters.clone(),
         auth,
+        deletion_pending: zfs_meta.deletion_pending,
     })
 }
 
@@ -300,6 +301,7 @@ fn is_idempotent_create_request(
         && existing.lun_id == requested_lun_id as i32
         && existing.parameters == *requested_parameters
         && create_auth_matches(existing, requested_auth)
+        && !existing.deletion_pending
 }
 
 fn retry_failure_label(status: &Status) -> &'static str {
@@ -350,6 +352,8 @@ struct VolumeMetadata {
     parameters: HashMap<String, String>,
     /// Authentication configuration
     auth: AuthConfig,
+    /// Deletion has started; startup must not restore the export.
+    deletion_pending: bool,
 }
 
 /// gRPC Storage Agent service
@@ -467,6 +471,7 @@ impl StorageService {
                 })?,
                 parameters: zfs_meta.parameters.clone(),
                 auth,
+                deletion_pending: zfs_meta.deletion_pending,
             };
 
             volumes.insert(vol_name.clone(), metadata);
@@ -494,8 +499,18 @@ impl StorageService {
 
         let volumes = self.volumes.read().await;
         let mut reconciled_count = 0;
+        let mut deletion_pending_count = 0;
 
         for (vol_name, metadata) in volumes.iter() {
+            if metadata.deletion_pending {
+                deletion_pending_count += 1;
+                info!(
+                    volume = %vol_name,
+                    "Skipping export reconciliation for volume pending deletion"
+                );
+                continue;
+            }
+
             // Get device path for this volume
             let device_path = {
                 let zfs = self.zfs.read().await;
@@ -565,10 +580,11 @@ impl StorageService {
         drop(volumes);
 
         // Write unified UCL config after reconciliation
-        if reconciled_count > 0
-            && let Err(e) = self.config_writer.write_config().await
-        {
-            warn!("Failed to write CTL config after reconciliation: {}", e);
+        if reconciled_count > 0 || deletion_pending_count > 0 {
+            self.config_writer
+                .write_config()
+                .await
+                .map_err(|e| format!("failed to write CTL config after reconciliation: {}", e))?;
         }
 
         info!("Reconciled {} export(s)", reconciled_count);
@@ -1296,6 +1312,7 @@ impl StorageAgent for StorageService {
                 .map_err(|_| Status::internal(format!("LUN ID {} exceeds i32::MAX", lun_id)))?,
             parameters: req.parameters.clone(),
             auth: auth_config,
+            deletion_pending: false,
         };
 
         {
@@ -1529,6 +1546,25 @@ impl StorageAgent for StorageService {
             }
         };
 
+        // Persist the deletion state before removing the export. If destroy is
+        // temporarily blocked, startup can retain ownership without re-exporting it.
+        {
+            let zfs = self.zfs.read().await;
+            if let Err(e) = zfs.mark_volume_deletion_pending(&volume_name).await {
+                timer.failure("zfs_error");
+                return Err(Status::internal(format!(
+                    "failed to mark ZFS volume pending deletion: {}",
+                    e
+                )));
+            }
+        }
+        if let Some(metadata) = metadata.as_mut() {
+            metadata.deletion_pending = true;
+        }
+        if let Some(cached) = self.volumes.write().await.get_mut(&req.volume_id) {
+            cached.deletion_pending = true;
+        }
+
         // Try to unexport the volume via unified CTL manager
         // This is idempotent - if already unexported, we continue
         // Track whether we need to write config
@@ -1537,9 +1573,10 @@ impl StorageAgent for StorageService {
             match ctl.unexport_volume(&req.volume_id) {
                 Ok(()) => true,
                 Err(CtlError::TargetNotFound(_)) => {
-                    // Already unexported - this is fine (idempotent per CSI spec)
+                    // The in-memory export may be empty after restart while stale
+                    // generated config still exists, so force a config rewrite.
                     debug!("Volume {} already unexported (idempotent)", req.volume_id);
-                    false
+                    true
                 }
                 Err(e) => {
                     // Unexport failed - export is still active.
@@ -2260,7 +2297,7 @@ mod tests {
         let mut parameters = HashMap::new();
         parameters.insert("exportType".to_string(), "nvmeof".to_string());
 
-        let zfs_metadata = ZfsVolumeMetadata::new(
+        let mut zfs_metadata = ZfsVolumeMetadata::new(
             CtlExportType::Nvmeof,
             "nqn.2024-01.org.freebsd.csi:pvc-123".to_string(),
             Some(7),
@@ -2269,6 +2306,7 @@ mod tests {
             1234567890,
             Some("ag-pvc-123".to_string()),
         );
+        zfs_metadata.deletion_pending = true;
 
         let action = missing_metadata_delete_action(
             "pvc-123",
@@ -2286,6 +2324,7 @@ mod tests {
         assert_eq!(metadata.target_name, "nqn.2024-01.org.freebsd.csi:pvc-123");
         assert_eq!(metadata.lun_id, 7);
         assert_eq!(metadata.parameters, parameters);
+        assert!(metadata.deletion_pending);
         assert_eq!(
             metadata.auth,
             AuthConfig::GroupRef("ag-pvc-123".to_string())

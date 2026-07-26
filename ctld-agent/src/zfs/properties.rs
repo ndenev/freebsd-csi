@@ -47,6 +47,9 @@ pub struct VolumeMetadata {
     /// None means "no-authentication".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_group: Option<String>,
+    /// Volume deletion has started and must not be re-exported.
+    #[serde(default)]
+    pub deletion_pending: bool,
 }
 
 impl VolumeMetadata {
@@ -69,6 +72,7 @@ impl VolumeMetadata {
             parameters,
             created_at,
             auth_group,
+            deletion_pending: false,
         }
     }
 
@@ -134,6 +138,7 @@ mod tests {
         );
 
         assert_eq!(metadata.schema_version, CURRENT_SCHEMA_VERSION);
+        assert!(!metadata.deletion_pending);
     }
 
     #[test]
@@ -244,11 +249,12 @@ mod tests {
 
         assert_eq!(metadata.schema_version, 2);
         assert_eq!(metadata.auth_group, Some("ag-vol1".to_string()));
+        assert!(!metadata.deletion_pending);
     }
 
     #[test]
     fn test_volume_metadata_roundtrip() {
-        let metadata = VolumeMetadata::new(
+        let mut metadata = VolumeMetadata::new(
             ExportType::Iscsi,
             "iqn.2024-01.org.freebsd.csi:vol1".to_string(),
             Some(0),
@@ -257,6 +263,7 @@ mod tests {
             1234567890,
             Some("ag-vol1".to_string()),
         );
+        metadata.deletion_pending = true;
 
         let json = serde_json::to_string(&metadata).unwrap();
         let parsed: VolumeMetadata = serde_json::from_str(&json).unwrap();
@@ -265,5 +272,6 @@ mod tests {
         assert_eq!(parsed.export_type, ExportType::Iscsi);
         assert_eq!(parsed.target_name, "iqn.2024-01.org.freebsd.csi:vol1");
         assert_eq!(parsed.auth_group, Some("ag-vol1".to_string()));
+        assert!(parsed.deletion_pending);
     }
 }

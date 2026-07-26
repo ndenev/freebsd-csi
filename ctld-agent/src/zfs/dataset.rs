@@ -754,6 +754,24 @@ impl ZfsManager {
         Ok(())
     }
 
+    /// Mark a CSI volume as pending deletion before removing its export.
+    pub async fn mark_volume_deletion_pending(&self, name: &str) -> Result<()> {
+        match self.get_volume_metadata(name).await? {
+            VolumeMetadataLookup::Found(mut metadata) => {
+                if !metadata.deletion_pending {
+                    metadata.deletion_pending = true;
+                    self.set_volume_metadata(name, &metadata).await?;
+                }
+                Ok(())
+            }
+            VolumeMetadataLookup::DatasetNotFound => Ok(()),
+            VolumeMetadataLookup::MissingMetadata => Err(ZfsError::ParseError(format!(
+                "volume '{}' is missing CSI ownership metadata",
+                name
+            ))),
+        }
+    }
+
     /// Read CSI metadata for a single managed child volume.
     ///
     /// This distinguishes absent datasets from existing datasets without
