@@ -7,7 +7,7 @@ use crate::ctl::ExportType;
 
 /// Current metadata schema version.
 /// Increment when making breaking changes to VolumeMetadata.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// Metadata stored as ZFS user property for each volume
 ///
@@ -15,6 +15,7 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// The `schema_version` field tracks the metadata format version.
 /// - Version 1: Original versioned format
 /// - Version 2: Standardized camelCase parameters
+/// - Version 3: Deletion-pending lifecycle marker
 ///
 /// Metadata without `schema_version` is not a valid CSI ownership marker.
 ///
@@ -158,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn test_volume_metadata_explicit_v1_migration_to_v2() {
+    fn test_volume_metadata_explicit_v1_migration_to_current() {
         let mut params = HashMap::new();
         params.insert("fs_type".to_string(), "ext4".to_string());
         params.insert("block_size".to_string(), "4096".to_string());
