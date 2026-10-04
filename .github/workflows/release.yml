@@ -27,7 +27,7 @@ jobs:
   version:
     name: Bump Version
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/master' || inputs.dry_run
     outputs:
       version: ${{ steps.bump.outputs.version }}
       tag: ${{ steps.bump.outputs.tag }}
@@ -71,6 +71,11 @@ jobs:
           sed -i "/\[workspace.package\]/,/^\[/ s/^version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
           echo "Updated workspace Cargo.toml to $NEW_VERSION"
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Refresh workspace versions in Cargo.lock
+        run: cargo update --workspace
+
       - name: Update Chart.yaml
         env:
           NEW_VERSION: ${{ steps.bump.outputs.version }}
@@ -94,13 +99,23 @@ jobs:
           echo "Would create tag: ${{ steps.bump.outputs.tag }}"
           echo ""
           echo "=== Cargo.toml (workspace) changes ==="
-          git diff Cargo.toml
+          git diff Cargo.toml Cargo.lock
           echo ""
           echo "=== charts/freebsd-csi/Chart.yaml changes ==="
           git diff charts/freebsd-csi/Chart.yaml
           echo ""
           echo "=== pkg/freebsd/+MANIFEST changes ==="
           git diff pkg/freebsd/+MANIFEST
+
+      - name: Save version changes for dry-run builds
+        if: inputs.dry_run
+        run: git diff --binary > release-version.patch
+
+      - uses: actions/upload-artifact@v4
+        if: inputs.dry_run
+        with:
+          name: release-version-patch
+          path: release-version.patch
 
       - name: Commit and tag
         if: ${{ !inputs.dry_run }}
@@ -109,7 +124,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml charts/freebsd-csi/Chart.yaml pkg/freebsd/+MANIFEST
+          git add Cargo.toml Cargo.lock charts/freebsd-csi/Chart.yaml pkg/freebsd/+MANIFEST
           git commit -m "Release $TAG"
           git tag "$TAG"
           git push origin HEAD --tags
@@ -127,6 +142,15 @@ jobs:
         with:
           ref: ${{ inputs.dry_run && github.ref || needs.version.outputs.tag }}
 
+      - uses: actions/download-artifact@v4
+        if: inputs.dry_run
+        with:
+          name: release-version-patch
+
+      - name: Apply version changes for dry-run build
+        if: inputs.dry_run
+        run: git apply release-version.patch
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
@@ -141,7 +165,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libblkid-dev
 
       - name: Build release binary
-        run: cargo build -p csi-driver --release
+        run: cargo build --locked -p csi-driver --release
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -195,6 +219,15 @@ jobs:
         with:
           ref: ${{ inputs.dry_run && github.ref || needs.version.outputs.tag }}
 
+      - uses: actions/download-artifact@v4
+        if: inputs.dry_run
+        with:
+          name: release-version-patch
+
+      - name: Apply version changes for dry-run build
+        if: inputs.dry_run
+        run: git apply release-version.patch
+
       - name: Install cross-compilation dependencies
         run: |
           sudo apt-get update
@@ -229,14 +262,16 @@ jobs:
 
           # Determine FreeBSD version
           case "${FREEBSD_MAJOR}" in
-            14) FREEBSD_VERSION="14.3-RELEASE" ;;
-            15) FREEBSD_VERSION="15.0-RELEASE" ;;
+            14) FREEBSD_VERSION="14.3-RELEASE"; RELEASE_ROOT="https://archive.freebsd.org/old-releases/amd64/amd64" ;;
+            15) FREEBSD_VERSION="15.0-RELEASE"; RELEASE_ROOT="https://download.freebsd.org/releases/amd64/amd64" ;;
             *)  echo "Unknown FreeBSD version"; exit 1 ;;
           esac
 
           echo "Downloading FreeBSD ${FREEBSD_VERSION} base..."
-          curl -L "https://download.freebsd.org/releases/amd64/${FREEBSD_VERSION}/base.txz" | \
-            tar -xJf - -C /tmp/freebsd-sysroot ./lib ./usr/lib ./usr/include
+          curl --fail --location --retry 3 "${RELEASE_ROOT}/${FREEBSD_VERSION}/MANIFEST" -o /tmp/freebsd-MANIFEST
+          curl --fail --location --retry 3 "${RELEASE_ROOT}/${FREEBSD_VERSION}/base.txz" -o /tmp/freebsd-base.txz
+          awk '$1 == "base.txz" { print $2 "  /tmp/freebsd-base.txz" }' /tmp/freebsd-MANIFEST | sha256sum --check --strict
+          tar -xJf /tmp/freebsd-base.txz -C /tmp/freebsd-sysroot ./lib ./usr/lib ./usr/include
 
       - name: Build libucl for FreeBSD (static)
         run: |
@@ -280,7 +315,7 @@ jobs:
           EOF
 
       - name: Build ctld-agent for FreeBSD
-        run: cargo build -p ctld-agent --release --target x86_64-unknown-freebsd
+        run: cargo build --locked -p ctld-agent --release --target x86_64-unknown-freebsd
 
       - name: Upload ctld-agent binary
         uses: actions/upload-artifact@v4
@@ -297,13 +332,22 @@ jobs:
       matrix:
         include:
           - freebsd: '14'
-            freebsd_release: '14.2'
+            freebsd_release: '14.3'
           - freebsd: '15'
             freebsd_release: '15.0'
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.dry_run && github.ref || needs.version.outputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        if: inputs.dry_run
+        with:
+          name: release-version-patch
+
+      - name: Apply version changes for dry-run build
+        if: inputs.dry_run
+        run: git apply release-version.patch
 
       - name: Download ctld-agent binary
         uses: actions/download-artifact@v4
@@ -383,6 +427,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.dry_run && github.ref || needs.version.outputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        if: inputs.dry_run
+        with:
+          name: release-version-patch
+
+      - name: Apply version changes for dry-run build
+        if: inputs.dry_run
+        run: git apply release-version.patch
 
       - name: Install Helm
         uses: azure/setup-helm@v4

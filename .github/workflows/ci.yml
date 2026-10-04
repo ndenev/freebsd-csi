@@ -37,7 +37,7 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install libblkid development files
         run: sudo apt-get update && sudo apt-get install -y libblkid-dev
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   test-csi-driver:
     name: Test csi-driver
@@ -54,7 +54,7 @@ jobs:
       - name: Install filesystem probe dependencies
         run: sudo apt-get update && sudo apt-get install -y libblkid-dev e2fsprogs
       - name: Run tests
-        run: cargo test -p csi-driver --verbose
+        run: cargo test --locked -p csi-driver --verbose
 
   test-ctld-agent:
     name: Test ctld-agent
@@ -71,7 +71,7 @@ jobs:
       - name: Install libucl-dev
         run: sudo apt-get update && sudo apt-get install -y libucl-dev
       - name: Run tests
-        run: cargo test -p ctld-agent --verbose
+        run: cargo test --locked -p ctld-agent --verbose
 
   audit:
     name: Security Audit
