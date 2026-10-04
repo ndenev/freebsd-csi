@@ -47,11 +47,13 @@ struct Device {
     fs_type: String,
     target: String,
     nvme: bool,
+    map_uuid: Option<String>,
+    slaves: Vec<PathBuf>,
 }
 
 // Resolve the mount's major:minor, not a possibly stale /dev alias or a target
-// guessed from a configurable IQN/NQN prefix. Partitions and device-mapper need
-// their own resize handling; fail closed until that handling is implemented.
+// guessed from a configurable IQN/NQN prefix. Only whole devices and direct
+// multipath maps are supported, not partitions, LVM, or encryption stacks.
 async fn resolve(req: &NodeExpandVolumeRequest, sys: &Path) -> Result<Device, Status> {
     let block = matches!(
         req.volume_capability
@@ -103,16 +105,77 @@ async fn resolve(req: &NodeExpandVolumeRequest, sys: &Path) -> Result<Device, St
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| Status::internal("Missing block device name"))?;
-    if name.starts_with("dm-") {
-        return Err(Status::failed_precondition(
-            "Device-mapper expansion is not supported",
-        ));
-    }
+    let mut slaves = Vec::new();
+    let map_uuid = if name.starts_with("dm-") {
+        let uuid = read(sysfs.join("dm/uuid")).await?;
+        if !uuid.strip_prefix("mpath-").is_some_and(|id| !id.is_empty()) {
+            return Err(Status::failed_precondition(
+                "Device-mapper device is not a multipath map",
+            ));
+        }
+        let mut entries = fs::read_dir(sysfs.join("slaves"))
+            .await
+            .map_err(|e| Status::unavailable(format!("List multipath devices: {e}")))?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| Status::unavailable(e.to_string()))?
+        {
+            slaves.push(
+                fs::canonicalize(entry.path())
+                    .await
+                    .map_err(|e| Status::unavailable(e.to_string()))?,
+            );
+        }
+        slaves.sort();
+        if slaves.is_empty() {
+            return Err(Status::unavailable(
+                "Multipath map has no component devices",
+            ));
+        }
+        Some(uuid)
+    } else {
+        None
+    };
     let fs_type = if block { "" } else { fields[1] };
     if !matches!(fs_type, "" | "ext2" | "ext3" | "ext4" | "xfs") {
         return Err(Status::failed_precondition(format!(
             "Unsupported filesystem: {fs_type}"
         )));
+    }
+    let (target, nvme) = transport(slaves.first().unwrap_or(&sysfs), &req.volume_id, sys).await?;
+    for slave in slaves.iter().skip(1) {
+        if transport(slave, &req.volume_id, sys).await? != (target.clone(), nvme) {
+            return Err(Status::failed_precondition(
+                "Multipath components have different targets",
+            ));
+        }
+    }
+    Ok(Device {
+        path: format!("/dev/{name}"),
+        sysfs,
+        fs_type: fs_type.into(),
+        target,
+        nvme,
+        map_uuid,
+        slaves,
+    })
+}
+
+async fn transport(sysfs: &Path, volume_id: &str, sys: &Path) -> Result<(String, bool), Status> {
+    let name = sysfs
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| Status::internal("Missing component device name"))?;
+    if !sysfs.starts_with(sys)
+        || name.starts_with("dm-")
+        || fs::try_exists(sysfs.join("partition"))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+    {
+        return Err(Status::failed_precondition(
+            "Expected a whole transport device",
+        ));
     }
     let device = fs::canonicalize(sysfs.join("device"))
         .await
@@ -137,18 +200,12 @@ async fn resolve(req: &NodeExpandVolumeRequest, sys: &Path) -> Result<Device, St
         )
         .await?
     };
-    if target.rsplit_once(':').map(|(_, id)| id) != Some(req.volume_id.as_str()) {
+    if target.rsplit_once(':').map(|(_, id)| id) != Some(volume_id) {
         return Err(Status::failed_precondition(
             "Mounted device does not belong to the requested volume",
         ));
     }
-    Ok(Device {
-        path: format!("/dev/{name}"),
-        sysfs,
-        fs_type: fs_type.into(),
-        target,
-        nvme,
-    })
+    Ok((target, nvme))
 }
 
 async fn refresh(device: &Device, sys: &Path) -> Result<(), Status> {
@@ -218,6 +275,26 @@ fn geometry(output: &str, xfs: bool) -> Result<(u64, u64), Status> {
     }
 }
 
+async fn disk_size(device: &str) -> Result<u64, Status> {
+    positive(&command("blockdev", &["--getsize64", device]).await?)
+}
+
+fn check_capacity(capacity: u64, required: i64, limit: i64) -> Result<(), Status> {
+    // Transport scans may complete asynchronously. Kubelet retries rather than
+    // receiving a successful response before the device exposes the new size.
+    if capacity < required as u64 {
+        return Err(Status::unavailable(format!(
+            "Device capacity {capacity} has not reached {required}"
+        )));
+    }
+    if capacity > i64::MAX as u64 || (limit > 0 && capacity > limit as u64) {
+        return Err(Status::out_of_range(
+            "Device capacity exceeds requested limit",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn expand(req: &NodeExpandVolumeRequest) -> Result<i64, Status> {
     expand_at(req, Path::new("/sys")).await
 }
@@ -226,37 +303,61 @@ async fn expand_at(req: &NodeExpandVolumeRequest, sys: &Path) -> Result<i64, Sta
     let CapacityRange {
         required_bytes,
         limit_bytes,
-    } = req
-        .capacity_range
-        .as_ref()
-        .ok_or_else(|| Status::invalid_argument("Capacity range is required"))?;
-    if *required_bytes < 0
-        || *limit_bytes < 0
-        || (*limit_bytes > 0 && required_bytes > limit_bytes)
-        || (*required_bytes == 0 && *limit_bytes == 0)
+    } = req.capacity_range.unwrap_or_default();
+    if required_bytes < 0
+        || limit_bytes < 0
+        || (limit_bytes > 0 && required_bytes > limit_bytes)
+        || (req.capacity_range.is_some() && required_bytes == 0 && limit_bytes == 0)
     {
         return Err(Status::invalid_argument("Invalid capacity range"));
     }
-    let requested = if *required_bytes > 0 {
-        *required_bytes
-    } else {
-        *limit_bytes
-    } as u64;
     let device = resolve(req, sys).await?;
     refresh(&device, sys).await?;
-    let capacity = positive(&command("blockdev", &["--getsize64", &device.path]).await?)?;
-    if capacity < requested {
-        // Namespace scans are asynchronous. Let kubelet retry once the kernel
-        // exposes the controller's new capacity, without touching the filesystem.
-        return Err(Status::unavailable(format!(
-            "Device capacity {capacity} has not reached {requested}"
-        )));
+    if device.map_uuid.is_some() {
+        let mut path_capacity = None;
+        for slave in &device.slaves {
+            let name = slave.file_name().and_then(|n| n.to_str()).unwrap(); // validated by transport
+            let size = disk_size(&format!("/dev/{name}")).await?;
+            check_capacity(size, required_bytes, limit_bytes)?;
+            if path_capacity.is_some_and(|previous| previous != size) {
+                return Err(Status::unavailable(
+                    "Multipath component capacities have not converged",
+                ));
+            }
+            path_capacity = Some(size);
+        }
+        let path_capacity = path_capacity.unwrap(); // resolve rejects an empty map
+        let mapped = disk_size(&device.path).await?;
+        if mapped > path_capacity {
+            return Err(Status::unavailable(
+                "Refusing to shrink a multipath map to stale component capacity",
+            ));
+        }
+        if resolve(req, sys).await? != device {
+            return Err(Status::aborted(
+                "Multipath identity changed during expansion",
+            ));
+        }
+        if mapped < path_capacity {
+            // Use the owning host daemon's configuration, not a container-local
+            // multipath -r reload or a manually constructed device-mapper table.
+            let reply = command("multipathd", &["resize", "map", &device.path]).await?;
+            // Older clients can exit successfully while the daemon says fail.
+            if reply.trim() != "ok" {
+                return Err(Status::unavailable(format!(
+                    "Multipath resize was not acknowledged: {}",
+                    reply.trim()
+                )));
+            }
+        }
+        if disk_size(&device.path).await? != path_capacity {
+            return Err(Status::unavailable(
+                "Multipath map capacity has not converged",
+            ));
+        }
     }
-    if capacity > i64::MAX as u64 || (*limit_bytes > 0 && capacity > *limit_bytes as u64) {
-        return Err(Status::out_of_range(
-            "Device capacity exceeds requested limit",
-        ));
-    }
+    let capacity = disk_size(&device.path).await?;
+    check_capacity(capacity, required_bytes, limit_bytes)?;
     if resolve(req, sys).await? != device {
         return Err(Status::aborted("Mounted device changed during expansion"));
     }
@@ -321,8 +422,19 @@ printf '%s %s\n' "$name" "$*" >> calls
 case "$name" in
   findmnt) cat mount;;
   lsblk) printf '259:1\n';;
-  nvme|iscsiadm) if [ -f fail-scan ]; then exit 1; fi;;
-  blockdev) cat capacity;;
+  nvme|iscsiadm)
+    if [ -f fail-scan ]; then exit 1; fi
+    if [ -f change-map ]; then echo mpath-replaced > sys/devices/virtual/block/dm-0/dm/uuid; fi;;
+  blockdev)
+    device=${2##*/}
+    if [ "$device" = dm-0 ]; then cat map-capacity
+    elif [ -f "capacity-$device" ]; then cat "capacity-$device"
+    else cat capacity; fi;;
+  multipathd)
+    test "$*" = 'resize map /dev/dm-0'
+    if [ -f fail-map ]; then echo fail; exit 0; fi
+    if [ ! -f map-no-op ]; then cp capacity map-capacity; fi
+    echo ok;;
   resize2fs|xfs_growfs)
     if [ -f fail-resize ]; then echo 'already at size; Nothing to do' >&2; exit 1; fi
     if [ ! -f no-op ]; then read -r size < capacity; echo "$((size / 4096))" > blocks; fi;;
@@ -337,6 +449,7 @@ esac
             "lsblk",
             "nvme",
             "iscsiadm",
+            "multipathd",
             "blockdev",
             "resize2fs",
             "xfs_growfs",
@@ -451,6 +564,22 @@ esac
         remove("no-op");
         assert_eq!(expand_at(&req, &sys).await.unwrap(), 3221225472);
         assert_eq!(expand_at(&req, &sys).await.unwrap(), 3221225472); // idempotent retry
+        // An omitted range grows to the refreshed device capacity, while a
+        // limit-only range constrains that capacity without imposing a minimum.
+        let unspecified = NodeExpandVolumeRequest {
+            capacity_range: None,
+            ..req.clone()
+        };
+        write("blocks", "524288\n");
+        assert_eq!(expand_at(&unspecified, &sys).await.unwrap(), 3221225472);
+        let limit_only = NodeExpandVolumeRequest {
+            capacity_range: Some(CapacityRange {
+                required_bytes: 0,
+                limit_bytes: 4294967296,
+            }),
+            ..req.clone()
+        };
+        assert_eq!(expand_at(&limit_only, &sys).await.unwrap(), 3221225472);
         // A nonzero exit is a failure, even if stderr includes 'already'.
         write("fail-resize", "");
         assert_eq!(
@@ -529,6 +658,102 @@ esac
         assert_eq!(
             expand_at(&req, &sys).await.unwrap_err().code(),
             tonic::Code::FailedPrecondition
+        );
+        std::fs::remove_file(disk.join("partition")).unwrap();
+
+        // A real multipath topology: mounted dm map with two iSCSI leaves.
+        let disk2 = sys.join("devices/session8/target0/block/sdb");
+        std::fs::create_dir_all(&disk2).unwrap();
+        symlink(sys.join("devices/session8/target0"), disk2.join("device")).unwrap();
+        let map = sys.join("devices/virtual/block/dm-0");
+        std::fs::create_dir_all(map.join("dm")).unwrap();
+        std::fs::create_dir(map.join("slaves")).unwrap();
+        std::fs::write(map.join("dm/uuid"), "mpath-test-wwid").unwrap();
+        symlink(&disk, map.join("slaves/sda")).unwrap();
+        symlink(&disk2, map.join("slaves/sdb")).unwrap();
+        std::fs::remove_file(sys.join("dev/block/259:1")).unwrap();
+        symlink(&map, sys.join("dev/block/259:1")).unwrap();
+        write("map-capacity", "2147483648\n");
+        write("blocks", "524288\n");
+        write("calls", "");
+        assert_eq!(expand_at(&req, &sys).await.unwrap(), 3221225472);
+        let log = calls();
+        assert!(
+            log.find("iscsiadm").unwrap() < log.find("multipathd resize map /dev/dm-0").unwrap()
+        );
+        assert!(log.find("multipathd").unwrap() < log.find("resize2fs /dev/dm-0").unwrap());
+        write("calls", "");
+        assert_eq!(expand_at(&req, &sys).await.unwrap(), 3221225472);
+        assert!(!calls().contains("multipathd")); // already sized map
+        // No requested minimum must still refresh the map, not accept its old size.
+        write("map-capacity", "2147483648\n");
+        assert_eq!(expand_at(&unspecified, &sys).await.unwrap(), 3221225472);
+        write("map-capacity", "2147483648\n");
+        for flag in ["fail-map", "map-no-op"] {
+            write(flag, "");
+            write("calls", "");
+            assert_eq!(
+                expand_at(&req, &sys).await.unwrap_err().code(),
+                tonic::Code::Unavailable
+            );
+            assert!(!calls().contains("resize2fs"));
+            remove(flag);
+        }
+        // One stale path must prevent a map resize, including without a range.
+        write("capacity-sdb", "2147483648\n");
+        write("calls", "");
+        assert_eq!(
+            expand_at(&unspecified, &sys).await.unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
+        assert!(!calls().contains("multipathd") && !calls().contains("resize2fs"));
+        remove("capacity-sdb");
+        // Never reload an existing map to a smaller component capacity.
+        write("map-capacity", "4294967296\n");
+        assert_eq!(
+            expand_at(&unspecified, &sys).await.unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
+        assert!(!calls().contains("multipathd"));
+        write("map-capacity", "2147483648\n");
+        // Device names can be reused. A changed map UUID must prevent resize.
+        write("change-map", "");
+        write("calls", "");
+        assert_eq!(
+            expand_at(&req, &sys).await.unwrap_err().code(),
+            tonic::Code::Aborted
+        );
+        assert!(!calls().contains("multipathd") && !calls().contains("resize2fs"));
+        remove("change-map");
+        std::fs::write(map.join("dm/uuid"), "mpath-test-wwid").unwrap();
+        // Validate *all* leaves before rescanning anything.
+        std::fs::write(
+            sys.join("class/iscsi_session/session8/targetname"),
+            "iqn.custom:other",
+        )
+        .unwrap();
+        write("calls", "");
+        assert_eq!(
+            expand_at(&req, &sys).await.unwrap_err().code(),
+            tonic::Code::FailedPrecondition
+        );
+        assert!(!calls().contains("iscsiadm") && !calls().contains("multipathd"));
+        std::fs::write(
+            sys.join("class/iscsi_session/session8/targetname"),
+            "iqn.custom:vol",
+        )
+        .unwrap();
+        std::fs::write(map.join("dm/uuid"), "CRYPT-not-a-multipath-map").unwrap();
+        assert_eq!(
+            expand_at(&req, &sys).await.unwrap_err().code(),
+            tonic::Code::FailedPrecondition
+        );
+        std::fs::write(map.join("dm/uuid"), "mpath-test-wwid").unwrap();
+        std::fs::remove_file(map.join("slaves/sdb")).unwrap();
+        std::fs::remove_file(map.join("slaves/sda")).unwrap();
+        assert_eq!(
+            expand_at(&req, &sys).await.unwrap_err().code(),
+            tonic::Code::Unavailable
         );
     }
 }

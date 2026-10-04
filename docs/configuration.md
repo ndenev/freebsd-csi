@@ -397,6 +397,18 @@ reclaimPolicy: Delete
 volumeBindingMode: Immediate
 ```
 
+For dm-multipath, configure and run `multipathd` on each worker node. The node
+container includes the `multipathd` client and uses `hostNetwork: true` to reach
+the host daemon's standard abstract Unix socket. The driver does not start a
+second daemon or replace the host's multipath configuration.
+
+During expansion, the driver verifies that all map components belong to the
+requested volume, rescans its transport paths, and requires matching capacities
+before issuing `multipathd resize map /dev/dm-N` for that map. It verifies
+the resulting map capacity before growing the filesystem. Stale paths, a daemon
+failure, or a map that remains undersized return an error for retry. Layered LVM, encrypted
+maps, and partitions are not supported by this expansion path.
+
 **NVMeoF:**
 ```yaml
 apiVersion: storage.k8s.io/v1
