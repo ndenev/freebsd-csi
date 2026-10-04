@@ -187,161 +187,6 @@ impl NodeService {
         Some(credentials)
     }
 
-    /// Get the current capacity of a mounted volume.
-    async fn get_volume_capacity(path: &str) -> Result<i64, Status> {
-        Self::validate_path(path)?;
-
-        let output = Command::new("df")
-            .args(["-k", path])
-            .output()
-            .await
-            .map_err(|e| {
-                error!(error = %e, "Failed to execute df");
-                Status::internal(format!("Failed to get volume capacity: {}", e))
-            })?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        // Parse df output (second line, second column is total size in KB)
-        if let Some(line) = stdout.lines().nth(1)
-            && let Some(size_kb) = line.split_whitespace().nth(1)
-            && let Ok(size) = size_kb.parse::<i64>()
-        {
-            return Ok(size * 1024); // Convert KB to bytes
-        }
-
-        Err(Status::internal("Could not parse volume capacity"))
-    }
-
-    /// Detect the filesystem type of a mounted path.
-    async fn detect_filesystem_type(path: &str) -> Result<String, Status> {
-        Self::validate_path(path)?;
-
-        let output = Command::new("df")
-            .args(["-T", path])
-            .output()
-            .await
-            .map_err(|e| {
-                error!(error = %e, "Failed to execute df -T");
-                Status::internal(format!("Failed to detect filesystem type: {}", e))
-            })?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // df -T output: Filesystem Type ... (second column is type)
-        if let Some(line) = stdout.lines().nth(1)
-            && let Some(fs_type) = line.split_whitespace().nth(1)
-        {
-            return Ok(fs_type.to_string());
-        }
-
-        Ok("unknown".to_string())
-    }
-
-    /// Resize the filesystem to use all available space on the device.
-    /// Returns true if resize was performed, false if not needed.
-    ///
-    /// Note: The underlying storage is a ZFS zvol on the FreeBSD storage node,
-    /// but the FILESYSTEM on top (formatted by the initiator) is ext4 or xfs.
-    async fn resize_filesystem(path: &str, fs_type: &str) -> Result<bool, Status> {
-        match fs_type {
-            "ext4" | "ext3" | "ext2" => {
-                let device = Self::get_mount_device(path).await?;
-                info!(device = %device, fs_type = %fs_type, "Resizing ext filesystem");
-
-                let output = Command::new("resize2fs")
-                    .arg(&device)
-                    .output()
-                    .await
-                    .map_err(|e| {
-                        error!(error = %e, "Failed to execute resize2fs");
-                        Status::internal(format!("Failed to resize ext filesystem: {}", e))
-                    })?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    // "Nothing to do" is not an error
-                    if stderr.contains("Nothing to do") || stderr.contains("already") {
-                        return Ok(false);
-                    }
-                    error!(stderr = %stderr, "resize2fs failed");
-                    return Err(Status::internal(format!("resize2fs failed: {}", stderr)));
-                }
-                Ok(true)
-            }
-            "xfs" => {
-                info!(path = %path, "Resizing XFS filesystem");
-
-                let output = Command::new("xfs_growfs")
-                    .arg(path)
-                    .output()
-                    .await
-                    .map_err(|e| {
-                        error!(error = %e, "Failed to execute xfs_growfs");
-                        Status::internal(format!("Failed to resize XFS filesystem: {}", e))
-                    })?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    // Already at max size is not an error
-                    if stderr.contains("data size unchanged") {
-                        return Ok(false);
-                    }
-                    error!(stderr = %stderr, "xfs_growfs failed");
-                    return Err(Status::internal(format!("xfs_growfs failed: {}", stderr)));
-                }
-                Ok(true)
-            }
-            _ => {
-                warn!(fs_type = %fs_type, "Unknown filesystem type, skipping resize");
-                Ok(false)
-            }
-        }
-    }
-
-    /// Get the device backing a mount point.
-    ///
-    /// Uses `findmnt -n -o SOURCE` for reliable device lookup.
-    async fn get_mount_device(path: &str) -> Result<String, Status> {
-        Self::validate_path(path)?;
-
-        let output = Command::new("findmnt")
-            .args(["-n", "-o", "SOURCE", path])
-            .output()
-            .await
-            .map_err(|e| {
-                error!(error = %e, "Failed to execute findmnt");
-                Status::internal(format!("Failed to get mount device: {}", e))
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            error!(path = %path, stderr = %stderr, "findmnt failed");
-            return Err(Status::internal(format!(
-                "Path {} is not a mount point",
-                path
-            )));
-        }
-
-        let device = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if device.is_empty() {
-            return Err(Status::internal(format!(
-                "Could not determine device for mount point {}",
-                path
-            )));
-        }
-
-        // Validate device path looks reasonable (starts with /dev/)
-        if !device.starts_with("/dev/") {
-            warn!(
-                device = %device,
-                path = %path,
-                "Mount device is not a block device path"
-            );
-        }
-
-        Ok(device)
-    }
-
     /// Parse endpoints from volume_context for multipath support.
     ///
     /// Format: "host:port,host2:port2,..." - supports IPs, hostnames, and IPv6.
@@ -928,15 +773,7 @@ impl csi::node_server::Node for NodeService {
         }))
     }
 
-    /// Expand a volume on this node.
-    ///
-    /// This resizes the filesystem to use all available space on the underlying
-    /// block device. The controller has already expanded the ZFS zvol; this
-    /// method handles the filesystem layer.
-    ///
-    /// - ZFS/UFS: Expansion is automatic at the zvol level
-    /// - ext4/ext3/ext2: Uses resize2fs
-    /// - XFS: Uses xfs_growfs
+    /// Refresh the transport capacity, then grow and verify the filesystem.
     async fn node_expand_volume(
         &self,
         request: Request<csi::NodeExpandVolumeRequest>,
@@ -961,20 +798,7 @@ impl csi::node_server::Node for NodeService {
             "NodeExpandVolume request"
         );
 
-        // Detect filesystem type and resize if needed
-        let fs_type = Self::detect_filesystem_type(volume_path).await?;
-        debug!(volume_id = %volume_id, fs_type = %fs_type, "Detected filesystem type");
-
-        // Perform filesystem-specific resize
-        let resized = Self::resize_filesystem(volume_path, &fs_type).await?;
-        if resized {
-            info!(volume_id = %volume_id, fs_type = %fs_type, "Filesystem resized successfully");
-        } else {
-            debug!(volume_id = %volume_id, fs_type = %fs_type, "Filesystem resize not needed or automatic");
-        }
-
-        // Get final capacity after resize
-        let capacity_bytes = Self::get_volume_capacity(volume_path).await?;
+        let capacity_bytes = platform::expand_volume(&req).await?;
 
         info!(
             volume_id = %volume_id,
