@@ -22,7 +22,7 @@ fn expansion_preserves_capacity_and_serializes_cancelled_requests() {
     std::fs::write(&command, r#"#!/bin/sh
 set -eu
 case "$*" in
-  'list -H -o name audit/csi') exit 0;;
+  'list -H -o name audit/csi'|'list -H -o name audit/csi/vol') exit 0;;
   'list -H -r -t volume -o name,user:csi:metadata audit/csi')
     printf '%s\t%s\n' 'audit/csi/vol' '{"schema_version":3,"export_type":"ISCSI","target_name":"iqn.2024-01.org.freebsd.csi:vol","lun_id":0,"parameters":{},"created_at":0}'
     exit 0;;

@@ -27,6 +27,8 @@ use crate::zfs::{
 };
 
 /// Generated protobuf types and service trait
+// async_trait emits must_use on futures that Rust 1.99 already marks must_use.
+#[allow(clippy::double_must_use)]
 pub mod proto {
     tonic::include_proto!("ctld_agent.v1");
 }
