@@ -304,19 +304,26 @@ impl ZfsManager {
         Err(ZfsError::DatasetBusy(full_name))
     }
 
-    /// Resize a ZFS volume
+    /// Grow a ZFS volume, returning its actual capacity without ever shrinking it.
+    /// The mutable borrow keeps the capacity check and update serialized.
     #[instrument(skip(self))]
-    pub async fn resize_volume(&self, name: &str, new_size_bytes: u64) -> Result<()> {
+    pub async fn resize_volume(&mut self, name: &str, new_size_bytes: u64) -> Result<u64> {
         // Validate name for command injection prevention
         validate_name(name)?;
 
         let full_name = self.full_path(name);
         info!(volume = %full_name, new_size_bytes, "Resizing ZFS volume");
 
-        // Check if volume exists
-        if !self.dataset_exists(&full_name).await? {
-            warn!(volume = %full_name, "Volume not found for resize");
-            return Err(ZfsError::DatasetNotFound(full_name));
+        let current_size = self
+            .get_dataset_info(&full_name)
+            .await?
+            .volsize
+            .filter(|size| *size > 0)
+            .ok_or_else(|| {
+                ZfsError::ParseError(format!("missing or zero volsize for {full_name}"))
+            })?;
+        if new_size_bytes <= current_size {
+            return Ok(current_size);
         }
 
         let output = Command::new("zfs")
@@ -330,7 +337,15 @@ impl ZfsManager {
         }
 
         info!(volume = %full_name, new_size_bytes, "ZFS volume resized successfully");
-        Ok(())
+        let actual_size = self
+            .get_dataset_info(&full_name)
+            .await?
+            .volsize
+            .filter(|size| *size >= new_size_bytes)
+            .ok_or_else(|| {
+                ZfsError::ParseError(format!("invalid volsize after resizing {full_name}"))
+            })?;
+        Ok(actual_size)
     }
 
     /// Create a snapshot of a volume

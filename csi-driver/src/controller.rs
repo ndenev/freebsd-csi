@@ -546,10 +546,15 @@ impl csi::controller_server::Controller for ControllerService {
             capacity_range.limit_bytes
         };
 
-        if new_size_bytes <= 0 {
+        if capacity_range.required_bytes < 0
+            || capacity_range.limit_bytes < 0
+            || (capacity_range.limit_bytes > 0
+                && capacity_range.required_bytes > capacity_range.limit_bytes)
+            || new_size_bytes <= 0
+        {
             timer.failure("invalid_argument");
             return Err(Status::invalid_argument(
-                "Required or limit bytes must be positive",
+                "Capacity range must be nonnegative, specify a positive size, and have required_bytes <= limit_bytes when a limit is set",
             ));
         }
 
@@ -572,11 +577,16 @@ impl csi::controller_server::Controller for ControllerService {
             }
         };
 
-        info!(
-            volume_id = %volume_id,
-            actual_size = actual_size,
-            "Volume expanded successfully"
-        );
+        if actual_size < new_size_bytes
+            || (capacity_range.limit_bytes > 0 && actual_size > capacity_range.limit_bytes)
+        {
+            timer.failure("out_of_range");
+            return Err(Status::out_of_range(format!(
+                "Actual volume capacity {actual_size} is outside the requested range"
+            )));
+        }
+
+        info!(volume_id = %volume_id, actual_size, "Volume expanded successfully");
 
         timer.success();
         Ok(Response::new(csi::ControllerExpandVolumeResponse {
@@ -1054,6 +1064,25 @@ impl csi::controller_server::Controller for ControllerService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn expansion_rejects_invalid_ranges_before_contacting_agent() {
+        use crate::csi::controller_server::Controller;
+        let service = ControllerService::new("invalid endpoint".into());
+        for (required_bytes, limit_bytes) in [(-1, 4096), (4096, -1), (8192, 4096), (0, 0)] {
+            let result = service
+                .controller_expand_volume(Request::new(csi::ControllerExpandVolumeRequest {
+                    volume_id: "vol".into(),
+                    capacity_range: Some(csi::CapacityRange {
+                        required_bytes,
+                        limit_bytes,
+                    }),
+                    ..Default::default()
+                }))
+                .await;
+            assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+        }
+    }
 
     #[test]
     fn test_parse_export_type() {

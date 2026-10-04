@@ -462,11 +462,15 @@ volumeBindingMode: Immediate
    On Linux:
    ```bash
    # Debian/Ubuntu
-   apt-get install protobuf-compiler
+   apt-get install protobuf-compiler libblkid-dev
 
    # Install Rust
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
+
+   The Linux node driver links to libblkid for read-only filesystem probing.
+   Its runtime needs `libblkid1`; the container image includes it. To run the
+   filesystem image tests on Linux, also install `e2fsprogs`.
 
 2. **Clone and build**
 

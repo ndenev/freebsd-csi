@@ -27,6 +27,8 @@ use crate::zfs::{
 };
 
 /// Generated protobuf types and service trait
+// async_trait emits must_use on futures that Rust 1.99 already marks must_use.
+#[allow(clippy::double_must_use)]
 pub mod proto {
     tonic::include_proto!("ctld_agent.v1");
 }
@@ -1727,26 +1729,33 @@ impl StorageAgent for StorageService {
             }
         };
 
-        // Resize ZFS volume
-        {
-            let zfs = self.zfs.read().await;
-            if let Err(e) = zfs
-                .resize_volume(&metadata.name, req.new_size_bytes as u64)
+        // ponytail: the manager write lock serializes all storage during resize;
+        // use per-volume locks if resize contention becomes significant.
+        // Keep the lock in a task that survives RPC cancellation: dropping a
+        // subprocess future does not stop zfs, and a late smaller set could
+        // otherwise overtake a later, larger expansion.
+        let mut zfs = self.zfs.clone().write_owned().await;
+        let resize_result = tokio::spawn(async move {
+            zfs.resize_volume(&metadata.name, req.new_size_bytes as u64)
                 .await
-            {
+        })
+        .await
+        .map_err(|e| Status::internal(format!("resize task failed: {e}")))?;
+        let actual_size = match resize_result {
+            Ok(size) => size,
+            Err(e) => {
                 timer.failure("zfs_error");
-                return Err(Status::internal(format!("failed to resize volume: {}", e)));
+                return Err(Status::internal(format!("failed to resize volume: {e}")));
             }
-        }
+        };
+        let actual_size = i64::try_from(actual_size)
+            .map_err(|_| Status::internal("Volume capacity exceeds i64::MAX"))?;
 
-        info!(
-            "Expanded volume {} to {} bytes",
-            req.volume_id, req.new_size_bytes
-        );
+        info!("Expanded volume {} to {} bytes", req.volume_id, actual_size);
 
         timer.success();
         Ok(Response::new(ExpandVolumeResponse {
-            size_bytes: req.new_size_bytes,
+            size_bytes: actual_size,
         }))
     }
 

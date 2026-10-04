@@ -9,6 +9,8 @@
 //! - Platform-specific mount/unmount operations
 
 /// CSI proto generated types
+// async_trait emits must_use on futures that Rust 1.99 already marks must_use.
+#[allow(clippy::double_must_use)]
 pub mod csi {
     tonic::include_proto!("csi.v1");
 }

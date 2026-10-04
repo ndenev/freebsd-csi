@@ -616,7 +616,7 @@ impl csi::node_server::Node for NodeService {
             let fs_type =
                 Self::get_fs_type_from_capability(&req.volume_capability, volume_context)?;
 
-            if platform::needs_formatting(&device).await? {
+            if platform::needs_formatting(&device, fs_type).await? {
                 platform::format_device(&device, fs_type).await?;
             }
 

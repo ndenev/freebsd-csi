@@ -1116,27 +1116,19 @@ pub async fn format_device(device: &str, fs_type: &str) -> PlatformResult<()> {
     Ok(())
 }
 
-/// Check if a device needs formatting (has no valid filesystem).
-pub async fn needs_formatting(device: &str) -> PlatformResult<bool> {
-    // Use blkid to check for existing filesystem
-    let output = Command::new("blkid")
-        .args(["-p", device])
-        .output()
+/// Format only when probing succeeds without detecting any signature.
+#[cfg(target_os = "linux")]
+pub async fn needs_formatting(device: &str, fs_type: &str) -> PlatformResult<bool> {
+    let device = device.to_owned();
+    let fs_type = fs_type.to_owned();
+    tokio::task::spawn_blocking(move || super::blkid::needs_formatting(&device, &fs_type))
         .await
-        .map_err(|e| {
-            error!(error = %e, "Failed to execute blkid");
-            Status::internal(format!("Failed to check device filesystem: {}", e))
-        })?;
+        .map_err(|e| Status::internal(format!("Filesystem probe task failed: {e}")))?
+}
 
-    // blkid returns non-zero if no filesystem found
-    if !output.status.success() {
-        return Ok(true); // No filesystem, needs formatting
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // If output contains TYPE=, there's a filesystem
-    Ok(!stdout.contains("TYPE="))
+#[cfg(not(target_os = "linux"))]
+pub async fn needs_formatting(_device: &str, _fs_type: &str) -> PlatformResult<bool> {
+    Err(Status::unimplemented("Filesystem staging requires Linux"))
 }
 
 /// Mount a device to a target path.
