@@ -1,27 +1,11 @@
 //! Refresh the mounted volume's transport before growing its filesystem.
 use std::path::{Path, PathBuf};
 
-use tokio::{fs, process::Command};
+use tokio::fs;
 use tonic::Status;
 
+use crate::command::text as command;
 use crate::csi::{CapacityRange, NodeExpandVolumeRequest, volume_capability::AccessType};
-
-async fn command(program: &str, args: &[&str]) -> Result<String, Status> {
-    let output = Command::new(program)
-        .args(args)
-        .env("LC_ALL", "C")
-        .output()
-        .await
-        .map_err(|e| Status::internal(format!("{program}: {e}")))?;
-    if !output.status.success() {
-        return Err(Status::internal(format!(
-            "{program} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    String::from_utf8(output.stdout)
-        .map_err(|_| Status::internal(format!("{program} returned invalid UTF-8")))
-}
 
 async fn read(path: impl AsRef<Path>) -> Result<String, Status> {
     let path = path.as_ref();

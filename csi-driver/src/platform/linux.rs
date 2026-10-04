@@ -13,6 +13,7 @@ use tonic::Status;
 use tracing::{debug, error, info, warn};
 
 use super::PlatformResult;
+use crate::command;
 use crate::types::{Endpoint, NvmeofConnectOptions};
 
 /// Default filesystem type for Linux
@@ -1065,36 +1066,10 @@ pub async fn format_device(device: &str, fs_type: &str) -> PlatformResult<()> {
 
     match fs_type.to_lowercase().as_str() {
         "ext4" => {
-            let output = Command::new("mkfs.ext4")
-                .args(["-F", device]) // -F to force (don't prompt)
-                .output()
-                .await
-                .map_err(|e| {
-                    error!(error = %e, "Failed to execute mkfs.ext4");
-                    Status::internal(format!("Failed to execute mkfs.ext4: {}", e))
-                })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                error!(stderr = %stderr, "mkfs.ext4 failed");
-                return Err(Status::internal(format!("mkfs.ext4 failed: {}", stderr)));
-            }
+            command::run("mkfs.ext4", &["-F", device]).await?;
         }
         "xfs" => {
-            let output = Command::new("mkfs.xfs")
-                .args(["-f", device]) // -f to force
-                .output()
-                .await
-                .map_err(|e| {
-                    error!(error = %e, "Failed to execute mkfs.xfs");
-                    Status::internal(format!("Failed to execute mkfs.xfs: {}", e))
-                })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                error!(stderr = %stderr, "mkfs.xfs failed");
-                return Err(Status::internal(format!("mkfs.xfs failed: {}", stderr)));
-            }
+            command::run("mkfs.xfs", &["-f", device]).await?;
         }
         "zfs" => {
             // ZFS handles formatting automatically
@@ -1143,20 +1118,7 @@ pub async fn mount_device(device: &str, target: &str, fs_type: &str) -> Platform
 
     let fs_type_lower = fs_type.to_lowercase();
 
-    let output = Command::new("mount")
-        .args(["-t", &fs_type_lower, device, target])
-        .output()
-        .await
-        .map_err(|e| {
-            error!(error = %e, "Failed to execute mount");
-            Status::internal(format!("Failed to execute mount: {}", e))
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        error!(stderr = %stderr, "mount failed");
-        return Err(Status::internal(format!("mount failed: {}", stderr)));
-    }
+    command::run("mount", &["-t", &fs_type_lower, device, target]).await?;
 
     Ok(())
 }
@@ -1174,20 +1136,7 @@ pub async fn bind_mount(source: &str, target: &str) -> PlatformResult<()> {
         ))
     })?;
 
-    let output = Command::new("mount")
-        .args(["--bind", source, target])
-        .output()
-        .await
-        .map_err(|e| {
-            error!(error = %e, "Failed to execute mount --bind");
-            Status::internal(format!("Failed to execute bind mount: {}", e))
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        error!(stderr = %stderr, "bind mount failed");
-        return Err(Status::internal(format!("bind mount failed: {}", stderr)));
-    }
+    command::run("mount", &["--bind", source, target]).await?;
 
     Ok(())
 }
