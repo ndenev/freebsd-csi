@@ -137,6 +137,9 @@ jobs:
           version: "25.x"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install libblkid development files
+        run: sudo apt-get update && sudo apt-get install -y libblkid-dev
+
       - name: Build release binary
         run: cargo build -p csi-driver --release
 

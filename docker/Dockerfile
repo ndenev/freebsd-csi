@@ -9,6 +9,7 @@ FROM rust:1.92-slim-bookworm AS builder
 RUN apt-get update && apt-get install -y \
     protobuf-compiler \
     libprotobuf-dev \
+    libblkid-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
@@ -45,6 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xfsprogs \
     # Mount utilities
     mount \
+    libblkid1 \
     # TLS support
     ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

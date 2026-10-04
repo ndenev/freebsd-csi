@@ -14,6 +14,8 @@
 //! platform::format_device(&device, "ext4")?;
 //! ```
 
+#[cfg(target_os = "linux")]
+mod blkid;
 mod linux;
 
 use tonic::Status;

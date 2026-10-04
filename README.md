@@ -232,6 +232,9 @@ For the complete metrics reference and Grafana dashboard examples, see [Metrics 
 
 ## Building from Source
 
+On Debian or Ubuntu, install `protobuf-compiler` and `libblkid-dev` before
+building the Linux driver. See [build prerequisites](docs/installation.md#cargo-build-instructions).
+
 ```bash
 # Clone the repository
 git clone https://github.com/ndenev/freebsd-csi
