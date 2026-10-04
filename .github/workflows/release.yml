@@ -262,14 +262,16 @@ jobs:
 
           # Determine FreeBSD version
           case "${FREEBSD_MAJOR}" in
-            14) FREEBSD_VERSION="14.3-RELEASE" ;;
-            15) FREEBSD_VERSION="15.0-RELEASE" ;;
+            14) FREEBSD_VERSION="14.3-RELEASE"; RELEASE_ROOT="https://archive.freebsd.org/old-releases/amd64/amd64" ;;
+            15) FREEBSD_VERSION="15.0-RELEASE"; RELEASE_ROOT="https://download.freebsd.org/releases/amd64/amd64" ;;
             *)  echo "Unknown FreeBSD version"; exit 1 ;;
           esac
 
           echo "Downloading FreeBSD ${FREEBSD_VERSION} base..."
-          curl -L "https://download.freebsd.org/releases/amd64/${FREEBSD_VERSION}/base.txz" | \
-            tar -xJf - -C /tmp/freebsd-sysroot ./lib ./usr/lib ./usr/include
+          curl --fail --location --retry 3 "${RELEASE_ROOT}/${FREEBSD_VERSION}/MANIFEST" -o /tmp/freebsd-MANIFEST
+          curl --fail --location --retry 3 "${RELEASE_ROOT}/${FREEBSD_VERSION}/base.txz" -o /tmp/freebsd-base.txz
+          awk '$1 == "base.txz" { print $2 "  /tmp/freebsd-base.txz" }' /tmp/freebsd-MANIFEST | sha256sum --check --strict
+          tar -xJf /tmp/freebsd-base.txz -C /tmp/freebsd-sysroot ./lib ./usr/lib ./usr/include
 
       - name: Build libucl for FreeBSD (static)
         run: |
@@ -330,7 +332,7 @@ jobs:
       matrix:
         include:
           - freebsd: '14'
-            freebsd_release: '14.2'
+            freebsd_release: '14.3'
           - freebsd: '15'
             freebsd_release: '15.0'
     steps:
