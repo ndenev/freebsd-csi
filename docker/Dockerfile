@@ -22,7 +22,7 @@ COPY csi-driver/ csi-driver/
 COPY ctld-agent/ ctld-agent/
 
 # Build only csi-driver (ctld-agent runs natively on FreeBSD, not in container)
-RUN cargo build -p csi-driver --release
+RUN cargo build --locked -p csi-driver --release
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
