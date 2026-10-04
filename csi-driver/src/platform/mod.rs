@@ -16,7 +16,9 @@
 
 #[cfg(target_os = "linux")]
 mod blkid;
+mod expansion;
 mod linux;
+pub use expansion::expand as expand_volume;
 
 use tonic::Status;
 

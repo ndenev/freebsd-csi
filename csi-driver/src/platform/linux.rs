@@ -13,6 +13,7 @@ use tonic::Status;
 use tracing::{debug, error, info, warn};
 
 use super::PlatformResult;
+use crate::command;
 use crate::types::{Endpoint, NvmeofConnectOptions};
 
 /// Default filesystem type for Linux
@@ -233,109 +234,22 @@ pub async fn connect_iscsi(
                 "Configuring CHAP authentication"
             );
 
-            // Set authentication method to CHAP
-            let auth_method_output = Command::new("iscsiadm")
-                .args([
-                    "-m",
-                    "node",
-                    "-T",
-                    target_iqn,
-                    "-p",
-                    &portal,
-                    "-o",
-                    "update",
-                    "-n",
-                    "node.session.auth.authmethod",
-                    "-v",
-                    "CHAP",
-                ])
-                .output()
-                .await
-                .map_err(|e| {
-                    error!(error = %e, "Failed to set CHAP auth method");
-                    Status::internal(format!("Failed to set CHAP auth method: {}", e))
-                })?;
-
-            if !auth_method_output.status.success() {
-                let stderr = String::from_utf8_lossy(&auth_method_output.stderr);
-                error!(stderr = %stderr, "Failed to set CHAP auth method");
-                return Err(Status::internal(format!(
-                    "Failed to set CHAP auth method: {}",
-                    stderr
-                )));
-            }
-
-            // Set CHAP username
-            let username_output = Command::new("iscsiadm")
-                .args([
-                    "-m",
-                    "node",
-                    "-T",
-                    target_iqn,
-                    "-p",
-                    &portal,
-                    "-o",
-                    "update",
-                    "-n",
-                    "node.session.auth.username",
-                    "-v",
-                    &chap.username,
-                ])
-                .output()
-                .await
-                .map_err(|e| {
-                    error!(error = %e, "Failed to set CHAP username");
-                    Status::internal(format!("Failed to set CHAP username: {}", e))
-                })?;
-
-            if !username_output.status.success() {
-                let stderr = String::from_utf8_lossy(&username_output.stderr);
-                error!(stderr = %stderr, "Failed to set CHAP username");
-                return Err(Status::internal(format!(
-                    "Failed to set CHAP username: {}",
-                    stderr
-                )));
-            }
-
-            // Set CHAP password
-            let password_output = Command::new("iscsiadm")
-                .args([
-                    "-m",
-                    "node",
-                    "-T",
-                    target_iqn,
-                    "-p",
-                    &portal,
-                    "-o",
-                    "update",
-                    "-n",
-                    "node.session.auth.password",
-                    "-v",
-                    &chap.password,
-                ])
-                .output()
-                .await
-                .map_err(|e| {
-                    error!(error = %e, "Failed to set CHAP password");
-                    Status::internal(format!("Failed to set CHAP password: {}", e))
-                })?;
-
-            if !password_output.status.success() {
-                let stderr = String::from_utf8_lossy(&password_output.stderr);
-                error!(stderr = %stderr, "Failed to set CHAP password");
-                return Err(Status::internal(format!(
-                    "Failed to set CHAP password: {}",
-                    stderr
-                )));
-            }
-
-            // Configure mutual CHAP if provided
-            if let (Some(mutual_user), Some(mutual_pass)) =
-                (&chap.mutual_username, &chap.mutual_password)
+            let mut fields = vec![
+                ("authmethod", "CHAP"),
+                ("username", chap.username.as_str()),
+                ("password", chap.password.as_str()),
+            ];
+            if let (Some(username), Some(password)) = (&chap.mutual_username, &chap.mutual_password)
             {
-                // Set mutual CHAP username (target authenticates to initiator)
-                let mutual_user_output = Command::new("iscsiadm")
-                    .args([
+                fields.extend([
+                    ("username_in", username.as_str()),
+                    ("password_in", password.as_str()),
+                ]);
+            }
+            for (field, value) in fields {
+                command::run(
+                    "iscsiadm",
+                    &[
                         "-m",
                         "node",
                         "-T",
@@ -345,59 +259,17 @@ pub async fn connect_iscsi(
                         "-o",
                         "update",
                         "-n",
-                        "node.session.auth.username_in",
+                        &format!("node.session.auth.{field}"),
                         "-v",
-                        mutual_user,
-                    ])
-                    .output()
-                    .await
-                    .map_err(|e| {
-                        error!(error = %e, "Failed to set mutual CHAP username");
-                        Status::internal(format!("Failed to set mutual CHAP username: {}", e))
-                    })?;
-
-                if !mutual_user_output.status.success() {
-                    let stderr = String::from_utf8_lossy(&mutual_user_output.stderr);
-                    error!(stderr = %stderr, "Failed to set mutual CHAP username");
-                    return Err(Status::internal(format!(
-                        "Failed to set mutual CHAP username: {}",
-                        stderr
-                    )));
-                }
-
-                // Set mutual CHAP password
-                let mutual_pass_output = Command::new("iscsiadm")
-                    .args([
-                        "-m",
-                        "node",
-                        "-T",
-                        target_iqn,
-                        "-p",
-                        &portal,
-                        "-o",
-                        "update",
-                        "-n",
-                        "node.session.auth.password_in",
-                        "-v",
-                        mutual_pass,
-                    ])
-                    .output()
-                    .await
-                    .map_err(|e| {
-                        error!(error = %e, "Failed to set mutual CHAP password");
-                        Status::internal(format!("Failed to set mutual CHAP password: {}", e))
-                    })?;
-
-                if !mutual_pass_output.status.success() {
-                    let stderr = String::from_utf8_lossy(&mutual_pass_output.stderr);
-                    error!(stderr = %stderr, "Failed to set mutual CHAP password");
-                    return Err(Status::internal(format!(
-                        "Failed to set mutual CHAP password: {}",
-                        stderr
-                    )));
-                }
-
-                debug!(portal = %portal, "Mutual CHAP configured");
+                        value,
+                    ],
+                )
+                .await
+                .map_err(|_| {
+                    // Authentication commands may echo credentials in stderr.
+                    error!(field, "Failed to set CHAP field");
+                    Status::internal(format!("Failed to set CHAP {field}"))
+                })?;
             }
 
             info!(portal = %portal, "CHAP authentication configured");
@@ -1065,36 +937,10 @@ pub async fn format_device(device: &str, fs_type: &str) -> PlatformResult<()> {
 
     match fs_type.to_lowercase().as_str() {
         "ext4" => {
-            let output = Command::new("mkfs.ext4")
-                .args(["-F", device]) // -F to force (don't prompt)
-                .output()
-                .await
-                .map_err(|e| {
-                    error!(error = %e, "Failed to execute mkfs.ext4");
-                    Status::internal(format!("Failed to execute mkfs.ext4: {}", e))
-                })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                error!(stderr = %stderr, "mkfs.ext4 failed");
-                return Err(Status::internal(format!("mkfs.ext4 failed: {}", stderr)));
-            }
+            command::run("mkfs.ext4", &["-F", device]).await?;
         }
         "xfs" => {
-            let output = Command::new("mkfs.xfs")
-                .args(["-f", device]) // -f to force
-                .output()
-                .await
-                .map_err(|e| {
-                    error!(error = %e, "Failed to execute mkfs.xfs");
-                    Status::internal(format!("Failed to execute mkfs.xfs: {}", e))
-                })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                error!(stderr = %stderr, "mkfs.xfs failed");
-                return Err(Status::internal(format!("mkfs.xfs failed: {}", stderr)));
-            }
+            command::run("mkfs.xfs", &["-f", device]).await?;
         }
         "zfs" => {
             // ZFS handles formatting automatically
@@ -1143,20 +989,7 @@ pub async fn mount_device(device: &str, target: &str, fs_type: &str) -> Platform
 
     let fs_type_lower = fs_type.to_lowercase();
 
-    let output = Command::new("mount")
-        .args(["-t", &fs_type_lower, device, target])
-        .output()
-        .await
-        .map_err(|e| {
-            error!(error = %e, "Failed to execute mount");
-            Status::internal(format!("Failed to execute mount: {}", e))
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        error!(stderr = %stderr, "mount failed");
-        return Err(Status::internal(format!("mount failed: {}", stderr)));
-    }
+    command::run("mount", &["-t", &fs_type_lower, device, target]).await?;
 
     Ok(())
 }
@@ -1174,20 +1007,7 @@ pub async fn bind_mount(source: &str, target: &str) -> PlatformResult<()> {
         ))
     })?;
 
-    let output = Command::new("mount")
-        .args(["--bind", source, target])
-        .output()
-        .await
-        .map_err(|e| {
-            error!(error = %e, "Failed to execute mount --bind");
-            Status::internal(format!("Failed to execute bind mount: {}", e))
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        error!(stderr = %stderr, "bind mount failed");
-        return Err(Status::internal(format!("bind mount failed: {}", stderr)));
-    }
+    command::run("mount", &["--bind", source, target]).await?;
 
     Ok(())
 }
@@ -1270,6 +1090,83 @@ pub fn default_fs_type() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chap_updates_are_ordered_and_stop_on_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if let Ok(directory) = std::env::var("CSI_CHAP_TEST_DIR") {
+            let directory = Path::new(&directory);
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let endpoints = [Endpoint::new("192.0.2.1", 3260)];
+                let mut chap = IscsiChapCredentials {
+                    username: "test-user".into(), password: "test-secret".into(),
+                    mutual_username: Some("test-peer".into()), mutual_password: Some("test-peer-secret".into()),
+                };
+                for mutual in [true, false] {
+                    if !mutual { chap.mutual_password = None; }
+                    std::fs::write(directory.join("calls"), "").unwrap();
+                    let error = connect_iscsi("iqn.example:vol", &endpoints, Some(&chap)).await.unwrap_err();
+                    assert!(error.message().contains("login stopped by fixture"));
+                    let calls = std::fs::read_to_string(directory.join("calls")).unwrap();
+                    let updates: Vec<_> = calls.lines().filter(|line| line.contains(" -o update ")).collect();
+                    let mut expected = vec![("authmethod", "CHAP"), ("username", "test-user"), ("password", "test-secret")];
+                    if mutual { expected.extend([("username_in", "test-peer"), ("password_in", "test-peer-secret")]); }
+                    assert_eq!(updates, expected.iter().map(|(field, value)| format!(
+                        "-m node -T iqn.example:vol -p 192.0.2.1:3260 -o update -n node.session.auth.{field} -v {value}"
+                    )).collect::<Vec<_>>());
+                }
+                std::fs::write(directory.join("fail"), "").unwrap();
+                std::fs::write(directory.join("calls"), "").unwrap();
+                let error = connect_iscsi("iqn.example:vol", &endpoints, Some(&chap)).await.unwrap_err();
+                assert_eq!(error.code(), tonic::Code::Internal);
+                assert_eq!(error.message(), "Failed to set CHAP password");
+                let calls = std::fs::read_to_string(directory.join("calls")).unwrap();
+                assert!(!calls.contains("--login"));
+            });
+            return;
+        }
+        // Keep fake commands and PATH confined to a child test process.
+        let directory = std::env::temp_dir().join(format!("csi-chap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let script = directory.join("iscsiadm");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+set -eu
+cd "$CSI_CHAP_TEST_DIR"
+printf '%s\n' "$*" >> calls
+case "$*" in
+  *--login) echo 'login stopped by fixture' >&2; exit 1;;
+  *'node.session.auth.password -v'*)
+    if [ -f fail ]; then echo 'test-secret' >&2; exit 1; fi;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(std::iter::once(directory.clone()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "platform::linux::tests::chap_updates_are_ordered_and_stop_on_failure",
+                "--nocapture",
+            ])
+            .env("CSI_CHAP_TEST_DIR", &directory)
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn test_validate_fs_type_valid() {

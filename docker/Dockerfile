@@ -39,6 +39,8 @@ LABEL org.opencontainers.image.licenses="BSD-2-Clause"
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # iSCSI initiator tools
     open-iscsi \
+    # Client for resizing maps owned by the host multipathd
+    multipath-tools \
     # NVMe-oF tools
     nvme-cli \
     # Filesystem tools for formatting volumes
