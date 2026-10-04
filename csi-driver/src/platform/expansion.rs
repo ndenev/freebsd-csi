@@ -272,7 +272,7 @@ async fn expand_at(req: &NodeExpandVolumeRequest, sys: &Path) -> Result<i64, Sta
         }
     };
     let (blocks, block_size) = geometry(&output, device.fs_type == "xfs")?;
-    let mut required_blocks = requested / block_size;
+    let mut required_blocks = capacity / block_size;
     if device.fs_type == "xfs" {
         let ag_blocks = output
             .split_whitespace()
@@ -287,7 +287,7 @@ async fn expand_at(req: &NodeExpandVolumeRequest, sys: &Path) -> Result<i64, Sta
     }
     if blocks < required_blocks {
         return Err(Status::unavailable(format!(
-            "Filesystem has {blocks} blocks of {block_size} bytes; requested {requested} bytes"
+            "Filesystem has {blocks} blocks of {block_size} bytes; device has {capacity} bytes"
         )));
     }
     if resolve(req, sys).await? != device {
@@ -431,6 +431,19 @@ esac
         // Even a successful resizer cannot prove filesystem convergence.
         write("capacity", "3221225472\n");
         write("no-op", "");
+        // Do not report the larger raw capacity when an older request arrives
+        // and the filesystem still occupies only its original size.
+        let smaller = NodeExpandVolumeRequest {
+            capacity_range: Some(CapacityRange {
+                required_bytes: 2147483648,
+                limit_bytes: 0,
+            }),
+            ..req.clone()
+        };
+        assert_eq!(
+            expand_at(&smaller, &sys).await.unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
         assert_eq!(
             expand_at(&req, &sys).await.unwrap_err().code(),
             tonic::Code::Unavailable
