@@ -53,7 +53,11 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install filesystem probe dependencies
         run: sudo apt-get update && sudo apt-get install -y libblkid-dev e2fsprogs
+      - name: Create metadata-only block device fixture
+        run: sudo mknod -m 000 "$RUNNER_TEMP/csi-test-block" b 240 0
       - name: Run tests
+        env:
+          CSI_NODE_EXPANSION_TEST_BLOCK_DEVICE: ${{ runner.temp }}/csi-test-block
         run: cargo test --locked -p csi-driver --verbose
 
   test-ctld-agent:

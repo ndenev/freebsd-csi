@@ -1,10 +1,11 @@
 //! Refresh the mounted volume's transport before growing its filesystem.
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
 use tokio::fs;
 use tonic::Status;
 
-use crate::command::text as command;
+use crate::command::{run, text as command};
 use crate::csi::{CapacityRange, NodeExpandVolumeRequest, volume_capability::AccessType};
 
 async fn read(path: impl AsRef<Path>) -> Result<String, Status> {
@@ -39,12 +40,19 @@ struct Device {
 // guessed from a configurable IQN/NQN prefix. Only whole devices and direct
 // multipath maps are supported, not partitions, LVM, or encryption stacks.
 async fn resolve(req: &NodeExpandVolumeRequest, sys: &Path) -> Result<Device, Status> {
-    let block = matches!(
-        req.volume_capability
-            .as_ref()
-            .and_then(|c| c.access_type.as_ref()),
-        Some(AccessType::Block(_))
-    );
+    let block = match req
+        .volume_capability
+        .as_ref()
+        .and_then(|c| c.access_type.as_ref())
+    {
+        Some(AccessType::Block(_)) => true,
+        Some(AccessType::Mount(_)) => false,
+        None => fs::metadata(&req.volume_path)
+            .await
+            .map_err(|e| Status::unavailable(format!("Inspect volume path: {e}")))?
+            .file_type()
+            .is_block_device(),
+    };
     let output = if block {
         command("lsblk", &["-dn", "-o", "MAJ:MIN", &req.volume_path]).await?
     } else {
@@ -213,12 +221,12 @@ async fn refresh(device: &Device, sys: &Path) -> Result<(), Status> {
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         if device.nvme {
-            command("nvme", &["ns-rescan", &format!("/dev/{name}")]).await?;
+            run("nvme", &["ns-rescan", &format!("/dev/{name}")]).await?;
         } else {
             let session = name
                 .strip_prefix("session")
                 .ok_or_else(|| Status::internal("Invalid iSCSI session"))?;
-            command("iscsiadm", &["-m", "session", "-r", session, "--rescan"]).await?;
+            run("iscsiadm", &["-m", "session", "-r", session, "--rescan"]).await?;
         }
         found = true;
     }
@@ -348,11 +356,11 @@ async fn expand_at(req: &NodeExpandVolumeRequest, sys: &Path) -> Result<i64, Sta
     let output = match device.fs_type.as_str() {
         "" => return Ok(capacity as i64),
         "xfs" => {
-            command("xfs_growfs", &["-d", &req.volume_path]).await?;
+            run("xfs_growfs", &["-d", &req.volume_path]).await?;
             command("xfs_info", &[&req.volume_path]).await?
         }
         _ => {
-            command("resize2fs", &[&device.path]).await?;
+            run("resize2fs", &[&device.path]).await?;
             command("dumpe2fs", &["-h", &device.path]).await?
         }
     };
@@ -495,7 +503,7 @@ esac
         write("blocks", "524288\n");
         let mut req = NodeExpandVolumeRequest {
             volume_id: "vol".into(),
-            volume_path: "/staging/vol".into(),
+            volume_path: directory.to_str().unwrap().into(),
             capacity_range: Some(CapacityRange {
                 required_bytes: 3221225472,
                 limit_bytes: 0,
@@ -615,6 +623,29 @@ esac
         write("calls", "");
         assert_eq!(expand_at(&req, &sys).await.unwrap(), 3221225472);
         assert!(!calls().contains("growfs") && !calls().contains("resize2fs"));
+        // Linux CI supplies an unopened block inode. All commands still use
+        // the fake sysfs/CLI fixture; this only exercises real metadata lookup.
+        if let Some(device) = std::env::var_os("CSI_NODE_EXPANSION_TEST_BLOCK_DEVICE") {
+            let link = directory.join("published-block");
+            symlink(device, &link).unwrap();
+            let inferred = NodeExpandVolumeRequest {
+                volume_path: link.to_str().unwrap().into(),
+                volume_capability: None,
+                ..req.clone()
+            };
+            write("calls", "");
+            assert_eq!(expand_at(&inferred, &sys).await.unwrap(), 3221225472);
+            assert!(calls().contains("lsblk"));
+            assert!(!calls().contains("findmnt") && !calls().contains("resize2fs"));
+            assert!(!calls().contains("growfs"));
+            std::fs::remove_file(link).unwrap();
+            write("calls", "");
+            assert_eq!(
+                expand_at(&inferred, &sys).await.unwrap_err().code(),
+                tonic::Code::Unavailable
+            );
+            assert!(calls().is_empty());
+        }
         // An iSCSI disk resolves through its owning session and rescans only
         // sessions for the exact IQN, including custom configured prefixes.
         let disk = sys.join("devices/session7/target0/block/sda");
