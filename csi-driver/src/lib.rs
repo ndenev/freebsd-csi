@@ -21,6 +21,7 @@ pub mod agent {
 }
 
 pub mod agent_client;
+mod capability;
 mod command;
 pub mod controller;
 pub mod identity;
