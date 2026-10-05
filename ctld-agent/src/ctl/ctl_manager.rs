@@ -24,6 +24,65 @@ use super::ucl_config::{AuthGroup, Controller, CtlOptions, Target, ToUcl};
 /// Default path for CSI-managed targets config
 const CSI_CONFIG_PATH: &str = "/var/db/ctld-agent/csi-targets.conf";
 
+#[derive(serde::Deserialize)]
+struct LunList {
+    #[serde(rename = "lun", default)]
+    luns: Vec<Lun>,
+}
+
+#[derive(serde::Deserialize)]
+struct Lun {
+    #[serde(rename = "@id")]
+    id: u32,
+    backend_type: String,
+    size: u64,
+    blocksize: u64,
+    serial_number: String,
+    file: Option<String>,
+    ctld_name: Option<String>,
+}
+
+impl Lun {
+    fn capacity(&self) -> Result<u64> {
+        self.size
+            .checked_mul(self.blocksize)
+            .filter(|&n| n > 0)
+            .ok_or_else(|| CtlError::CommandFailed("invalid CTL capacity".into()))
+    }
+}
+
+async fn exported_lun(device: &str, name: &str) -> Result<Lun> {
+    let output = Command::new("ctladm")
+        .args(["devlist", "-x"])
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(CtlError::CommandFailed(format!(
+            "ctladm devlist: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let list: LunList = quick_xml::de::from_reader(output.stdout.as_slice())
+        .map_err(|e| CtlError::CommandFailed(format!("invalid CTL inventory: {e}")))?;
+    // Reject ambiguous or mismatched ownership rather than selecting by ID alone.
+    let mut matches = list.luns.into_iter().filter(|lun| {
+        lun.file.as_deref() == Some(device) || lun.ctld_name.as_deref() == Some(name)
+    });
+    let lun = matches
+        .next()
+        .ok_or_else(|| CtlError::TargetNotFound(name.into()))?;
+    if matches.next().is_some()
+        || lun.backend_type != "block"
+        || lun.file.as_deref() != Some(device)
+        || lun.ctld_name.as_deref() != Some(name)
+    {
+        return Err(CtlError::ConfigError(format!(
+            "CTL identity mismatch for {device} ({name})"
+        )));
+    }
+    Ok(lun)
+}
+
 /// Represents a CTL export (either iSCSI target or NVMeoF controller)
 #[derive(Debug, Clone)]
 pub struct Export {
@@ -337,6 +396,60 @@ impl CtlManager {
         self.reload_ctld().await?;
 
         Ok(())
+    }
+
+    /// Refresh and verify exported capacity while holding the manager write lock.
+    pub async fn refresh_capacity(
+        &mut self,
+        device: &str,
+        target: &str,
+        export_type: ExportType,
+        lun_id: u32,
+        capacity: u64,
+    ) -> Result<()> {
+        DevicePath::parse(device)?.validate_parent_dataset(&self.parent_dataset)?;
+        let slot = match export_type {
+            ExportType::Iscsi => "lun",
+            ExportType::Nvmeof => "nsid",
+        };
+        let name = format!("{target},{slot},{lun_id}");
+        let before = exported_lun(device, &name).await?;
+        match before.capacity()?.cmp(&capacity) {
+            std::cmp::Ordering::Equal => return Ok(()),
+            std::cmp::Ordering::Greater => {
+                return Err(CtlError::ConfigError(format!(
+                    "CTL capacity exceeds ZFS capacity for {device}"
+                )));
+            }
+            std::cmp::Ordering::Less => {}
+        }
+
+        // ctladm modify replaces backend options. Reload preserves the configured
+        // options and refreshes existing devices without rewriting the config.
+        self.reload_ctld().await?;
+        // service reload only sends SIGHUP; wait for ctld to apply the change.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let after = exported_lun(device, &name).await?;
+            if after.id != before.id
+                || after.serial_number != before.serial_number
+                || after.blocksize != before.blocksize
+            {
+                return Err(CtlError::ConfigError(format!(
+                    "CTL identity changed while resizing {device}"
+                )));
+            }
+            let actual = after.capacity()?;
+            if actual == capacity {
+                return Ok(());
+            }
+            if actual > capacity || tokio::time::Instant::now() >= deadline {
+                return Err(CtlError::CommandFailed(format!(
+                    "CTL capacity {actual} has not reached ZFS capacity {capacity} for {device}"
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Reload ctld configuration
