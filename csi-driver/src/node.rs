@@ -28,10 +28,10 @@ use tracing::{debug, error, info, warn};
 
 use std::collections::HashMap;
 
-use crate::csi;
 use crate::platform;
 use crate::platform::{IscsiChapCredentials, NvmeAuthCredentials};
 use crate::types::{Endpoints, ExportType, NvmeofConnectOptions};
+use crate::{capability, csi};
 
 /// Base IQN prefix for iSCSI targets (must match ctld-agent configuration)
 const BASE_IQN: &str = "iqn.2024-01.org.freebsd.csi";
@@ -280,38 +280,6 @@ impl NodeService {
         Ok(())
     }
 
-    /// Check if a volume capability is for block (raw device) access.
-    fn is_block_volume(volume_capability: &Option<csi::VolumeCapability>) -> bool {
-        matches!(
-            volume_capability
-                .as_ref()
-                .and_then(|cap| cap.access_type.as_ref()),
-            Some(csi::volume_capability::AccessType::Block(_))
-        )
-    }
-
-    /// Get filesystem type from volume capability, with platform default fallback.
-    fn get_fs_type_from_capability(
-        volume_capability: &Option<csi::VolumeCapability>,
-        volume_context: &std::collections::HashMap<String, String>,
-    ) -> Result<&'static str, Status> {
-        // Try to get from volume capability first
-        if let Some(cap) = volume_capability
-            && let Some(csi::volume_capability::AccessType::Mount(mount)) = &cap.access_type
-            && !mount.fs_type.is_empty()
-        {
-            return platform::validate_fs_type(&mount.fs_type);
-        }
-
-        // Fall back to volume_context
-        let fs_type_raw = volume_context
-            .get("fsType")
-            .map(|s| s.as_str())
-            .unwrap_or("");
-
-        platform::validate_fs_type(fs_type_raw)
-    }
-
     /// Check if a block volume is staged by checking for an active target session.
     ///
     /// For block volumes, "staged" means the target session is connected.
@@ -363,7 +331,11 @@ impl csi::node_server::Node for NodeService {
         let volume_id = &req.volume_id;
         let staging_target_path = &req.staging_target_path;
         let volume_context = &req.volume_context;
-        let is_block = Self::is_block_volume(&req.volume_capability);
+        let fs_type = capability::validate(
+            req.volume_capability.as_ref(),
+            req.volume_context.get("fsType").map(String::as_str),
+        )?;
+        let is_block = fs_type.is_none();
 
         if volume_id.is_empty() {
             return Err(Status::invalid_argument("Volume ID is required"));
@@ -448,19 +420,8 @@ impl csi::node_server::Node for NodeService {
             }
         };
 
-        if is_block {
-            // Block volume: connection is complete, device will be queried at publish time
-            // No local state stored - device path is discovered from session
-            info!(
-                volume_id = %volume_id,
-                device = %device,
-                "Block volume staged successfully (session connected)"
-            );
-        } else {
+        if let Some(fs_type) = fs_type {
             // Mount volume: format if needed and mount
-            let fs_type =
-                Self::get_fs_type_from_capability(&req.volume_capability, volume_context)?;
-
             if platform::needs_formatting(&device, fs_type).await? {
                 platform::format_device(&device, fs_type).await?;
             }
@@ -474,6 +435,14 @@ impl csi::node_server::Node for NodeService {
                 device = %device,
                 fs_type = %fs_type,
                 "Mount volume staged successfully"
+            );
+        } else {
+            // Block volume: connection is complete, device will be queried at publish time
+            // No local state stored - device path is discovered from session
+            info!(
+                volume_id = %volume_id,
+                device = %device,
+                "Block volume staged successfully (session connected)"
             );
         }
 
@@ -546,7 +515,11 @@ impl csi::node_server::Node for NodeService {
         let volume_id = &req.volume_id;
         let target_path = &req.target_path;
         let staging_target_path = &req.staging_target_path;
-        let is_block = Self::is_block_volume(&req.volume_capability);
+        let fs_type = capability::validate(
+            req.volume_capability.as_ref(),
+            req.volume_context.get("fsType").map(String::as_str),
+        )?;
+        let is_block = fs_type.is_none();
 
         if volume_id.is_empty() {
             return Err(Status::invalid_argument("Volume ID is required"));
@@ -779,6 +752,10 @@ impl csi::node_server::Node for NodeService {
         request: Request<csi::NodeExpandVolumeRequest>,
     ) -> Result<Response<csi::NodeExpandVolumeResponse>, Status> {
         let req = request.into_inner();
+        if let Some(cap) = &req.volume_capability {
+            capability::validate(Some(cap), None)?;
+        }
+
         let volume_id = &req.volume_id;
         let volume_path = &req.volume_path;
 

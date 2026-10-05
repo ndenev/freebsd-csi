@@ -358,6 +358,13 @@ These optional parameters are copied into the PV volume context and applied by t
 | `ext4` | Default. Recommended for most workloads. |
 | `xfs` | Recommended for large files and high throughput workloads. |
 
+Creation, staging, and publishing reject missing or unsupported volume
+capabilities before storage operations. Filesystem volumes reject
+`MULTI_NODE_SINGLE_WRITER` and `MULTI_NODE_MULTI_WRITER`; raw block volumes
+retain these modes for applications that coordinate access themselves. An
+explicit filesystem in the CSI capability overrides `fsType`; otherwise,
+`fsType` or the default `ext4` applies. Only `ext4` and `xfs` are supported.
+
 For volume expansion, the agent grows ZFS, reloads the existing ctld configuration
 if CTL still exports the old capacity, and verifies the exported size before
 returning success. A failed refresh returns a retryable error, including when ZFS

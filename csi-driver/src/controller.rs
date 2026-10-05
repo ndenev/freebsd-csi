@@ -14,9 +14,9 @@ use crate::agent::{
     auth_credentials,
 };
 use crate::agent_client::{AgentClient, TlsConfig};
-use crate::csi;
 use crate::metrics::{self, OperationTimer};
 use crate::types::{CloneMode, ExportType, NvmeofConnectOptions, ProvisioningMode};
+use crate::{capability, csi};
 
 // Standard CSI secret keys for iSCSI CHAP authentication
 // These follow the Linux open-iscsi naming conventions used by the CSI spec
@@ -403,6 +403,13 @@ impl csi::controller_server::Controller for ControllerService {
             return Err(Status::invalid_argument("Volume name is required"));
         }
 
+        if req.volume_capabilities.is_empty() {
+            return Err(Status::invalid_argument("Volume capabilities are required"));
+        }
+        for cap in &req.volume_capabilities {
+            capability::validate(Some(cap), req.parameters.get("fsType").map(String::as_str))?;
+        }
+
         info!(name = %name, "CreateVolume request");
 
         let size_bytes = Self::get_volume_size(req.capacity_range.as_ref());
@@ -523,6 +530,10 @@ impl csi::controller_server::Controller for ControllerService {
     ) -> Result<Response<csi::ControllerExpandVolumeResponse>, Status> {
         let timer = OperationTimer::new("expand_volume");
         let req = request.into_inner();
+        if let Some(cap) = &req.volume_capability {
+            capability::validate(Some(cap), None)?;
+        }
+
         let volume_id = &req.volume_id;
 
         if volume_id.is_empty() {
@@ -772,86 +783,28 @@ impl csi::controller_server::Controller for ControllerService {
 
         info!(volume_id = %volume_id, "ValidateVolumeCapabilities request");
 
-        // Verify the volume exists
-        let mut client = self.get_client().await?;
-        client.get_volume(volume_id).await?;
-
-        // Validate each requested capability
-        let mut unsupported_reasons: Vec<String> = Vec::new();
-
+        if req.volume_capabilities.is_empty() {
+            return Err(Status::invalid_argument("Volume capabilities are required"));
+        }
+        let fallback_fs = req
+            .volume_context
+            .get("fsType")
+            .or_else(|| req.parameters.get("fsType"));
+        let mut unsupported = None;
         for cap in &req.volume_capabilities {
-            // Determine if this is a block volume request
-            let is_block = matches!(
-                &cap.access_type,
-                Some(csi::volume_capability::AccessType::Block(_))
-            );
-
-            // Check access type (mount vs block)
-            match &cap.access_type {
-                Some(csi::volume_capability::AccessType::Mount(_)) => {
-                    // Mount volumes are fully supported
+            match capability::validate(Some(cap), fallback_fs.map(String::as_str)) {
+                Ok(_) => {}
+                Err(capability::Error::Invalid(message)) => {
+                    return Err(Status::invalid_argument(message));
                 }
-                Some(csi::volume_capability::AccessType::Block(_)) => {
-                    // Block volumes are supported (raw device access)
-                }
-                None => {
-                    unsupported_reasons
-                        .push("Volume capability must specify access type".to_string());
-                }
-            }
-
-            // Check access mode
-            if let Some(access_mode) = &cap.access_mode {
-                use csi::volume_capability::access_mode::Mode;
-                match Mode::try_from(access_mode.mode) {
-                    Ok(Mode::SingleNodeWriter) => {
-                        // ReadWriteOnce (RWO) - fully supported
-                    }
-                    Ok(Mode::SingleNodeReaderOnly) => {
-                        // ReadOnlyOnce - supported
-                    }
-                    Ok(Mode::MultiNodeReaderOnly) => {
-                        // ReadOnlyMany (ROX) - supported (iSCSI/NVMeoF allows multiple readers)
-                    }
-                    Ok(Mode::MultiNodeSingleWriter) => {
-                        // Multiple nodes attached, single writer - useful for active-passive failover.
-                        // Supported for block volumes (application/SCSI PR handles coordination).
-                        if !is_block {
-                            unsupported_reasons.push(
-                                "MULTI_NODE_SINGLE_WRITER not supported for mount volumes"
-                                    .to_string(),
-                            );
-                        }
-                    }
-                    Ok(Mode::MultiNodeMultiWriter) => {
-                        // ReadWriteMany (RWX) - supported for block volumes (application handles coordination),
-                        // but not for mount volumes (standard filesystems can't handle concurrent writers)
-                        if !is_block {
-                            unsupported_reasons.push(
-                                "MULTI_NODE_MULTI_WRITER not supported for mount volumes (requires cluster filesystem)"
-                                    .to_string(),
-                            );
-                        }
-                    }
-                    Ok(Mode::SingleNodeSingleWriter) => {
-                        // ReadWriteOncePod (RWOP) - GA in Kubernetes 1.29+
-                        // Kubernetes enforces single-pod constraint, driver just allows it
-                    }
-                    Ok(Mode::SingleNodeMultiWriter) => {
-                        // Single node, multiple writers - supported (same as RWO semantically)
-                    }
-                    Ok(Mode::Unknown) | Err(_) => {
-                        unsupported_reasons
-                            .push(format!("Unknown access mode: {}", access_mode.mode));
-                    }
-                }
+                Err(capability::Error::Unsupported(message)) => unsupported = Some(message),
             }
         }
 
-        // If any capability is unsupported, return without confirmed
-        if !unsupported_reasons.is_empty() {
-            let message = unsupported_reasons.join("; ");
-            warn!(volume_id = %volume_id, message = %message, "Volume capabilities not supported");
+        // Preserve NOT_FOUND even when the requested capability is unsupported.
+        let mut client = self.get_client().await?;
+        client.get_volume(volume_id).await?;
+        if let Some(message) = unsupported {
             return Ok(Response::new(csi::ValidateVolumeCapabilitiesResponse {
                 confirmed: None,
                 message,
