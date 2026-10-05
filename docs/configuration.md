@@ -358,6 +358,11 @@ These optional parameters are copied into the PV volume context and applied by t
 | `ext4` | Default. Recommended for most workloads. |
 | `xfs` | Recommended for large files and high throughput workloads. |
 
+For volume expansion, the agent grows ZFS, reloads the existing ctld configuration
+if CTL still exports the old capacity, and verifies the exported size before
+returning success. A failed refresh returns a retryable error, including when ZFS
+already has the requested size. The node then refreshes its device and filesystem.
+
 #### Example StorageClasses
 
 **iSCSI with ext4 (Linux workers):**

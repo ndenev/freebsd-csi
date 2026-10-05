@@ -1735,17 +1735,53 @@ impl StorageAgent for StorageService {
         // subprocess future does not stop zfs, and a late smaller set could
         // otherwise overtake a later, larger expansion.
         let mut zfs = self.zfs.clone().write_owned().await;
+        let ctl = self.ctl.clone();
         let resize_result = tokio::spawn(async move {
-            zfs.resize_volume(&metadata.name, req.new_size_bytes as u64)
+            let persisted = zfs
+                .get_volume_metadata(&metadata.name)
                 .await
+                .map_err(|e| Status::internal(format!("failed to read volume metadata: {e}")))?;
+            let MissingMetadataLookup::Found(persisted) = persisted else {
+                return Err(Status::failed_precondition(
+                    "volume no longer has CSI metadata",
+                ));
+            };
+            if persisted.deletion_pending
+                || persisted.target_name != metadata.target_name
+                || ctl_to_proto_export_type(persisted.export_type) != metadata.export_type
+                || i64::from(persisted.lun_id.unwrap_or(0)) != i64::from(metadata.lun_id)
+            {
+                return Err(Status::failed_precondition(
+                    "volume is being deleted or its identity changed",
+                ));
+            }
+            // Serialize against configuration writes/reloads through verification,
+            // including when the requesting RPC is cancelled.
+            let mut ctl = ctl.write_owned().await;
+            let actual = zfs
+                .resize_volume(&metadata.name, req.new_size_bytes as u64)
+                .await
+                .map_err(|e| Status::internal(format!("failed to resize volume: {e}")))?;
+            ctl.refresh_capacity(
+                &zfs.get_device_path(&metadata.name),
+                &persisted.target_name,
+                persisted.export_type,
+                persisted.lun_id.unwrap_or(0),
+                actual,
+            )
+            .await
+            .map_err(|e| {
+                Status::unavailable(format!("failed to refresh exported capacity: {e}"))
+            })?;
+            Ok(actual)
         })
         .await
         .map_err(|e| Status::internal(format!("resize task failed: {e}")))?;
         let actual_size = match resize_result {
             Ok(size) => size,
             Err(e) => {
-                timer.failure("zfs_error");
-                return Err(Status::internal(format!("failed to resize volume: {e}")));
+                timer.failure("resize_error");
+                return Err(e);
             }
         };
         let actual_size = i64::try_from(actual_size)
