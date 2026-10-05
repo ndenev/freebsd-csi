@@ -15,6 +15,17 @@ pub(crate) enum Error {
     Unsupported(String),
 }
 
+impl Error {
+    /// Staging/publishing use FAILED_PRECONDITION for unsupported capabilities.
+    /// Creation and expansion retain INVALID_ARGUMENT via the default conversion.
+    pub(crate) fn into_stage_publish_status(self) -> Status {
+        match self {
+            Self::Invalid(message) => Status::invalid_argument(message),
+            Self::Unsupported(message) => Status::failed_precondition(message),
+        }
+    }
+}
+
 impl From<Error> for Status {
     fn from(error: Error) -> Self {
         Status::invalid_argument(error.to_string())
@@ -177,6 +188,11 @@ mod tests {
     }
 
     async fn exercise_services(root: &Path) {
+        // This test runs alone in the child, so a global recorder is isolated too.
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let metrics = recorder.handle();
+        metrics::set_global_recorder(recorder).unwrap();
+        use tonic::Code::{FailedPrecondition, InvalidArgument};
         // A live listening socket detects even an attempted agent connection.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -186,22 +202,28 @@ mod tests {
         let stage = root.join("stage").to_str().unwrap().to_owned();
         let publish = root.join("publish").to_str().unwrap().to_owned();
         let invalid = [
-            None,
-            Some(VolumeCapability::default()),
-            Some(VolumeCapability {
-                access_mode: None,
-                ..cap(1, None)
-            }),
-            Some(VolumeCapability {
-                access_type: None,
-                ..cap(1, None)
-            }),
-            Some(cap(0, None)),
-            Some(cap(99, Some("ext4"))),
-            Some(cap(4, Some("ext4"))),
-            Some(cap(5, Some("xfs"))),
-            Some(cap(1, Some("ufs"))),
-            Some(cap(1, Some("ntfs"))),
+            (None, InvalidArgument),
+            (Some(VolumeCapability::default()), InvalidArgument),
+            (
+                Some(VolumeCapability {
+                    access_mode: None,
+                    ..cap(1, None)
+                }),
+                InvalidArgument,
+            ),
+            (
+                Some(VolumeCapability {
+                    access_type: None,
+                    ..cap(1, None)
+                }),
+                InvalidArgument,
+            ),
+            (Some(cap(0, None)), InvalidArgument),
+            (Some(cap(99, Some("ext4"))), InvalidArgument),
+            (Some(cap(4, Some("ext4"))), FailedPrecondition),
+            (Some(cap(5, Some("xfs"))), FailedPrecondition),
+            (Some(cap(1, Some("ufs"))), FailedPrecondition),
+            (Some(cap(1, Some("ntfs"))), FailedPrecondition),
         ];
         for protocol in ["iscsi", "nvmeof"] {
             let context = HashMap::from([
@@ -223,7 +245,7 @@ mod tests {
                     .into(),
                 ),
             ]);
-            for capability in &invalid {
+            for (capability, node_code) in &invalid {
                 reject_all(
                     &controller,
                     &node,
@@ -231,6 +253,7 @@ mod tests {
                     context.clone(),
                     &stage,
                     &publish,
+                    *node_code,
                 )
                 .await;
             }
@@ -244,8 +267,27 @@ mod tests {
                 context,
                 &stage,
                 &publish,
+                FailedPrecondition,
             )
             .await;
+        }
+        let rendered = metrics.render();
+        // Each protocol submits two CreateVolume calls per case, plus the bad
+        // filesystem fallback. Expansion skips missing capabilities and that fallback.
+        for (operation, count) in [
+            ("create_volume", 4 * (invalid.len() + 1)),
+            ("expand_volume", 2 * (invalid.len() - 1)),
+        ] {
+            assert!(rendered.lines().any(|line| line == format!(
+                "csi_operations_total{{operation=\"{operation}\",status=\"invalid_argument\"}} {count}"
+            )), "Missing rejected-operation counter: {rendered}");
+            assert!(
+                rendered.lines().any(|line| line
+                    == format!(
+                        "csi_operation_duration_seconds_count{{operation=\"{operation}\"}} {count}"
+                    )),
+                "Missing duration observations: {rendered}"
+            );
         }
         assert_eq!(
             listener.accept().unwrap_err().kind(),
@@ -265,6 +307,7 @@ mod tests {
         context: HashMap<String, String>,
         stage: &str,
         publish: &str,
+        node_code: tonic::Code,
     ) {
         // A timeout also makes a misplaced agent call fail instead of hanging the test.
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -302,7 +345,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code(),
-                tonic::Code::InvalidArgument
+                node_code
             );
             assert_eq!(
                 node.node_publish_volume(Request::new(csi::NodePublishVolumeRequest {
@@ -316,7 +359,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code(),
-                tonic::Code::InvalidArgument
+                node_code
             );
             // The validation RPC returns malformed requests before its read-only existence lookup.
             if capability

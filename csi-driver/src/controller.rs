@@ -404,10 +404,16 @@ impl csi::controller_server::Controller for ControllerService {
         }
 
         if req.volume_capabilities.is_empty() {
+            timer.failure("invalid_argument");
             return Err(Status::invalid_argument("Volume capabilities are required"));
         }
         for cap in &req.volume_capabilities {
-            capability::validate(Some(cap), req.parameters.get("fsType").map(String::as_str))?;
+            if let Err(error) =
+                capability::validate(Some(cap), req.parameters.get("fsType").map(String::as_str))
+            {
+                timer.failure("invalid_argument");
+                return Err(error.into());
+            }
         }
 
         info!(name = %name, "CreateVolume request");
@@ -530,8 +536,11 @@ impl csi::controller_server::Controller for ControllerService {
     ) -> Result<Response<csi::ControllerExpandVolumeResponse>, Status> {
         let timer = OperationTimer::new("expand_volume");
         let req = request.into_inner();
-        if let Some(cap) = &req.volume_capability {
-            capability::validate(Some(cap), None)?;
+        if let Some(cap) = &req.volume_capability
+            && let Err(error) = capability::validate(Some(cap), None)
+        {
+            timer.failure("invalid_argument");
+            return Err(error.into());
         }
 
         let volume_id = &req.volume_id;

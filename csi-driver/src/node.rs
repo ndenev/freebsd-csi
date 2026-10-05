@@ -334,7 +334,8 @@ impl csi::node_server::Node for NodeService {
         let fs_type = capability::validate(
             req.volume_capability.as_ref(),
             req.volume_context.get("fsType").map(String::as_str),
-        )?;
+        )
+        .map_err(capability::Error::into_stage_publish_status)?;
         let is_block = fs_type.is_none();
 
         if volume_id.is_empty() {
@@ -518,7 +519,8 @@ impl csi::node_server::Node for NodeService {
         let fs_type = capability::validate(
             req.volume_capability.as_ref(),
             req.volume_context.get("fsType").map(String::as_str),
-        )?;
+        )
+        .map_err(capability::Error::into_stage_publish_status)?;
         let is_block = fs_type.is_none();
 
         if volume_id.is_empty() {
